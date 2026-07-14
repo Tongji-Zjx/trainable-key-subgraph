@@ -359,7 +359,9 @@ class GraphSequenceDataset(Dataset):
         if not path.is_file():
             raise FileNotFoundError(str(path))
         try:
-            payload = torch.load(str(path), map_location="cpu")
+            payload = torch.load(
+                str(path), map_location="cpu", weights_only=False
+            )
         except Exception as error:
             raise RuntimeError(
                 "failed to load {}: {}".format(assignment.sample_key, error)

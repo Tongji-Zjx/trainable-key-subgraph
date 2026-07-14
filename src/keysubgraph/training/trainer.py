@@ -391,7 +391,9 @@ def load_checkpoint(
     device: Optional[torch.device] = None,
 ) -> Dict[str, Any]:
     device = device or torch.device("cpu")
-    checkpoint = torch.load(str(Path(path).resolve()), map_location=device)
+    checkpoint = torch.load(
+        str(Path(path).resolve()), map_location=device, weights_only=False
+    )
     if checkpoint.get("schema_version") != 1:
         raise ValueError("unsupported checkpoint schema")
     if checkpoint.get("training_mode") != "soft_graph":

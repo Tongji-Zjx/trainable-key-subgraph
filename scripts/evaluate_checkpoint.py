@@ -44,7 +44,9 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     protocol = validate_data_protocol(args.protocol, PROJECT_ROOT)
-    checkpoint_payload = torch.load(str(args.checkpoint.resolve()), map_location="cpu")
+    checkpoint_payload = torch.load(
+        str(args.checkpoint.resolve()), map_location="cpu", weights_only=False
+    )
     if checkpoint_payload["data_protocol_sha256"] != file_sha256(args.protocol):
         raise ValueError("checkpoint does not match the frozen data protocol")
     if checkpoint_payload["edge_presence_threshold"] != protocol["edge_presence_threshold"]:

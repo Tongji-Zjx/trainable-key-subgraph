@@ -247,7 +247,7 @@ def inspect_sample(path: Path, config: IndexBuildConfig) -> SampleRecord:
         return _excluded_record(path, config, ["invalid_layout:" + str(error)])
 
     try:
-        payload = torch.load(str(path), map_location="cpu")
+        payload = torch.load(str(path), map_location="cpu", weights_only=False)
     except Exception as error:  # pragma: no cover - exact torch errors vary
         return _excluded_record(
             path,

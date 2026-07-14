@@ -55,7 +55,9 @@ def main() -> int:
     if args.max_samples is not None and args.max_samples < 1:
         raise ValueError("max-samples must be positive")
     protocol = validate_data_protocol(args.protocol, PROJECT_ROOT)
-    checkpoint = torch.load(str(args.checkpoint.resolve()), map_location="cpu")
+    checkpoint = torch.load(
+        str(args.checkpoint.resolve()), map_location="cpu", weights_only=False
+    )
     if checkpoint.get("data_protocol_sha256") != file_sha256(args.protocol):
         raise ValueError("checkpoint does not match the current data protocol")
     if checkpoint.get("edge_presence_threshold") != protocol["edge_presence_threshold"]:
