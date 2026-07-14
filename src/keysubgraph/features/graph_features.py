@@ -18,7 +18,6 @@ class GraphTimepointFeatures:
     degree: torch.Tensor
     delta_degree: torch.Tensor
     delta_degree_mask: torch.Tensor
-    neighbor_coordinates: torch.Tensor
     community_features: torch.Tensor
     delta_edge_weight: torch.Tensor
     delta_edge_mask: torch.Tensor
@@ -95,13 +94,6 @@ class GraphFeatureBuilder:
         )
         return delta_degree, presence, delta_edge, delta_edge_mask
 
-    def _neighbor_coordinates(
-        self, adjacency: torch.Tensor, coordinates: torch.Tensor
-    ) -> torch.Tensor:
-        weights = adjacency.abs()
-        denominator = weights.sum(dim=-1, keepdim=True).clamp_min(self.epsilon)
-        return torch.matmul(weights / denominator, coordinates)
-
     def _community_features(
         self,
         adjacency: torch.Tensor,
@@ -169,13 +161,11 @@ class GraphFeatureBuilder:
         if time_index < 0 or time_index >= sample.num_timepoints:
             raise IndexError("time_index is out of range")
         adjacency = sample.adjacency[time_index]
-        coordinates = sample.coordinates[time_index]
         communities = sample.communities[time_index]
         degree = adjacency.abs().sum(dim=-1)
         delta_degree, delta_degree_mask, delta_edge, delta_edge_mask = (
             self._temporal_differences(sample, time_index, degree)
         )
-        neighbor_coordinates = self._neighbor_coordinates(adjacency, coordinates)
         community_features = self._community_features(
             adjacency, communities, sample.edge_presence_threshold
         )
@@ -183,8 +173,6 @@ class GraphFeatureBuilder:
             (
                 degree.unsqueeze(-1),
                 delta_degree.unsqueeze(-1),
-                coordinates,
-                neighbor_coordinates,
                 community_features,
             ),
             dim=-1,
@@ -219,7 +207,6 @@ class GraphFeatureBuilder:
             degree=degree,
             delta_degree=delta_degree,
             delta_degree_mask=delta_degree_mask,
-            neighbor_coordinates=neighbor_coordinates,
             community_features=community_features,
             delta_edge_weight=delta_edge,
             delta_edge_mask=delta_edge_mask,

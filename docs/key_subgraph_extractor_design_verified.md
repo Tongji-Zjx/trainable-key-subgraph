@@ -42,8 +42,8 @@ G_b^{(m)}=\left(V_b^{(m)},A_b^{(m)},X_b^{(m)},C_b^{(m)}\right)
 
 原始数据不一定直接包含 \(X^{(m)}\)。本规范区分：
 
-- **原始输入**：邻接矩阵、社区标签、节点坐标、样本标签；
-- **派生特征**：连接强度、时间变化、邻居坐标、社区结构特征；
+- **原始输入**：邻接矩阵、社区标签、稳定节点标识、样本标签；节点坐标即使存在也只作为源数据元信息保留，不进入模型；
+- **派生特征**：连接强度、时间变化、社区结构特征；
 - **最终节点特征**：完成构造后的 \(X^{(m)}\)。
 
 在检查真实 `.pt` 文件前，不得假定字段名、对象类型或维度顺序。数据适配层应保留每个样本的原始时间片数、节点数、节点身份和图结构，禁止通过截断改变原始图。
@@ -55,7 +55,6 @@ G_b^{(m)}=\left(V_b^{(m)},A_b^{(m)},X_b^{(m)},C_b^{(m)}\right)
 ```text
 batch[b].graphs[m].adjacency       # [N_b^(m), N_b^(m)]
 batch[b].graphs[m].community       # [N_b^(m)]
-batch[b].graphs[m].coords          # [N_b^(m), D]
 batch[b].graphs[m].node_ids        # 原始稳定节点标识
 batch[b].label                     # 0 或 1
 ```
@@ -74,10 +73,6 @@ A\in\mathbb{R}^{B\times M_{max}\times N_{max}\times N_{max}}
 C\in\mathbb{Z}^{B\times M_{max}\times N_{max}}
 \]
 
-\[
-Coord\in\mathbb{R}^{B\times M_{max}\times N_{max}\times D}
-\]
-
 并必须同时提供：
 
 - `time_mask`：\([B,M_{max}]\)；
@@ -85,7 +80,7 @@ Coord\in\mathbb{R}^{B\times M_{max}\times N_{max}\times D}
 - `edge_mask`：\([B,M_{max},N_{max},N_{max}]\)，只标记满足 \(|A_{ij}|>\tau_{edge}\) 的真实非自环边；
 - `subgraph_mask`：硬候选或 Top-\(K\) 输出的有效性 mask。
 
-当节点集合在样本内所有时间片一致时，坐标可以在样本内共享为 \([N_b,D]\)，但适配层仍须能够广播到各时间片。所有 pooling、loss、预算比例和统计计算必须忽略 mask 为假的部分。padding 社区值不得与任何真实社区编号混用。
+所有 pooling、loss、预算比例和统计计算必须忽略 mask 为假的部分。padding 社区值不得与任何真实社区编号混用。空间坐标不得进入节点或边特征，也不得通过邻居聚合等间接形式进入模型。
 
 ### 2.3 跨时间节点对齐
 
@@ -165,28 +160,9 @@ delta_degree = torch.zeros_like(degree)
 delta_degree[:, 1:] = degree[:, 1:] - degree[:, :-1]
 ```
 
-### 3.3 邻居空间坐标聚合
+### 3.3 空间坐标排除规则
 
-定义节点 (v_i) 的邻居空间坐标为：
-
-\[
-ncoord_i^{(m)}=
-\sum_{j\in V_b^{(m)}}
-\frac{\left|A_{ij}^{(m)}\right|}
-{\sum_{u\in V_b^{(m)}}\left|A_{iu}^{(m)}\right|+\varepsilon}
-coord_j
-\]
-
-其中 \(\varepsilon>0\) 为数值稳定常数。
-
-参考 PyTorch 语义：
-
-```python
-weights = adj.abs()
-denominator = weights.sum(dim=-1, keepdim=True).clamp_min(epsilon)
-normalized_weights = weights / denominator
-neighbor_coords = torch.einsum("bmij,bjd->bmid", normalized_weights, coords)
-```
+空间坐标不属于本模型的节点特征。禁止将原始坐标、坐标差分、空间距离或邻居坐标聚合以直接或间接形式输入节点评分器、边评分器、图编码器或分类头。当前阶段仅改变模型特征定义；样本纳入范围仍由已冻结的数据协议决定，后续若放宽坐标有效性要求，必须另行重建样本索引并冻结新的数据协议。
 
 ### 3.4 社区结构特征
 
@@ -270,8 +246,6 @@ x_i^{(m)}=
 \left[
 d_i^{(m)};
 \Delta d_i^{(m)};
-coord_i;
-ncoord_i^{(m)};
 s_{c,i}^{(m)};
 w_{intra,+,i}^{(m)};
 w_{intra,-,i}^{(m)};
@@ -285,7 +259,7 @@ density_{c,-,i}^{(m)}
 节点特征维度为：
 
 \[
-F_x=1+1+D+D+7
+F_x=1+1+7=9
 \]
 
 单图节点特征张量为：
@@ -913,7 +887,7 @@ use_local_confidence_score: false
 1. `.pt` 文件实际对象类型、字段名、shape 和 dtype；
 2. 邻接矩阵是否有向、是否对称、是否包含负权，以及 \(\tau_{edge}\) 的数值和来源；
 3. 逐样本、逐时间片记录 \(M_b\) 与 \(N_b^{(m)}\)，不得假设固定；
-4. 社区标签和坐标是否有效，异常样本是否进入 exclusion manifest；
+4. 社区标签是否有效，异常样本是否进入 exclusion manifest；确认空间坐标未进入任何模型特征；
 5. 相邻时间片的原始节点 ID 是否可对齐；
 6. 标签编码方式及站点、受试者分组信息；
 7. 默认采用 `training_mode: soft_graph`；
@@ -929,8 +903,9 @@ use_local_confidence_score: false
 ```python
 assert degree.shape == (N_bm,)
 assert delta_degree.shape == (N_bm,)
-assert neighbor_coords.shape == (N_bm, D)
 assert community_features.shape == (N_bm, 7)
+assert node_features.shape == (N_bm, 9)
+assert edge_features.shape == (N_bm, N_bm, 23)
 assert torch.isfinite(community_features).all()
 assert node_score.min() >= 0
 assert node_score.max() <= 1

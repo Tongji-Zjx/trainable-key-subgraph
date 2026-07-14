@@ -66,8 +66,8 @@ Expected high-level results:
 - 25 unit tests pass;
 - train/validation/test contain 215/46/46 samples;
 - all 307 samples load without truncation;
-- node feature dimension is 15;
-- edge feature dimension is 35;
+- node feature dimension is 9 (spatial coordinates are excluded);
+- edge feature dimension is 23;
 - node and edge scorers both receive nonzero gradients.
 
 If any protocol hash differs, stop. Do not overwrite the protocol or split as

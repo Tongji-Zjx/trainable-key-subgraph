@@ -89,24 +89,31 @@ class GraphFeaturesTest(unittest.TestCase):
         self.assertEqual(tuple(features.degree.shape), (3,))
         self.assertTrue(torch.allclose(features.degree, torch.tensor([0.5, 0.75, 0.25])))
         self.assertFalse(bool(features.delta_degree_mask.any()))
-        self.assertEqual(tuple(features.neighbor_coordinates.shape), (3, 3))
-        self.assertTrue(
-            torch.allclose(
-                features.neighbor_coordinates[0], torch.tensor([0.0, 2.0, 0.0])
-            )
-        )
         self.assertEqual(tuple(features.community_features.shape), (3, 7))
         self.assertTrue(bool(torch.isfinite(features.community_features).all()))
         self.assertAlmostEqual(float(features.community_features[0, 0]), 2.0 / 3.0, places=6)
         self.assertAlmostEqual(float(features.community_features[0, 1]), 0.5, places=6)
         self.assertAlmostEqual(float(features.community_features[0, 5]), 1.0, places=6)
         self.assertAlmostEqual(float(features.community_features[2, 4]), 0.125, places=6)
-        self.assertEqual(tuple(features.node_features.shape), (3, 15))
+        self.assertEqual(tuple(features.node_features.shape), (3, 9))
+
+    def test_spatial_coordinates_do_not_affect_features(self):
+        original = self.builder.build_timepoint(self.permuted_sample, 0)
+        coordinate_changed = _sample(
+            list(self.permuted_sample.adjacency),
+            list(self.permuted_sample.node_names),
+            [torch.full_like(item, 12345.0) for item in self.permuted_sample.coordinates],
+            list(self.permuted_sample.communities),
+        )
+        changed = self.builder.build_timepoint(coordinate_changed, 0)
+
+        self.assertTrue(torch.equal(original.node_features, changed.node_features))
+        self.assertTrue(torch.equal(original.edge_features, changed.edge_features))
 
     def test_edge_features_preserve_signed_and_absolute_values(self):
         features = self.builder.build_timepoint(self.permuted_sample, 0)
 
-        self.assertEqual(tuple(features.edge_features.shape), (3, 3, 35))
+        self.assertEqual(tuple(features.edge_features.shape), (3, 3, 23))
         edge_tail = features.edge_features[1, 2, -5:]
         self.assertTrue(
             torch.allclose(edge_tail, torch.tensor([-0.25, 0.25, 0.0, 0.0, 0.0]))

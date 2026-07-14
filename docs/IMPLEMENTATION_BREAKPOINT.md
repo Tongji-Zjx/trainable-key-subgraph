@@ -7,6 +7,7 @@ Final data decision:
 - this implementation uses only the 307 coordinate-valid samples;
 - the 632 all-zero-coordinate samples remain excluded;
 - no coordinate mapping, imputation, or node-index guessing is performed;
+- raw and neighbor spatial coordinates are not model features;
 - the frozen sample index, splits, and data protocol remain unchanged.
 
 Completed and tested:

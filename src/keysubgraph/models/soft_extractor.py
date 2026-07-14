@@ -14,7 +14,7 @@ from keysubgraph.features.graph_features import GraphFeatureBuilder, GraphTimepo
 
 @dataclass(frozen=True)
 class SoftExtractorConfig:
-    node_feature_dim: int = 15
+    node_feature_dim: int = 9
     node_score_hidden_dim: int = 32
     edge_score_hidden_dim: int = 32
     graph_hidden_dim: int = 64
