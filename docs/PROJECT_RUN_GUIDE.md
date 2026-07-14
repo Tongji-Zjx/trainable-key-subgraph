@@ -31,7 +31,7 @@ python scripts/check_model_flow.py \
   --protocol configs/data_protocol_all_samples.json --device cuda
 ```
 
-Expected results are 31 passing tests, one `all` partition containing 938
+Expected results are 32 passing tests, one `all` partition containing 938
 samples, node/edge feature dimensions 9/23, and nonzero gradients for both
 scorers.
 
@@ -157,7 +157,7 @@ python scripts/check_model_flow.py --device cuda
 Expected high-level results:
 
 - protocol hashes are valid and reused;
-- 31 unit tests pass in the current codebase;
+- 32 unit tests pass in the current codebase;
 - train/validation/test contain 215/46/46 samples;
 - all 307 samples load without truncation;
 - node feature dimension is 9 (spatial coordinates are excluded);

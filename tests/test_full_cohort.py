@@ -13,7 +13,11 @@ SRC_ROOT = PROJECT_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
-from keysubgraph.data.data_protocol import freeze_data_protocol, validate_data_protocol  # noqa: E402
+from keysubgraph.data.data_protocol import (  # noqa: E402
+    _portable_path,
+    freeze_data_protocol,
+    validate_data_protocol,
+)
 from keysubgraph.data.data_split import read_sample_index, read_split_assignments  # noqa: E402
 from keysubgraph.data.full_cohort import (  # noqa: E402
     FULL_COHORT_MODE,
@@ -23,6 +27,21 @@ from keysubgraph.data.full_cohort import (  # noqa: E402
 
 
 class FullCohortTest(unittest.TestCase):
+    def test_portable_path_does_not_expand_a_dataset_symlink(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            project_root = root / "project"
+            external_data = root / "external_data"
+            project_root.mkdir()
+            external_data.mkdir()
+            link = project_root / "data"
+            try:
+                link.symlink_to(external_data, target_is_directory=True)
+            except OSError as error:
+                self.skipTest("directory symlinks are unavailable: {}".format(error))
+
+            self.assertEqual(_portable_path(link, project_root), "data")
+
     def test_every_indexed_sample_is_frozen_into_all_partition(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

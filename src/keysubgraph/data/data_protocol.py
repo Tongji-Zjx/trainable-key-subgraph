@@ -22,7 +22,11 @@ def protocol_partitions(protocol: Dict[str, Any]):
 
 
 def _portable_path(path: Path, project_root: Path) -> str:
-    return Path(path).resolve().relative_to(Path(project_root).resolve()).as_posix()
+    absolute_path = Path(os.path.abspath(str(path)))
+    try:
+        return absolute_path.relative_to(Path(project_root).resolve()).as_posix()
+    except ValueError:
+        return absolute_path.as_posix()
 
 
 def _atomic_write_json(path: Path, payload: Dict[str, Any]) -> None:
@@ -47,7 +51,11 @@ def freeze_data_protocol(
     """Validate data artifacts and write their reproducible contract."""
 
     project_root = Path(project_root).resolve()
-    dataset_root = Path(dataset_root).resolve()
+    dataset_protocol_path = Path(dataset_root)
+    if not dataset_protocol_path.is_absolute():
+        dataset_protocol_path = project_root / dataset_protocol_path
+    dataset_protocol_path = Path(os.path.abspath(str(dataset_protocol_path)))
+    dataset_root = dataset_protocol_path.resolve()
     sample_index_csv = Path(sample_index_csv).resolve()
     splits_csv = Path(splits_csv).resolve()
     splits_json = Path(splits_json).resolve()
@@ -100,7 +108,7 @@ def freeze_data_protocol(
         "schema_version": 1,
         "immutable": True,
         "paths": {
-            "dataset_root": _portable_path(dataset_root, project_root),
+            "dataset_root": _portable_path(dataset_protocol_path, project_root),
             "sample_index_csv": _portable_path(sample_index_csv, project_root),
             "splits_csv": _portable_path(splits_csv, project_root),
             "splits_json": _portable_path(splits_json, project_root),

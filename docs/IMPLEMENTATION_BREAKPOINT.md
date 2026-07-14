@@ -33,11 +33,12 @@ Completed and tested:
 - Random, Top-degree, and Low-score controls;
 - signed structural metrics, sample aggregation, Mann-Whitney U, BH-FDR,
   discrepancy/effect sizes, and visualization;
-- 31 unit tests plus local real-data smoke checks.
+- 32 unit tests plus local real-data smoke checks.
 
 Last completed checks:
 
-- all 31 unit tests pass;
+- all 32 unit tests pass (the symlink-only test is skipped on Windows hosts
+  without symbolic-link privileges and runs on Linux servers);
 - the expanded protocol loads all 938 samples and 33,562 timepoints;
 - real-data CPU smoke training writes best/last checkpoints and cohort history;
 - hard extraction exported 167 subgraphs from 60 timepoints across two samples;
