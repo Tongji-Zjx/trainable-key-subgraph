@@ -7,5 +7,5 @@ setup(
     description="Trainable signed key-subgraph extraction and structural analysis",
     package_dir={"": "src"},
     packages=find_packages("src"),
-    python_requires=">=3.7,<3.8",
+    python_requires=">=3.7,<3.10",
 )
