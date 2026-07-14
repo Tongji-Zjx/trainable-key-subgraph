@@ -32,7 +32,6 @@ class GraphSequenceSample:
     relative_path: str
     adjacency: Tuple[torch.Tensor, ...]
     edge_mask: Tuple[torch.Tensor, ...]
-    coordinates: Tuple[torch.Tensor, ...]
     node_names: Tuple[Tuple[str, ...], ...]
     communities: Tuple[torch.Tensor, ...]
     window_starts: torch.Tensor
@@ -67,10 +66,6 @@ class GraphSequenceSample:
             edge_mask=tuple(
                 item.to(device=device, non_blocking=non_blocking)
                 for item in self.edge_mask
-            ),
-            coordinates=tuple(
-                item.to(device=device, non_blocking=non_blocking)
-                for item in self.coordinates
             ),
             node_names=self.node_names,
             communities=tuple(
@@ -138,18 +133,6 @@ def _tensor_sequence(value: Any, field_name: str, item_dim: int) -> List[torch.T
     raise ValueError("{} is not a valid tensor sequence".format(field_name))
 
 
-def _coordinate_sequence(value: Any, node_counts: Sequence[int]) -> List[torch.Tensor]:
-    if torch.is_tensor(value):
-        if value.dim() == 2 and len(set(node_counts)) == 1:
-            return [value for _ in node_counts]
-        if value.dim() == 3 and value.shape[0] == len(node_counts):
-            return [value[index] for index in range(value.shape[0])]
-    if isinstance(value, (list, tuple)) and len(value) == len(node_counts):
-        if all(torch.is_tensor(item) and item.dim() == 2 for item in value):
-            return list(value)
-    raise ValueError("coords do not align with the graph sequence")
-
-
 def _name_sequence(value: Any, node_counts: Sequence[int]) -> List[Tuple[str, ...]]:
     if isinstance(value, (list, tuple)) and value and all(
         isinstance(item, str) for item in value
@@ -185,7 +168,6 @@ def _adapt_payload(
 ) -> GraphSequenceSample:
     required = {
         "adjacency",
-        "coords",
         "node_names",
         "community_sequence",
         "window_starts",
@@ -240,22 +222,6 @@ def _adapt_payload(
             raise ValueError("community labels must be non-negative")
         adapted_communities.append(values)
 
-    coordinates = _coordinate_sequence(payload["coords"], node_counts)
-    adapted_coordinates = []
-    spatial_dims = set()
-    for time_index, (coords, node_count) in enumerate(zip(coordinates, node_counts)):
-        if coords.shape[0] != node_count:
-            raise ValueError("time {} coordinates do not match nodes".format(time_index))
-        coords = coords.detach().to(device="cpu", dtype=torch.float32).contiguous()
-        if not bool(torch.isfinite(coords).all()):
-            raise ValueError("coordinates contain non-finite values")
-        if not bool((coords != 0).any()):
-            raise ValueError("all-zero coordinates are excluded by the data protocol")
-        spatial_dims.add(int(coords.shape[1]))
-        adapted_coordinates.append(coords)
-    if len(spatial_dims) != 1:
-        raise ValueError("coordinate dimensions vary across time")
-
     node_names = _name_sequence(payload["node_names"], node_counts)
     for time_index, (names, node_count) in enumerate(zip(node_names, node_counts)):
         if len(names) != node_count or len(set(names)) != len(names):
@@ -283,7 +249,6 @@ def _adapt_payload(
         relative_path=assignment.relative_path,
         adjacency=tuple(adapted_adjacency),
         edge_mask=tuple(edge_masks),
-        coordinates=tuple(adapted_coordinates),
         node_names=tuple(node_names),
         communities=tuple(adapted_communities),
         window_starts=starts,

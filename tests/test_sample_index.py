@@ -34,7 +34,7 @@ def _signed_adjacency(node_count):
     return graph
 
 
-def _payload(graphs, communities, coordinates, node_names=None):
+def _payload(graphs, communities, coordinates=None, node_names=None):
     if node_names is None:
         counts = [int(graph.shape[0]) for graph in graphs]
         if len(set(counts)) == 1:
@@ -50,15 +50,17 @@ def _payload(graphs, communities, coordinates, node_names=None):
         if len({tuple(item.shape) for item in communities}) == 1
         else communities
     )
-    return {
+    payload = {
         "adjacency": adjacency,
-        "coords": coordinates,
         "node_names": node_names,
         "community_sequence": community_sequence,
         "window_starts": torch.arange(len(graphs), dtype=torch.float32),
         "global_threshold": 0.5,
         "t_r": 2.0,
     }
+    if coordinates is not None:
+        payload["coords"] = coordinates
+    return payload
 
 
 class SampleIndexTest(unittest.TestCase):
@@ -122,7 +124,7 @@ class SampleIndexTest(unittest.TestCase):
         self.assertEqual(record.min_num_nodes, 2)
         self.assertEqual(record.max_num_nodes, 3)
 
-    def test_zero_coordinates_invalid_community_and_empty_graph_are_excluded(self):
+    def test_invalid_community_and_empty_graph_are_excluded(self):
         graph = torch.zeros(3, 3)
         communities = [torch.tensor([0, -1, 1])]
         coordinates = torch.zeros(3, 3)
@@ -138,8 +140,32 @@ class SampleIndexTest(unittest.TestCase):
         self.assertFalse(record.included)
         reasons = set(record.exclusion_reasons.split("|"))
         self.assertIn("community_has_negative_label", reasons)
-        self.assertIn("coordinates_all_zero", reasons)
+        self.assertNotIn("coordinates_all_zero", reasons)
         self.assertIn("empty_timepoints:1", reasons)
+
+    def test_zero_and_missing_coordinates_are_included(self):
+        graph = _signed_adjacency(3)
+        communities = [torch.tensor([0, 0, 1])]
+        zero_path = self._save(
+            "ZERO",
+            0,
+            "ZERO_subject_1.pt",
+            _payload([graph], communities, torch.zeros(3, 3)),
+        )
+        missing_path = self._save(
+            "MISSING",
+            1,
+            "MISSING_subject_1.pt",
+            _payload([graph], communities),
+        )
+
+        zero_record = inspect_sample(zero_path, IndexBuildConfig(self.root))
+        missing_record = inspect_sample(missing_path, IndexBuildConfig(self.root))
+
+        self.assertTrue(zero_record.included)
+        self.assertFalse(zero_record.coords_valid)
+        self.assertTrue(missing_record.included)
+        self.assertFalse(missing_record.coords_valid)
 
     def test_artifacts_are_deterministic_and_partition_inventory(self):
         valid_payload = _payload(
@@ -149,7 +175,7 @@ class SampleIndexTest(unittest.TestCase):
         )
         invalid_payload = _payload(
             [_signed_adjacency(3)],
-            [torch.tensor([0, 0, 1])],
+            [torch.tensor([0, -1, 1])],
             torch.zeros(3, 3),
         )
         self._save("Z_SITE", 0, "Z_SITE_b_1.pt", valid_payload)

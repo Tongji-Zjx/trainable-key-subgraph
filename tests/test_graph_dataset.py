@@ -183,6 +183,26 @@ class GraphDatasetTest(unittest.TestCase):
         self.assertEqual(sample.source_global_threshold, 0.123)
         self.assertEqual(sample.edge_presence_threshold, 0.0)
 
+    def test_coordinates_are_optional_and_non_blocking(self):
+        first_path = self.dataset_root / self.rows[0]["relative_path"]
+        first_payload = torch.load(str(first_path), map_location="cpu", weights_only=False)
+        first_payload["coords"] = [torch.zeros(3, 3), torch.zeros(2, 3)]
+        torch.save(first_payload, str(first_path))
+
+        second_path = self.dataset_root / self.rows[1]["relative_path"]
+        second_payload = torch.load(str(second_path), map_location="cpu", weights_only=False)
+        second_payload.pop("coords")
+        torch.save(second_payload, str(second_path))
+
+        dataset = self._dataset()
+        zero_coordinate_sample = dataset[0]
+        missing_coordinate_sample = dataset[1]
+
+        self.assertEqual(zero_coordinate_sample.node_counts, (3, 2))
+        self.assertEqual(missing_coordinate_sample.node_counts, (4,))
+        self.assertFalse(hasattr(zero_coordinate_sample, "coordinates"))
+        self.assertFalse(hasattr(missing_coordinate_sample, "coordinates"))
+
     def test_list_batch_does_not_pad_or_truncate(self):
         batch = next(iter(create_data_loader(self._dataset(), batch_size=4, seed=7)))
 

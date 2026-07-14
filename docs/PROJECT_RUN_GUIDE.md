@@ -1,15 +1,17 @@
 # Key-subgraph project run guide
 
-## 1. Frozen scope
+## 1. Historical frozen scope and migration warning
 
-This version uses the 307 samples recorded in:
+The earlier experiment used the 307 samples recorded in:
 
 - `outputs/index/sample_index.csv`
 - `outputs/splits/splits.csv`
 - `configs/data_protocol.json`
 
-The 632 all-zero-coordinate samples remain in the exclusion manifest and must
-not be silently added. The community-anomalous sample also remains excluded.
+This 307-sample protocol describes the earlier coordinate-filtered experiment.
+It must not be reused for a new expanded-cohort experiment. Coordinate validity
+is no longer an inclusion criterion; a separate rebuilt index is required.
+The community-anomalous sample remains excluded.
 
 The frozen split is:
 
@@ -63,7 +65,7 @@ python scripts/check_model_flow.py --device cuda
 Expected high-level results:
 
 - protocol hashes are valid and reused;
-- 25 unit tests pass;
+- 28 unit tests pass;
 - train/validation/test contain 215/46/46 samples;
 - all 307 samples load without truncation;
 - node feature dimension is 9 (spatial coordinates are excluded);
@@ -219,12 +221,13 @@ aggregated with per-metric valid masks. They are never replaced by zero.
 ## 9. Interpretation boundary
 
 The structural module can show that frozen key subgraphs retain stable,
-class-related structural differences. It does not establish causality, prove
-that the classifier is globally optimal, or validate the excluded 632 samples.
+class-related structural differences. It does not establish causality or prove
+that the classifier is globally optimal. The statements below apply only to
+the historical 307-sample experiment, not to the expanded-cohort workflow.
 
 All formal reports should mention:
 
-- only 307 coordinate-valid samples were analyzed;
+- only 307 coordinate-valid samples were analyzed in the historical run;
 - site/class imbalance remains a possible confounder;
 - test evaluation was performed only after freezing all choices;
 - Random, Top-degree, and Low-score controls used the same held-out samples and

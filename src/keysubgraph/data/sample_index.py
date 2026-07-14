@@ -20,7 +20,6 @@ import torch
 
 REQUIRED_FIELDS = (
     "adjacency",
-    "coords",
     "node_names",
     "community_sequence",
     "window_starts",
@@ -34,7 +33,6 @@ class IndexBuildConfig:
     """Validation settings used while building a sample index."""
 
     dataset_root: Path
-    require_valid_coords: bool = True
     require_contiguous_communities: bool = True
     edge_presence_threshold: float = 0.0
     symmetry_tolerance: float = 1e-6
@@ -352,31 +350,22 @@ def inspect_sample(path: Path, config: IndexBuildConfig) -> SampleRecord:
     if not community_valid:
         reasons.append("invalid_community")
 
-    try:
-        coordinates = _coordinate_sequence(payload["coords"], node_counts)
-        spatial_dims = {int(coords.shape[1]) for coords in coordinates}
-        coords_valid = len(spatial_dims) == 1
-        if len(spatial_dims) != 1:
-            reasons.append("coordinates_spatial_dim_mismatch")
-        for coords, node_count in zip(coordinates, node_counts):
-            if coords.shape[0] != node_count:
+    coords_valid = False
+    spatial_dim = None
+    if "coords" in payload:
+        try:
+            coordinates = _coordinate_sequence(payload["coords"], node_counts)
+            spatial_dims = {int(coords.shape[1]) for coords in coordinates}
+            coords_valid = len(spatial_dims) == 1
+            for coords, node_count in zip(coordinates, node_counts):
+                if coords.shape[0] != node_count or not bool(torch.isfinite(coords).all()):
+                    coords_valid = False
+            if not any(bool((coords != 0).any()) for coords in coordinates):
                 coords_valid = False
-                reasons.append("coordinates_node_count_mismatch")
-            if not bool(torch.isfinite(coords).all()):
-                coords_valid = False
-                reasons.append("coordinates_nonfinite")
-        if not any(bool((coords != 0).any()) for coords in coordinates):
+            spatial_dim = next(iter(spatial_dims)) if len(spatial_dims) == 1 else None
+        except ValueError:
             coords_valid = False
-            reasons.append("coordinates_all_zero")
-        spatial_dim = next(iter(spatial_dims)) if len(spatial_dims) == 1 else None
-    except ValueError as error:
-        coordinates = []
-        coords_valid = False
-        spatial_dim = None
-        reasons.append("invalid_coordinates:" + str(error))
-
-    if config.require_valid_coords and not coords_valid:
-        reasons.append("invalid_coordinates")
+            spatial_dim = None
 
     try:
         name_sequences = _node_name_sequence(payload["node_names"], node_counts)
@@ -403,14 +392,7 @@ def inspect_sample(path: Path, config: IndexBuildConfig) -> SampleRecord:
     if not window_starts_valid:
         reasons.append("invalid_window_starts")
 
-    reasons = sorted(set(reasons))
-    blocking_reasons = list(reasons)
-    if not config.require_valid_coords:
-        blocking_reasons = [
-            reason
-            for reason in blocking_reasons
-            if reason != "coordinates_all_zero"
-        ]
+    blocking_reasons = sorted(set(reasons))
 
     return SampleRecord(
         sample_key=site + "/" + sample_id,

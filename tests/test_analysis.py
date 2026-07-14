@@ -84,7 +84,6 @@ def _control_sample():
         relative_path="SITE/0/sample.pt",
         adjacency=(graph,),
         edge_mask=(mask,),
-        coordinates=(torch.arange(1, 16, dtype=torch.float32).reshape(5, 3),),
         node_names=(("a", "b", "c", "d", "e"),),
         communities=(torch.tensor([0, 0, 1, 1, 1]),),
         window_starts=torch.tensor([0.0]),

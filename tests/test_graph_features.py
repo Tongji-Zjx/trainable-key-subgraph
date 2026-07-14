@@ -19,7 +19,7 @@ from keysubgraph.features.graph_features import (  # noqa: E402
 )
 
 
-def _sample(adjacency, names, coordinates, communities):
+def _sample(adjacency, names, communities):
     masks = []
     for graph in adjacency:
         mask = graph.abs() > 0.0
@@ -36,7 +36,6 @@ def _sample(adjacency, names, coordinates, communities):
         relative_path="SITE/0/sample.pt",
         adjacency=tuple(adjacency),
         edge_mask=tuple(masks),
-        coordinates=tuple(coordinates),
         node_names=tuple(tuple(item) for item in names),
         communities=tuple(communities),
         window_starts=torch.arange(len(adjacency), dtype=torch.float32),
@@ -55,15 +54,11 @@ class GraphFeaturesTest(unittest.TestCase):
                 [0.0, -0.25, 0.0],
             ]
         )
-        coordinates = torch.tensor(
-            [[1.0, 0.0, 0.0], [0.0, 2.0, 0.0], [0.0, 0.0, 3.0]]
-        )
         communities = torch.tensor([0, 0, 1])
         permutation = torch.tensor([2, 0, 1])
         self.permuted_sample = _sample(
             [graph, graph.index_select(0, permutation).index_select(1, permutation)],
             [("a", "b", "c"), ("c", "a", "b")],
-            [coordinates, coordinates.index_select(0, permutation)],
             [communities, communities.index_select(0, permutation)],
         )
         self.builder = GraphFeatureBuilder(epsilon=1e-8)
@@ -97,18 +92,13 @@ class GraphFeaturesTest(unittest.TestCase):
         self.assertAlmostEqual(float(features.community_features[2, 4]), 0.125, places=6)
         self.assertEqual(tuple(features.node_features.shape), (3, 9))
 
-    def test_spatial_coordinates_do_not_affect_features(self):
-        original = self.builder.build_timepoint(self.permuted_sample, 0)
-        coordinate_changed = _sample(
-            list(self.permuted_sample.adjacency),
-            list(self.permuted_sample.node_names),
-            [torch.full_like(item, 12345.0) for item in self.permuted_sample.coordinates],
-            list(self.permuted_sample.communities),
-        )
-        changed = self.builder.build_timepoint(coordinate_changed, 0)
+    def test_feature_schema_contains_no_spatial_fields(self):
+        features = self.builder.build_timepoint(self.permuted_sample, 0)
 
-        self.assertTrue(torch.equal(original.node_features, changed.node_features))
-        self.assertTrue(torch.equal(original.edge_features, changed.edge_features))
+        self.assertFalse(hasattr(self.permuted_sample, "coordinates"))
+        self.assertFalse(hasattr(features, "neighbor_coordinates"))
+        self.assertEqual(tuple(features.node_features.shape), (3, 9))
+        self.assertEqual(tuple(features.edge_features.shape), (3, 3, 23))
 
     def test_edge_features_preserve_signed_and_absolute_values(self):
         features = self.builder.build_timepoint(self.permuted_sample, 0)
@@ -128,7 +118,6 @@ class GraphFeaturesTest(unittest.TestCase):
         sample = _sample(
             [previous_graph, current_graph],
             [("a", "b", "c"), ("b", "c", "d")],
-            [torch.eye(3), torch.eye(3) * 2.0],
             [torch.tensor([0, 0, 1]), torch.tensor([0, 1, 1])],
         )
 

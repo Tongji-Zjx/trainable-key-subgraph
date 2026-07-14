@@ -44,7 +44,6 @@ def _sample():
         relative_path="SITE/1/sample.pt",
         adjacency=(graph,),
         edge_mask=(mask,),
-        coordinates=(torch.eye(3),),
         node_names=(("a", "b", "c"),),
         communities=(torch.tensor([0, 0, 0]),),
         window_starts=torch.tensor([0.0]),

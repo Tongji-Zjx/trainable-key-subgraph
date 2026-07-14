@@ -48,7 +48,6 @@ def _sample(index, label, split):
         relative_path="unused.pt",
         adjacency=(graph,),
         edge_mask=(mask,),
-        coordinates=(torch.eye(3),),
         node_names=(("a", "b", "c"),),
         communities=(torch.tensor([0, 0, 1]),),
         window_starts=torch.tensor([0.0]),

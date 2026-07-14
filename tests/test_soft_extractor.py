@@ -35,16 +35,12 @@ def _adjacency(node_count, scale=1.0):
 def _sample(key, label, node_counts):
     adjacency = tuple(_adjacency(count, 1.0 + time * 0.1) for time, count in enumerate(node_counts))
     masks = []
-    coordinates = []
     names = []
     communities = []
     for graph, count in zip(adjacency, node_counts):
         mask = graph.abs() > 0
         mask.fill_diagonal_(False)
         masks.append(mask)
-        coordinates.append(
-            torch.arange(1, count * 3 + 1, dtype=torch.float32).reshape(count, 3)
-        )
         names.append(tuple("node_{}".format(index) for index in range(count)))
         communities.append(torch.tensor([index % 2 for index in range(count)]))
     return GraphSequenceSample(
@@ -58,7 +54,6 @@ def _sample(key, label, node_counts):
         relative_path="unused.pt",
         adjacency=adjacency,
         edge_mask=tuple(masks),
-        coordinates=tuple(coordinates),
         node_names=tuple(names),
         communities=tuple(communities),
         window_starts=torch.arange(len(node_counts), dtype=torch.float32),
@@ -153,7 +148,6 @@ class SoftExtractorTest(unittest.TestCase):
             relative_path=sample.relative_path,
             adjacency=(graph,),
             edge_mask=(mask,),
-            coordinates=(sample.coordinates[0].index_select(0, permutation),),
             node_names=(tuple(sample.node_names[0][index] for index in permutation.tolist()),),
             communities=(sample.communities[0].index_select(0, permutation),),
             window_starts=sample.window_starts,
