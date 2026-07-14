@@ -1,0 +1,35 @@
+# Dataset and generated artifacts
+/data/
+/checkpoints/
+/outputs/
+/logs/
+/runs/
+
+# Local Conda environment and caches
+/.conda/
+/.cache/
+/.agents/
+
+# Python cache and test artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Checkpoint/model files accidentally placed elsewhere
+*.ckpt
+*.pth
+
+# IDE and operating system
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.temp
+*.log
