@@ -13,8 +13,7 @@ SRC_ROOT = PROJECT_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
-from keysubgraph.data.data_protocol import validate_data_protocol  # noqa: E402
-from keysubgraph.data.data_split import SPLIT_NAMES  # noqa: E402
+from keysubgraph.data.data_protocol import protocol_partitions, validate_data_protocol  # noqa: E402
 from keysubgraph.data.graph_dataset import (  # noqa: E402
     GraphSequenceDataset,
     create_data_loader,
@@ -43,7 +42,7 @@ def main() -> int:
     protocol = validate_data_protocol(args.protocol, PROJECT_ROOT)
     paths = protocol["paths"]
     report = {"protocol_valid": True, "splits": {}}
-    for split in SPLIT_NAMES:
+    for split in protocol_partitions(protocol):
         dataset = GraphSequenceDataset(
             dataset_root=PROJECT_ROOT / paths["dataset_root"],
             sample_index_csv=PROJECT_ROOT / paths["sample_index_csv"],

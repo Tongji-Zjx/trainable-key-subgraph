@@ -14,6 +14,7 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 
 SPLIT_NAMES = ("train", "validation", "test")
+DATA_PARTITIONS = SPLIT_NAMES + ("all",)
 
 
 @dataclass(frozen=True)

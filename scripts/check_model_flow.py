@@ -43,11 +43,12 @@ def main() -> int:
     args = parse_args()
     protocol = validate_data_protocol(args.protocol, PROJECT_ROOT)
     paths = protocol["paths"]
+    partition = "all" if protocol.get("experiment_mode") == "all_samples_exploratory" else "train"
     dataset = GraphSequenceDataset(
         PROJECT_ROOT / paths["dataset_root"],
         PROJECT_ROOT / paths["sample_index_csv"],
         PROJECT_ROOT / paths["splits_csv"],
-        "train",
+        partition,
         protocol["edge_presence_threshold"],
     )
     batch = next(iter(create_data_loader(dataset, batch_size=1, shuffle=False)))

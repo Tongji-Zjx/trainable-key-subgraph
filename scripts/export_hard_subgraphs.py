@@ -34,7 +34,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--protocol", type=Path, default=PROJECT_ROOT / "configs" / "data_protocol.json")
     parser.add_argument("--checkpoint", type=Path, required=True)
-    parser.add_argument("--split", choices=("train", "validation", "test"), default="validation")
+    parser.add_argument("--split", choices=("train", "validation", "test", "all"), default="validation")
     parser.add_argument("--output-dir", type=Path, default=PROJECT_ROOT / "outputs" / "hard_subgraphs")
     parser.add_argument("--device", default="auto")
     parser.add_argument("--max-samples", type=int)
@@ -55,6 +55,8 @@ def main() -> int:
     if args.max_samples is not None and args.max_samples < 1:
         raise ValueError("max-samples must be positive")
     protocol = validate_data_protocol(args.protocol, PROJECT_ROOT)
+    if args.split == "all" and protocol.get("experiment_mode") != "all_samples_exploratory":
+        raise ValueError("--split all requires an all-sample protocol")
     checkpoint = torch.load(
         str(args.checkpoint.resolve()), map_location="cpu", weights_only=False
     )

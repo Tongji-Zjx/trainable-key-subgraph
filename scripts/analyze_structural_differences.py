@@ -38,7 +38,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--protocol", type=Path, default=PROJECT_ROOT / "configs" / "data_protocol.json")
     parser.add_argument("--export-dir", type=Path, required=True)
-    parser.add_argument("--split", choices=("validation", "test"), default="validation")
+    parser.add_argument("--split", choices=("validation", "test", "all"), default="validation")
     parser.add_argument("--output-dir", type=Path, default=PROJECT_ROOT / "outputs" / "structural_analysis")
     parser.add_argument("--random-repeats", type=int, default=100)
     parser.add_argument("--seed", type=int, default=42)
@@ -49,6 +49,8 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     protocol = validate_data_protocol(args.protocol, PROJECT_ROOT)
+    if args.split == "all" and protocol.get("experiment_mode") != "all_samples_exploratory":
+        raise ValueError("--split all requires an all-sample protocol")
     protocol_digest = file_sha256(args.protocol)
     paths = protocol["paths"]
     dataset = GraphSequenceDataset(
@@ -108,6 +110,8 @@ def main() -> int:
         "subgraph_record_count": len(records),
         "sources": sorted(set(record.get("source", "key") for record in records)),
         "random_repeats": 0 if args.no_controls else args.random_repeats,
+        "exploratory_in_sample_analysis": args.split == "all",
+        "generalization_claim_allowed": args.split == "test",
         "outputs": {name: str(path) for name, path in output_paths.items()},
         "figures": [str(path) for path in figures],
     }

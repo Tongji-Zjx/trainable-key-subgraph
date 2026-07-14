@@ -42,11 +42,6 @@ def parse_args() -> argparse.Namespace:
         help="An edge exists when abs(A_ij) is greater than this value.",
     )
     parser.add_argument(
-        "--allow-zero-coords",
-        action="store_true",
-        help="Record all-zero coordinate samples as included (not recommended yet).",
-    )
-    parser.add_argument(
         "--allow-noncontiguous-communities",
         action="store_true",
         help="Do not exclude non-negative but non-contiguous community labels.",
@@ -58,7 +53,6 @@ def main() -> int:
     args = parse_args()
     config = IndexBuildConfig(
         dataset_root=args.data_root,
-        require_valid_coords=not args.allow_zero_coords,
         require_contiguous_communities=not args.allow_noncontiguous_communities,
         edge_presence_threshold=args.edge_presence_threshold,
     )

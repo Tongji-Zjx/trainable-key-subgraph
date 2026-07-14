@@ -231,7 +231,8 @@ def _checkpoint_payload(
     epoch: int,
     training_config: TrainingConfig,
     train_metrics: Dict[str, Any],
-    validation_metrics: Dict[str, Any],
+    selection_metrics: Dict[str, Any],
+    selection_partition: str,
     protocol_path: Path,
     protocol: Dict[str, Any],
     class_weights: torch.Tensor,
@@ -247,7 +248,7 @@ def _checkpoint_payload(
             loader_generator.get_state() if loader_generator is not None else None
         ),
     }
-    return {
+    payload = {
         "schema_version": 1,
         "epoch": epoch,
         "training_mode": model.training_mode,
@@ -256,13 +257,19 @@ def _checkpoint_payload(
         "model_state_dict": model.state_dict(),
         "optimizer_state_dict": optimizer.state_dict(),
         "train_metrics": train_metrics,
-        "validation_metrics": validation_metrics,
+        "selection_partition": selection_partition,
+        "selection_metrics": selection_metrics,
         "data_protocol_sha256": file_sha256(protocol_path),
         "data_artifact_sha256": protocol["sha256"],
         "edge_presence_threshold": protocol["edge_presence_threshold"],
         "class_weights": class_weights.tolist(),
         "rng_state": rng_state,
     }
+    if selection_partition == "validation":
+        payload["validation_metrics"] = selection_metrics
+    elif selection_partition == "cohort":
+        payload["cohort_metrics"] = selection_metrics
+    return payload
 
 
 def _restore_rng_state(checkpoint: Dict[str, Any], train_loader: Iterable) -> None:
@@ -300,8 +307,17 @@ def train_model(
     protocol_path: Path,
     protocol: Dict[str, Any],
     resume_checkpoint: Optional[Path] = None,
+    selection_partition: str = "validation",
 ) -> Dict[str, Any]:
-    """Train using validation only for model selection; never accesses test data."""
+    """Train and select a checkpoint on an explicitly named evaluation partition.
+
+    ``validation`` retains the strict predictive workflow. ``cohort`` is reserved
+    for the explicitly exploratory all-sample workflow and is not an estimate of
+    out-of-sample performance.
+    """
+
+    if selection_partition not in ("validation", "cohort"):
+        raise ValueError("selection_partition must be validation or cohort")
 
     set_reproducible_seed(config.seed)
     output_dir = Path(output_dir).resolve()
@@ -322,6 +338,9 @@ def train_model(
         checkpoint = load_checkpoint(resume_checkpoint, model, optimizer, device)
         if checkpoint["data_protocol_sha256"] != file_sha256(protocol_path):
             raise ValueError("resume checkpoint uses a different data protocol")
+        checkpoint_partition = checkpoint.get("selection_partition", "validation")
+        if checkpoint_partition != selection_partition:
+            raise ValueError("resume checkpoint uses a different selection partition")
         start_epoch = int(checkpoint["epoch"]) + 1
         _restore_rng_state(checkpoint, train_loader)
         if history_path.exists():
@@ -330,7 +349,7 @@ def train_model(
         for row in history:
             best_value = max(
                 best_value,
-                _selection_value(row["validation"], config.selection_metric),
+                _selection_value(row[selection_partition], config.selection_metric),
             )
 
     for epoch in range(start_epoch, config.epochs + 1):
@@ -344,7 +363,7 @@ def train_model(
             config.max_train_batches,
             False,
         )
-        validation_metrics = evaluate_model(
+        selection_metrics = evaluate_model(
             model,
             validation_loader,
             device,
@@ -353,7 +372,7 @@ def train_model(
             config.max_validation_batches,
             False,
         )
-        row = {"epoch": epoch, "train": train_metrics, "validation": validation_metrics}
+        row = {"epoch": epoch, "train": train_metrics, selection_partition: selection_metrics}
         history.append(row)
         payload = _checkpoint_payload(
             model,
@@ -361,25 +380,44 @@ def train_model(
             epoch,
             config,
             train_metrics,
-            validation_metrics,
+            selection_metrics,
+            selection_partition,
             protocol_path,
             protocol,
             class_weights.detach().cpu(),
             train_loader,
         )
         _atomic_torch_save(last_path, payload)
-        selection_value = _selection_value(validation_metrics, config.selection_metric)
+        selection_value = _selection_value(selection_metrics, config.selection_metric)
         if not best_path.exists() or selection_value > best_value:
             best_value = selection_value
             _atomic_torch_save(best_path, payload)
         _atomic_json(history_path, history)
+        print(
+            "epoch {}/{} train_loss={:.6f} {}_loss={:.6f} {}={}".format(
+                epoch,
+                config.epochs,
+                float(train_metrics["loss"]),
+                selection_partition,
+                float(selection_metrics["loss"]),
+                config.selection_metric,
+                selection_metrics.get(config.selection_metric),
+            ),
+            flush=True,
+        )
 
     return {
         "best_checkpoint": best_path,
         "last_checkpoint": last_path,
         "history": history_path,
         "epochs_completed": len(history),
-        "best_validation_value": best_value,
+        "best_validation_value": best_value if selection_partition == "validation" else None,
+        "best_cohort_value": (
+            (-best_value if config.selection_metric == "loss" else best_value)
+            if selection_partition == "cohort"
+            else None
+        ),
+        "selection_partition": selection_partition,
         "selection_metric": config.selection_metric,
     }
 

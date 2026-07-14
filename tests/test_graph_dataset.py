@@ -229,6 +229,21 @@ class GraphDatasetTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "must not shuffle"):
             create_data_loader(self._dataset("validation"), 1, shuffle=True)
 
+    def test_all_partition_uses_every_sample_and_can_shuffle(self):
+        for row in self.rows:
+            row["split"] = "all"
+        self._write_artifacts()
+
+        dataset = self._dataset("all")
+        loaded_keys = {
+            key
+            for batch in create_data_loader(dataset, batch_size=2, seed=17)
+            for key in batch.sample_keys
+        }
+
+        self.assertEqual(len(dataset), len(self.rows))
+        self.assertEqual(loaded_keys, {row["sample_key"] for row in self.rows})
+
     def test_protocol_freezes_and_validates_artifact_hashes(self):
         protocol_path = self.root / "configs" / "data_protocol.json"
         payload = freeze_data_protocol(

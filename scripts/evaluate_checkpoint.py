@@ -31,7 +31,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--protocol", type=Path, default=PROJECT_ROOT / "configs" / "data_protocol.json")
     parser.add_argument("--checkpoint", type=Path, required=True)
-    parser.add_argument("--split", choices=("validation", "test"), required=True)
+    parser.add_argument("--split", choices=("validation", "test", "all"), required=True)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--device", default="auto")
     parser.add_argument("--batch-size", type=int, default=1)
@@ -44,6 +44,8 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     protocol = validate_data_protocol(args.protocol, PROJECT_ROOT)
+    if args.split == "all" and protocol.get("experiment_mode") != "all_samples_exploratory":
+        raise ValueError("--split all requires an all-sample protocol")
     checkpoint_payload = torch.load(
         str(args.checkpoint.resolve()), map_location="cpu", weights_only=False
     )
@@ -91,6 +93,8 @@ def main() -> int:
         "schema_version": 1,
         "split": args.split,
         "debug_limited_batches": args.max_batches,
+        "exploratory_in_sample_evaluation": args.split == "all",
+        "generalization_metrics_available": args.split == "test",
         "checkpoint_sha256": file_sha256(args.checkpoint),
         "data_protocol_sha256": file_sha256(args.protocol),
         "metrics": metrics,

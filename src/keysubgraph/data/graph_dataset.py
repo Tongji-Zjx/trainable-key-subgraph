@@ -12,6 +12,7 @@ import torch
 from torch.utils.data import DataLoader, Dataset
 
 from .data_split import (
+    DATA_PARTITIONS,
     SPLIT_NAMES,
     IndexSample,
     SplitAssignment,
@@ -269,8 +270,8 @@ class GraphSequenceDataset(Dataset):
         split: str,
         edge_presence_threshold: float = 0.0,
     ) -> None:
-        if split not in SPLIT_NAMES:
-            raise ValueError("split must be one of {}".format(SPLIT_NAMES))
+        if split not in DATA_PARTITIONS:
+            raise ValueError("split must be one of {}".format(DATA_PARTITIONS))
         if edge_presence_threshold < 0.0:
             raise ValueError("edge_presence_threshold must be non-negative")
         self.dataset_root = Path(dataset_root).resolve()
@@ -361,8 +362,8 @@ def create_data_loader(
     if num_workers < 0:
         raise ValueError("num_workers must be non-negative")
     if shuffle is None:
-        shuffle = dataset.split == "train"
-    if shuffle and dataset.split != "train":
+        shuffle = dataset.split in ("train", "all")
+    if shuffle and dataset.split not in ("train", "all"):
         raise ValueError("validation and test DataLoaders must not shuffle")
     generator = torch.Generator()
     generator.manual_seed(seed)

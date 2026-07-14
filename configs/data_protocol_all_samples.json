@@ -1,0 +1,31 @@
+{
+  "batching": "list_based_variable_length_no_padding_no_truncation",
+  "community_policy": "community ids are local grouping labels and must never be passed to nn.Embedding",
+  "edge_presence_rule": "abs(A_ij) > edge_presence_threshold",
+  "edge_presence_threshold": 0.0,
+  "experiment_mode": "all_samples_exploratory",
+  "group_key": "not_applicable_all_samples_are_in_one_cohort",
+  "immutable": true,
+  "label_source": "sample_index.csv and splits.csv only; .pt labels are ignored",
+  "model_selection_policy": "lowest full-cohort inference loss; not validation performance",
+  "paths": {
+    "dataset_root": "data/adhd_5_0.5",
+    "sample_index_csv": "outputs/index_no_coords/sample_index.csv",
+    "splits_csv": "outputs/all_samples_protocol/splits.csv",
+    "splits_json": "outputs/all_samples_protocol/splits.json"
+  },
+  "sample_count": 938,
+  "schema_version": 1,
+  "sha256": {
+    "sample_index_csv": "04c73db1d958a2ea3fd28fa6eb1a62ba2b10d1a1cec83a3b22233edcddcf856a",
+    "splits_csv": "d9579d93ad8012a09fc48da20e17b42b9e71ae3a2376554f2ae5c4ec80014a9b",
+    "splits_json": "26e7cccf9e30d4f781d7c8b7bbb3014c18100a9a8b2cefc69593187cb2b606a3"
+  },
+  "signed_edge_policy": "positive and negative nonzero edges are both valid",
+  "source_global_threshold_policy": ".pt global_threshold is retained as metadata only",
+  "split_policy": "reuse splits.csv; training code must not randomly re-split",
+  "split_ratios": {
+    "all": 1.0
+  },
+  "split_seed": 42
+}

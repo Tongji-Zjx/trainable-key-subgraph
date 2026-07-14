@@ -8,6 +8,17 @@ from pathlib import Path
 from typing import Any, Dict
 
 from .data_split import file_sha256, read_sample_index, read_split_assignments
+from .full_cohort import FULL_COHORT_MODE
+
+
+def protocol_partitions(protocol: Dict[str, Any]):
+    """Return the dataset partitions defined by a validated protocol."""
+
+    return ("all",) if protocol.get("experiment_mode") == FULL_COHORT_MODE else (
+        "train",
+        "validation",
+        "test",
+    )
 
 
 def _portable_path(path: Path, project_root: Path) -> str:
@@ -64,6 +75,15 @@ def freeze_data_protocol(
     if index_keys != split_keys:
         raise ValueError("sample index and split assignments do not contain the same samples")
 
+    experiment_mode = split_payload.get("assignment_mode", "partitioned_evaluation")
+    if experiment_mode == FULL_COHORT_MODE:
+        if any(assignment.split != "all" for assignment in assignments):
+            raise ValueError("all-sample protocol contains a non-'all' assignment")
+        if split_payload.get("ratios") != {"all": 1.0}:
+            raise ValueError("all-sample protocol must declare ratios={'all': 1.0}")
+    elif any(assignment.split == "all" for assignment in assignments):
+        raise ValueError("'all' assignments require all_samples_exploratory mode")
+
     missing_files = [
         sample.relative_path
         for sample in samples
@@ -91,8 +111,14 @@ def freeze_data_protocol(
             "splits_json": file_sha256(splits_json),
         },
         "sample_count": len(samples),
+        "experiment_mode": experiment_mode,
         "label_source": "sample_index.csv and splits.csv only; .pt labels are ignored",
         "split_policy": "reuse splits.csv; training code must not randomly re-split",
+        "model_selection_policy": (
+            "lowest full-cohort inference loss; not validation performance"
+            if experiment_mode == FULL_COHORT_MODE
+            else "validation-only model selection"
+        ),
         "batching": "list_based_variable_length_no_padding_no_truncation",
         "edge_presence_rule": "abs(A_ij) > edge_presence_threshold",
         "edge_presence_threshold": float(edge_presence_threshold),

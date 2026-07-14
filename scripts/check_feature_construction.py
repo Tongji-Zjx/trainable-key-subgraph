@@ -15,8 +15,7 @@ SRC_ROOT = PROJECT_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
-from keysubgraph.data.data_protocol import validate_data_protocol  # noqa: E402
-from keysubgraph.data.data_split import SPLIT_NAMES  # noqa: E402
+from keysubgraph.data.data_protocol import protocol_partitions, validate_data_protocol  # noqa: E402
 from keysubgraph.data.graph_dataset import GraphSequenceDataset  # noqa: E402
 from keysubgraph.features.graph_features import GraphFeatureBuilder  # noqa: E402
 
@@ -41,7 +40,7 @@ def main() -> int:
     builder = GraphFeatureBuilder()
     report = {}
     with torch.no_grad():
-        for split in SPLIT_NAMES:
+        for split in protocol_partitions(protocol):
             dataset = GraphSequenceDataset(
                 PROJECT_ROOT / paths["dataset_root"],
                 PROJECT_ROOT / paths["sample_index_csv"],

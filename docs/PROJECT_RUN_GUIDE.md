@@ -1,5 +1,97 @@
 # Key-subgraph project run guide
 
+## Current workflow: all-sample exploratory analysis
+
+The active workflow uses 938 valid samples (class 0: 582; class 1: 356). All
+samples train the intermediate extractor and are then passed through hard
+subgraph extraction and structural difference analysis. This is an explicitly
+in-sample exploratory design: its classifier metrics are optimization
+diagnostics, not estimates of generalization performance.
+
+Prepare and freeze the expanded cohort:
+
+```bash
+python scripts/build_sample_index.py \
+  --data-root data/adhd_5_0.5 \
+  --output-dir outputs/index_no_coords
+
+python scripts/prepare_all_sample_protocol.py
+```
+
+Preflight checks:
+
+```bash
+python -m unittest discover -s tests -v
+python scripts/check_data_loading.py \
+  --protocol configs/data_protocol_all_samples.json \
+  --batch-size 16 --full-scan
+python scripts/check_feature_construction.py \
+  --protocol configs/data_protocol_all_samples.json
+python scripts/check_model_flow.py \
+  --protocol configs/data_protocol_all_samples.json --device cuda
+```
+
+Expected results are 31 passing tests, one `all` partition containing 938
+samples, node/edge feature dimensions 9/23, and nonzero gradients for both
+scorers.
+
+Formal training command:
+
+```bash
+mkdir -p logs
+set -o pipefail
+python -u scripts/train_all_samples.py \
+  --protocol configs/data_protocol_all_samples.json \
+  --device cuda \
+  --epochs 50 \
+  --batch-size 1 \
+  --num-workers 4 \
+  --seed 42 \
+  --learning-rate 0.001 \
+  --weight-decay 0.0001 \
+  --target-node-ratio 0.30 \
+  --target-edge-ratio 0.30 \
+  --budget-weight 1.0 \
+  --gradient-clip 5.0 \
+  --output-dir outputs/training/all_samples_seed42 \
+  2>&1 | tee logs/all_samples_seed42.log
+```
+
+The best checkpoint is selected by the lowest inference-mode loss on the full
+cohort. History uses the key `cohort`, not `validation`. Progress is flushed
+after every epoch. Resume with the same command plus:
+
+```bash
+--resume outputs/training/all_samples_seed42/last_checkpoint.pt
+```
+
+Export hard subgraphs for every sample:
+
+```bash
+python scripts/export_hard_subgraphs.py \
+  --protocol configs/data_protocol_all_samples.json \
+  --checkpoint outputs/training/all_samples_seed42/best_checkpoint.pt \
+  --split all \
+  --device cuda \
+  --output-dir outputs/hard_subgraphs/all_samples_seed42
+```
+
+Run structural statistics, controls, tables, and figures:
+
+```bash
+python scripts/analyze_structural_differences.py \
+  --protocol configs/data_protocol_all_samples.json \
+  --export-dir outputs/hard_subgraphs/all_samples_seed42 \
+  --split all \
+  --output-dir outputs/structural_analysis/all_samples_seed42 \
+  --random-repeats 100 \
+  --seed 42
+```
+
+All resulting reports must state that the analysis is exploratory and
+in-sample. It may describe structural differences in the analyzed cohort, but
+must not claim held-out predictive performance or external generalization.
+
 ## 1. Historical frozen scope and migration warning
 
 The earlier experiment used the 307 samples recorded in:
@@ -65,7 +157,7 @@ python scripts/check_model_flow.py --device cuda
 Expected high-level results:
 
 - protocol hashes are valid and reused;
-- 28 unit tests pass;
+- 31 unit tests pass in the current codebase;
 - train/validation/test contain 215/46/46 samples;
 - all 307 samples load without truncation;
 - node feature dimension is 9 (spatial coordinates are excluded);

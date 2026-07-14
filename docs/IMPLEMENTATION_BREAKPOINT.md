@@ -1,6 +1,6 @@
 # Implementation breakpoint
 
-Status: item 2 completed on 2026-07-14; paused before item 3.
+Status: item 3 completed on 2026-07-14.
 
 Final data decision:
 
@@ -18,6 +18,12 @@ Completed and tested:
   anomaly excluded;
 - all 938 included samples pass the Dataset payload adapter, covering 33,562
   timepoints without truncation or padding;
+- immutable `all_samples_exploratory` protocol assigns all 938 samples to the
+  explicit `all` partition;
+- `train_all_samples.py` trains on all samples and selects the best checkpoint
+  by lowest full-cohort inference loss, never labelling it validation loss;
+- checkpoint evaluation, hard export, and structural analysis support `all` and
+  mark their outputs as exploratory/in-sample;
 - sample inspection, index, exclusions, and reproducible group-aware splits;
 - frozen data protocol and variable-length list-based Dataset/DataLoader;
 - temporal node alignment and signed node/edge features;
@@ -27,16 +33,15 @@ Completed and tested:
 - Random, Top-degree, and Low-score controls;
 - signed structural metrics, sample aggregation, Mann-Whitney U, BH-FDR,
   discrepancy/effect sizes, and visualization;
-- 28 unit tests plus local real-data smoke checks.
+- 31 unit tests plus local real-data smoke checks.
 
-Last completed check:
+Last completed checks:
 
-- one-batch validation evaluation of `outputs/smoke_training/best_checkpoint.pt`;
-- output: `outputs/smoke_training/validation_evaluation.json`;
-- this is debug-only and is not a formal experimental result.
+- all 31 unit tests pass;
+- the expanded protocol loads all 938 samples and 33,562 timepoints;
+- real-data CPU smoke training writes best/last checkpoints and cohort history;
+- hard extraction exported 167 subgraphs from 60 timepoints across two samples;
+- the structural module produced CSV tables and figures from those exports.
 
-After removing coordinates, all 28 unit tests pass and the expanded 938-sample
-index passes a complete payload-adaptation scan.
-
-Item 3 (the requested all-sample training and extraction workflow) has not yet
-been implemented. Do not use the historical 307-sample protocol for a new run.
+Smoke outputs are debug-only. The server must run the complete 938-sample
+training and export commands in `docs/PROJECT_RUN_GUIDE.md`.

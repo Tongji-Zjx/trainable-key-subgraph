@@ -148,6 +148,57 @@ class TrainingTest(unittest.TestCase):
                 resumed_history = json.load(handle)
             self.assertEqual(resumed_history[-1]["epoch"], 3)
 
+    def test_full_cohort_selection_is_not_recorded_as_validation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            protocol_path = root / "all_protocol.json"
+            with protocol_path.open("w", encoding="utf-8") as handle:
+                json.dump({"mode": "all"}, handle)
+            protocol = {
+                "sha256": {
+                    "sample_index_csv": "a",
+                    "splits_csv": "b",
+                    "splits_json": "c",
+                },
+                "edge_presence_threshold": 0.0,
+            }
+            cohort = _Samples("all", 4)
+            train_loader = create_data_loader(cohort, 2, seed=5, shuffle=True)
+            selection_loader = create_data_loader(cohort, 2, seed=5, shuffle=False)
+            model_config = SoftExtractorConfig(
+                node_score_hidden_dim=4,
+                edge_score_hidden_dim=4,
+                graph_hidden_dim=6,
+                graph_layers=1,
+                classifier_hidden_dim=4,
+                dropout=0.0,
+            )
+            model = SoftGraphClassifier(model_config)
+            result = train_model(
+                model,
+                train_loader,
+                selection_loader,
+                [sample.label for sample in cohort.samples],
+                torch.device("cpu"),
+                TrainingConfig(epochs=1, seed=5, selection_metric="loss"),
+                root / "run",
+                protocol_path,
+                protocol,
+                selection_partition="cohort",
+            )
+
+            with result["history"].open("r", encoding="utf-8") as handle:
+                history = json.load(handle)
+            checkpoint = torch.load(
+                str(result["best_checkpoint"]), map_location="cpu", weights_only=False
+            )
+            self.assertIn("cohort", history[0])
+            self.assertNotIn("validation", history[0])
+            self.assertEqual(checkpoint["selection_partition"], "cohort")
+            self.assertIn("cohort_metrics", checkpoint)
+            self.assertNotIn("validation_metrics", checkpoint)
+            self.assertIsNone(result["best_validation_value"])
+
 
 if __name__ == "__main__":
     unittest.main()
