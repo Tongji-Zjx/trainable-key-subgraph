@@ -2,6 +2,13 @@
 
 Status: item 3 completed on 2026-07-14.
 
+Current active cohort decision:
+
+- train on all 938 valid samples (class 0: 582; class 1: 356);
+- coordinate validity is not an inclusion criterion and coordinates are not model inputs;
+- no ROI identity vocabulary or ROI embedding is used;
+- the single sample with invalid community labels/empty graph remains excluded.
+
 Final data decision:
 
 - spatial coordinates have been removed from the model and data adapter;
@@ -33,16 +40,18 @@ Completed and tested:
 - Random, Top-degree, and Low-score controls;
 - signed structural metrics, sample aggregation, Mann-Whitney U, BH-FDR,
   discrepancy/effect sizes, and visualization;
-- 32 unit tests plus local real-data smoke checks.
+- explicit signed node strengths/ratios (13-dimensional node features) and
+  four-dimensional signed edge features;
+- 36 unit tests plus local real-data smoke checks.
 
 Last completed checks:
 
-- all 32 unit tests pass (the symlink-only test is skipped on Windows hosts
+- all signed-feature and integration tests pass (the symlink-only test is skipped on Windows hosts
   without symbolic-link privileges and runs on Linux servers);
 - the expanded protocol loads all 938 samples and 33,562 timepoints;
 - real-data CPU smoke training writes best/last checkpoints and cohort history;
 - hard extraction exported 167 subgraphs from 60 timepoints across two samples;
 - the structural module produced CSV tables and figures from those exports.
 
-Smoke outputs are debug-only. The server must run the complete 938-sample
-training and export commands in `docs/PROJECT_RUN_GUIDE.md`.
+Smoke outputs are debug-only. The server must run the active 938-sample
+coordinate-independent training and export commands in `docs/PROJECT_RUN_GUIDE.md`.

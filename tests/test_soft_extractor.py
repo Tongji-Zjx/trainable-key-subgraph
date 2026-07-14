@@ -112,6 +112,46 @@ class SoftExtractorTest(unittest.TestCase):
         self.assertFalse(self.model.uses_raw_community_embedding)
         self.assertEqual(self.model.training_mode, "soft_graph")
 
+    def test_negative_edge_remains_negative_after_soft_selection(self):
+        graph = torch.tensor(
+            [[0.0, -0.8, 0.0], [-0.8, 0.0, 0.4], [0.0, 0.4, 0.0]]
+        )
+        mask = graph.abs() > 0.0
+        mask.fill_diagonal_(False)
+        sample = GraphSequenceSample(
+            sample_key="SITE/negative",
+            sample_id="negative",
+            site="SITE",
+            subject_id="negative",
+            session_id="1",
+            label=0,
+            split="train",
+            relative_path="unused.pt",
+            adjacency=(graph,),
+            edge_mask=(mask,),
+            node_names=(("a", "b", "c"),),
+            communities=(torch.tensor([0, 0, 1]),),
+            window_starts=torch.tensor([0.0]),
+            source_global_threshold=0.1,
+            repetition_time=2.0,
+            edge_presence_threshold=0.0,
+        )
+
+        _, selection = self.model.score_timepoint(sample, 0)
+
+        self.assertLess(float(selection.soft_adjacency[0, 1]), 0.0)
+        self.assertGreater(float(selection.soft_adjacency[1, 2]), 0.0)
+
+    def test_list_batch_size_variation_does_not_change_sample_output(self):
+        target = _sample("SITE/target", 0, (3, 2))
+        other = _sample("SITE/other", 1, (6,))
+        self.model.eval()
+        with torch.no_grad():
+            alone = self.model(GraphSequenceBatch((target,))).logits[0]
+            together = self.model(GraphSequenceBatch((target, other))).logits[0]
+
+        self.assertTrue(torch.allclose(alone, together, atol=1e-6))
+
     def test_classification_and_budget_loss_backpropagate_to_both_scorers(self):
         output = self.model(self.batch)
         loss = compute_soft_graph_loss(

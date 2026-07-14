@@ -87,6 +87,7 @@ def main() -> int:
         "total_loss": float(loss.total.detach().cpu()),
         "node_scorer_gradient_l1": float(node_gradient.abs().sum().detach().cpu()),
         "edge_scorer_gradient_l1": float(edge_gradient.abs().sum().detach().cpu()),
+        "node_feature_dim": model.config.node_feature_dim,
         "elapsed_seconds": elapsed_seconds,
         "cuda_peak_memory_mib": (
             torch.cuda.max_memory_allocated(device) / (1024.0 ** 2)

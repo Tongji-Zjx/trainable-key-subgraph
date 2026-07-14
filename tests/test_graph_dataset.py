@@ -183,6 +183,21 @@ class GraphDatasetTest(unittest.TestCase):
         self.assertEqual(sample.source_global_threshold, 0.123)
         self.assertEqual(sample.edge_presence_threshold, 0.0)
 
+    def test_edge_mask_uses_absolute_threshold_for_negative_edges(self):
+        dataset = GraphSequenceDataset(
+            self.dataset_root,
+            self.index_path,
+            self.splits_csv,
+            split="train",
+            edge_presence_threshold=0.2,
+        )
+        sample = dataset[0]
+
+        self.assertTrue(bool(sample.edge_mask[0][0, 1]))
+        self.assertTrue(bool(sample.edge_mask[0][1, 2]))
+        self.assertFalse(bool(sample.edge_mask[0][0, 2]))
+        self.assertLess(float(sample.adjacency[0][1, 2]), 0.0)
+
     def test_coordinates_are_optional_and_non_blocking(self):
         first_path = self.dataset_root / self.rows[0]["relative_path"]
         first_payload = torch.load(str(first_path), map_location="cpu", weights_only=False)

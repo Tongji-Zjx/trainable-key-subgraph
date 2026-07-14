@@ -83,6 +83,22 @@ class GraphFeaturesTest(unittest.TestCase):
 
         self.assertEqual(tuple(features.degree.shape), (3,))
         self.assertTrue(torch.allclose(features.degree, torch.tensor([0.5, 0.75, 0.25])))
+        self.assertTrue(
+            torch.allclose(features.positive_degree, torch.tensor([0.5, 0.5, 0.0]))
+        )
+        self.assertTrue(
+            torch.allclose(features.negative_degree, torch.tensor([0.0, 0.25, 0.25]))
+        )
+        self.assertTrue(
+            torch.allclose(
+                features.positive_ratio, torch.tensor([1.0, 2.0 / 3.0, 0.0])
+            )
+        )
+        self.assertTrue(
+            torch.allclose(
+                features.negative_ratio, torch.tensor([0.0, 1.0 / 3.0, 1.0])
+            )
+        )
         self.assertFalse(bool(features.delta_degree_mask.any()))
         self.assertEqual(tuple(features.community_features.shape), (3, 7))
         self.assertTrue(bool(torch.isfinite(features.community_features).all()))
@@ -90,25 +106,47 @@ class GraphFeaturesTest(unittest.TestCase):
         self.assertAlmostEqual(float(features.community_features[0, 1]), 0.5, places=6)
         self.assertAlmostEqual(float(features.community_features[0, 5]), 1.0, places=6)
         self.assertAlmostEqual(float(features.community_features[2, 4]), 0.125, places=6)
-        self.assertEqual(tuple(features.node_features.shape), (3, 9))
+        self.assertEqual(tuple(features.node_features.shape), (3, 13))
 
     def test_feature_schema_contains_no_spatial_fields(self):
         features = self.builder.build_timepoint(self.permuted_sample, 0)
 
         self.assertFalse(hasattr(self.permuted_sample, "coordinates"))
         self.assertFalse(hasattr(features, "neighbor_coordinates"))
-        self.assertEqual(tuple(features.node_features.shape), (3, 9))
-        self.assertEqual(tuple(features.edge_features.shape), (3, 3, 23))
+        self.assertEqual(tuple(features.node_features.shape), (3, 13))
+        self.assertEqual(tuple(features.edge_features.shape), (3, 3, 4))
 
     def test_edge_features_preserve_signed_and_absolute_values(self):
         features = self.builder.build_timepoint(self.permuted_sample, 0)
 
-        self.assertEqual(tuple(features.edge_features.shape), (3, 3, 23))
-        edge_tail = features.edge_features[1, 2, -5:]
+        self.assertEqual(tuple(features.edge_features.shape), (3, 3, 4))
+        edge_values = features.edge_features[1, 2]
         self.assertTrue(
-            torch.allclose(edge_tail, torch.tensor([-0.25, 0.25, 0.0, 0.0, 0.0]))
+            torch.allclose(edge_values, torch.tensor([-0.25, 0.25, 0.0, 0.0]))
         )
         self.assertTrue(bool(features.edge_mask[1, 2]))
+
+    def test_signed_strengths_match_the_requested_example(self):
+        graph = torch.tensor(
+            [
+                [0.0, 0.5, -0.3, 0.2],
+                [0.5, 0.0, 0.0, 0.0],
+                [-0.3, 0.0, 0.0, 0.0],
+                [0.2, 0.0, 0.0, 0.0],
+            ]
+        )
+        sample = _sample(
+            [graph],
+            [("a", "b", "c", "d")],
+            [torch.tensor([0, 0, 1, 1])],
+        )
+
+        features = self.builder.build_timepoint(sample, 0)
+
+        self.assertAlmostEqual(float(features.positive_degree[0]), 0.7, places=6)
+        self.assertAlmostEqual(float(features.negative_degree[0]), 0.3, places=6)
+        self.assertAlmostEqual(float(features.positive_ratio[0]), 0.7, places=6)
+        self.assertAlmostEqual(float(features.negative_ratio[0]), 0.3, places=6)
 
     def test_missing_nodes_have_safe_zero_differences_and_false_masks(self):
         previous_graph = self.permuted_sample.adjacency[0]

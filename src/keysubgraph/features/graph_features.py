@@ -16,6 +16,10 @@ class GraphTimepointFeatures:
     node_features: torch.Tensor
     edge_features: torch.Tensor
     degree: torch.Tensor
+    positive_degree: torch.Tensor
+    negative_degree: torch.Tensor
+    positive_ratio: torch.Tensor
+    negative_ratio: torch.Tensor
     delta_degree: torch.Tensor
     delta_degree_mask: torch.Tensor
     community_features: torch.Tensor
@@ -163,6 +167,11 @@ class GraphFeatureBuilder:
         adjacency = sample.adjacency[time_index]
         communities = sample.communities[time_index]
         degree = adjacency.abs().sum(dim=-1)
+        positive_degree = adjacency.clamp_min(0.0).sum(dim=-1)
+        negative_degree = (-adjacency.clamp_max(0.0)).sum(dim=-1)
+        signed_degree_denominator = positive_degree + negative_degree + self.epsilon
+        positive_ratio = positive_degree / signed_degree_denominator
+        negative_ratio = negative_degree / signed_degree_denominator
         delta_degree, delta_degree_mask, delta_edge, delta_edge_mask = (
             self._temporal_differences(sample, time_index, degree)
         )
@@ -172,27 +181,22 @@ class GraphFeatureBuilder:
         node_features = torch.cat(
             (
                 degree.unsqueeze(-1),
+                positive_degree.unsqueeze(-1),
+                negative_degree.unsqueeze(-1),
+                positive_ratio.unsqueeze(-1),
+                negative_ratio.unsqueeze(-1),
                 delta_degree.unsqueeze(-1),
                 community_features,
             ),
             dim=-1,
         )
 
-        node_count = adjacency.shape[0]
-        source = node_features[:, None, :].expand(-1, node_count, -1)
-        target = node_features[None, :, :].expand(node_count, -1, -1)
-        same_community = (
-            communities[:, None] == communities[None, :]
-        ).to(dtype=adjacency.dtype)
-        edge_features = torch.cat(
+        edge_features = torch.stack(
             (
-                source,
-                target,
-                adjacency.unsqueeze(-1),
-                adjacency.abs().unsqueeze(-1),
-                delta_edge.unsqueeze(-1),
-                delta_edge.abs().unsqueeze(-1),
-                same_community.unsqueeze(-1),
+                adjacency,
+                adjacency.abs(),
+                delta_edge,
+                delta_edge.abs(),
             ),
             dim=-1,
         )
@@ -205,6 +209,10 @@ class GraphFeatureBuilder:
             node_features=node_features,
             edge_features=edge_features,
             degree=degree,
+            positive_degree=positive_degree,
+            negative_degree=negative_degree,
+            positive_ratio=positive_ratio,
+            negative_ratio=negative_ratio,
             delta_degree=delta_degree,
             delta_degree_mask=delta_degree_mask,
             community_features=community_features,

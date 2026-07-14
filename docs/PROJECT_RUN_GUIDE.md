@@ -1,21 +1,28 @@
 # Key-subgraph project run guide
 
-## Current workflow: all-sample exploratory analysis
+## Current workflow: 938-sample coordinate-independent exploratory analysis
 
-The active workflow uses 938 valid samples (class 0: 582; class 1: 356). All
-samples train the intermediate extractor and are then passed through hard
-subgraph extraction and structural difference analysis. This is an explicitly
-in-sample exploratory design: its classifier metrics are optimization
-diagnostics, not estimates of generalization performance.
+The active workflow indexes all 939 source files and excludes only the one
+sample with invalid community labels/empty graph, leaving 938 samples (class 0:
+582; class 1: 356). Coordinate validity is not an inclusion criterion and
+coordinates are not model inputs. The model uses 13-dimensional signed
+structural node features and does not use ROI or community ID embeddings.
+All 938 samples train the intermediate extractor and are subsequently passed
+through hard extraction and structural difference analysis. Classifier metrics
+are optimization diagnostics, not estimates of generalization performance.
 
-Prepare and freeze the expanded cohort:
+Prepare and freeze the full cohort:
 
 ```bash
 python scripts/build_sample_index.py \
   --data-root data/adhd_5_0.5 \
   --output-dir outputs/index_no_coords
 
-python scripts/prepare_all_sample_protocol.py
+python scripts/prepare_all_sample_protocol.py \
+  --sample-index outputs/index_no_coords/sample_index.csv \
+  --assignment-dir outputs/all_samples_protocol \
+  --output configs/data_protocol_all_samples.json \
+  --overwrite
 ```
 
 Preflight checks:
@@ -31,8 +38,8 @@ python scripts/check_model_flow.py \
   --protocol configs/data_protocol_all_samples.json --device cuda
 ```
 
-Expected results are 32 passing tests, one `all` partition containing 938
-samples, node/edge feature dimensions 9/23, and nonzero gradients for both
+Expected results are 36 passing tests, one `all` partition containing 938
+samples, node/edge feature dimensions 13/4, and nonzero gradients for both
 scorers.
 
 Formal training command:
@@ -157,11 +164,11 @@ python scripts/check_model_flow.py --device cuda
 Expected high-level results:
 
 - protocol hashes are valid and reused;
-- 32 unit tests pass in the current codebase;
+- 36 unit tests pass in the current codebase;
 - train/validation/test contain 215/46/46 samples;
 - all 307 samples load without truncation;
-- node feature dimension is 9 (spatial coordinates are excluded);
-- edge feature dimension is 23;
+- node feature dimension is 13 (signed strengths/ratios included; coordinates excluded);
+- edge feature dimension is 4 (`A`, `abs(A)`, `delta_A`, `abs(delta_A)`);
 - node and edge scorers both receive nonzero gradients.
 
 If any protocol hash differs, stop. Do not overwrite the protocol or split as

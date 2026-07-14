@@ -14,7 +14,7 @@ from keysubgraph.features.graph_features import GraphFeatureBuilder, GraphTimepo
 
 @dataclass(frozen=True)
 class SoftExtractorConfig:
-    node_feature_dim: int = 9
+    node_feature_dim: int = 13
     node_score_hidden_dim: int = 32
     edge_score_hidden_dim: int = 32
     graph_hidden_dim: int = 64
@@ -38,10 +38,9 @@ class SoftExtractorConfig:
             raise ValueError("dropout must be in [0, 1)")
         if self.epsilon <= 0.0:
             raise ValueError("epsilon must be positive")
-
     @property
     def edge_feature_dim(self) -> int:
-        return 2 * self.node_feature_dim + 5
+        return 4
 
 
 @dataclass(frozen=True)
