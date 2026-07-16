@@ -307,6 +307,12 @@ def _checkpoint_payload(
         "data_protocol_sha256": train_manifest_payload["data_protocol_sha256"],
         "extractor_checkpoint_sha256": train_manifest_payload["checkpoint_sha256"],
         "evidence_level": train_manifest_payload["evidence_level"],
+        "parent_manifest_sha256": train_manifest_payload.get(
+            "parent_manifest_sha256"
+        ),
+        "downstream_splits_json_sha256": train_manifest_payload.get(
+            "downstream_splits_json_sha256"
+        ),
     }
 
 
@@ -324,10 +330,10 @@ def train_baseline(
 ) -> Dict[str, Any]:
     set_baseline_seed(config.seed)
     project_root = Path(project_root).resolve()
-    train_manifest_payload, _ = read_baseline_manifest(
+    train_manifest_payload, train_records = read_baseline_manifest(
         train_manifest_path, project_root, verify_exports=False
     )
-    validation_manifest_payload, _ = read_baseline_manifest(
+    validation_manifest_payload, validation_records = read_baseline_manifest(
         validation_manifest_path, project_root, verify_exports=False
     )
     if train_manifest_payload["split"] != "train":
@@ -337,6 +343,32 @@ def train_baseline(
     for name in ("data_protocol_sha256", "checkpoint_sha256", "evidence_level"):
         if train_manifest_payload[name] != validation_manifest_payload[name]:
             raise ValueError("train and validation manifests differ in {}".format(name))
+    train_parent = train_manifest_payload.get("parent_manifest_sha256")
+    validation_parent = validation_manifest_payload.get("parent_manifest_sha256")
+    if train_parent != validation_parent:
+        raise ValueError("train and validation manifests have different parents")
+    train_split_artifact = train_manifest_payload.get(
+        "downstream_splits_json_sha256"
+    )
+    validation_split_artifact = validation_manifest_payload.get(
+        "downstream_splits_json_sha256"
+    )
+    if train_split_artifact != validation_split_artifact:
+        raise ValueError("train and validation manifests use different downstream splits")
+    train_keys = {record.sample_key for record in train_records}
+    validation_keys = {record.sample_key for record in validation_records}
+    if train_keys & validation_keys:
+        raise ValueError("train and validation baseline samples overlap")
+
+    def record_group(record):
+        if record.subject_id:
+            return "{}::{}".format(record.site, record.subject_id)
+        return "sample::{}".format(record.sample_key)
+
+    train_groups = {record_group(record) for record in train_records}
+    validation_groups = {record_group(record) for record in validation_records}
+    if train_groups & validation_groups:
+        raise ValueError("subject groups overlap between train and validation")
     output_dir = Path(output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     history_path = output_dir / "history.json"

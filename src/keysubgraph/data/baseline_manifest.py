@@ -33,6 +33,7 @@ class BaselineManifestRecord:
     checkpoint_sha256: str
     data_protocol_sha256: str
     edge_presence_threshold: float
+    source_split: str = ""
 
 
 def _portable_path(path: Path, project_root: Path) -> str:
@@ -216,6 +217,7 @@ def build_baseline_manifest(
                 checkpoint_sha256=str(checkpoint_sha256),
                 data_protocol_sha256=protocol_sha256,
                 edge_presence_threshold=float(protocol["edge_presence_threshold"]),
+                source_split=assignment.split,
             )
         )
 
@@ -228,6 +230,7 @@ def build_baseline_manifest(
         "data_protocol": _portable_path(protocol_path, project_root),
         "data_protocol_sha256": protocol_sha256,
         "split": split,
+        "source_split": split,
         "checkpoint_sha256": checkpoint_sha256,
         "hard_extraction_config": extraction_config,
         "sample_count": len(records),
@@ -272,11 +275,97 @@ def read_baseline_manifest(
     validate_data_protocol(protocol_path, project_root)
     if file_sha256(protocol_path) != payload.get("data_protocol_sha256"):
         raise ValueError("baseline manifest protocol hash mismatch")
-    records = tuple(BaselineManifestRecord(**item) for item in payload.get("records", []))
+    record_payloads = []
+    for item in payload.get("records", []):
+        current = dict(item)
+        current.setdefault("source_split", current.get("split", ""))
+        record_payloads.append(current)
+    records = tuple(BaselineManifestRecord(**item) for item in record_payloads)
     if not records or len(records) != int(payload.get("sample_count", -1)):
         raise ValueError("baseline manifest record count mismatch")
     if len({record.sample_key for record in records}) != len(records):
         raise ValueError("baseline manifest contains duplicate samples")
+    downstream_split = str(payload.get("split", ""))
+    source_split = str(payload.get("source_split", downstream_split))
+    if not downstream_split or not source_split:
+        raise ValueError("baseline manifest split metadata is missing")
+    if any(record.split != downstream_split for record in records):
+        raise ValueError("baseline manifest record downstream splits differ")
+    if any(record.source_split != source_split for record in records):
+        raise ValueError("baseline manifest record source splits differ")
+    if any(record.label not in (0, 1) for record in records):
+        raise ValueError("baseline manifest contains a non-binary label")
+    if any(
+        record.data_protocol_sha256 != payload.get("data_protocol_sha256")
+        for record in records
+    ):
+        raise ValueError("baseline manifest record protocol hashes differ")
+    if any(
+        record.checkpoint_sha256 != payload.get("checkpoint_sha256")
+        for record in records
+    ):
+        raise ValueError("baseline manifest record checkpoint hashes differ")
+    if "timepoint_count" in payload and sum(
+        record.timepoint_count for record in records
+    ) != int(payload["timepoint_count"]):
+        raise ValueError("baseline manifest timepoint count mismatch")
+    if "subgraph_count" in payload and sum(
+        record.subgraph_count for record in records
+    ) != int(payload["subgraph_count"]):
+        raise ValueError("baseline manifest subgraph count mismatch")
+    parent_value = payload.get("parent_manifest")
+    parent_hash = payload.get("parent_manifest_sha256")
+    if source_split != downstream_split:
+        if not parent_value or not parent_hash:
+            raise ValueError("derived baseline manifest parent metadata is missing")
+        parent_path = resolve_manifest_path(parent_value, project_root)
+        if not parent_path.is_file() or file_sha256(parent_path) != parent_hash:
+            raise ValueError("derived baseline parent manifest hash mismatch")
+        parent_payload, parent_records = read_baseline_manifest(
+            parent_path, project_root, verify_exports=False
+        )
+        if parent_payload.get("split") != source_split:
+            raise ValueError("derived baseline source split differs from parent")
+        parent_by_key = {record.sample_key: record for record in parent_records}
+        if not set(record.sample_key for record in records).issubset(parent_by_key):
+            raise ValueError("derived baseline records are absent from parent")
+        for record in records:
+            parent_record = parent_by_key[record.sample_key]
+            derived_values = asdict(record)
+            derived_values["split"] = source_split
+            derived_values["source_split"] = source_split
+            parent_values = asdict(parent_record)
+            parent_values["source_split"] = (
+                parent_record.source_split or parent_record.split
+            )
+            if derived_values != parent_values:
+                raise ValueError("derived baseline record differs from parent")
+        for path_name, hash_name in (
+            ("downstream_splits_csv", "downstream_splits_csv_sha256"),
+            ("downstream_splits_json", "downstream_splits_json_sha256"),
+        ):
+            artifact_value = payload.get(path_name)
+            artifact_hash = payload.get(hash_name)
+            if not artifact_value or not artifact_hash:
+                raise ValueError("derived baseline split artifact metadata is missing")
+            artifact_path = resolve_manifest_path(artifact_value, project_root)
+            if not artifact_path.is_file() or file_sha256(artifact_path) != artifact_hash:
+                raise ValueError("derived baseline split artifact hash mismatch")
+        splits_json_path = resolve_manifest_path(
+            payload["downstream_splits_json"], project_root
+        )
+        with splits_json_path.open("r", encoding="utf-8") as handle:
+            split_payload = json.load(handle)
+        if split_payload.get("purpose") != "baseline_classifier_downstream_split":
+            raise ValueError("derived baseline split artifact has the wrong purpose")
+        assignments = split_payload.get("assignments", [])
+        expected_keys = {
+            str(item.get("sample_key"))
+            for item in assignments
+            if item.get("split") == downstream_split
+        }
+        if expected_keys != {record.sample_key for record in records}:
+            raise ValueError("derived baseline records differ from split assignments")
     if verify_exports:
         for record in records:
             path = resolve_manifest_path(record.hard_subgraph_json, project_root)

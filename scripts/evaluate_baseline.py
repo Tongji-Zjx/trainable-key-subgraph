@@ -54,6 +54,14 @@ def main() -> int:
         raise ValueError("checkpoint and evaluation manifest use different protocols")
     if manifest_payload["checkpoint_sha256"] != checkpoint["extractor_checkpoint_sha256"]:
         raise ValueError("checkpoint and evaluation manifest use different extractors")
+    if manifest_payload.get("parent_manifest_sha256") != checkpoint.get(
+        "parent_manifest_sha256"
+    ):
+        raise ValueError("checkpoint and evaluation manifest have different parents")
+    if manifest_payload.get("downstream_splits_json_sha256") != checkpoint.get(
+        "downstream_splits_json_sha256"
+    ):
+        raise ValueError("checkpoint and evaluation manifest use different downstream splits")
     if manifest_payload["split"] == "validation" and file_sha256(
         args.manifest
     ) != checkpoint["validation_manifest_sha256"]:

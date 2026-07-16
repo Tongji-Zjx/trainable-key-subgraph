@@ -276,6 +276,52 @@ class BaselineDataTest(unittest.TestCase):
             dataset[0]
         self.assertTrue(torch.isfinite(original_features).all())
 
+    def test_derived_partition_reads_source_split_but_returns_downstream_split(self):
+        parent_path = self.manifest_dir / "baseline_manifest.json"
+        with parent_path.open("r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+        split_csv = self.root / "derived_splits.csv"
+        split_json = self.root / "derived_splits.json"
+        split_csv.write_text("frozen downstream split\n", encoding="utf-8")
+        with split_json.open("w", encoding="utf-8") as handle:
+            json.dump(
+                {
+                    "purpose": "baseline_classifier_downstream_split",
+                    "assignments": [
+                        {"sample_key": self.sample_key, "split": "train"}
+                    ],
+                },
+                handle,
+            )
+        payload.update(
+            {
+                "manifest_kind": "derived_downstream_partition",
+                "split": "train",
+                "source_split": "validation",
+                "parent_manifest": parent_path.as_posix(),
+                "parent_manifest_sha256": file_sha256(parent_path),
+                "downstream_splits_csv": split_csv.as_posix(),
+                "downstream_splits_csv_sha256": file_sha256(split_csv),
+                "downstream_splits_json": split_json.as_posix(),
+                "downstream_splits_json_sha256": file_sha256(split_json),
+            }
+        )
+        for record in payload["records"]:
+            record["split"] = "train"
+            record["source_split"] = "validation"
+        derived_path = self.root / "derived" / "baseline_manifest.json"
+        derived_path.parent.mkdir()
+        with derived_path.open("w", encoding="utf-8") as handle:
+            json.dump(payload, handle)
+
+        dataset = BaselineHardSubgraphDataset(self.root, derived_path)
+        sample = dataset[0]
+
+        self.assertEqual(dataset.source_split, "validation")
+        self.assertEqual(dataset.split, "train")
+        self.assertEqual(sample.split, "train")
+        self.assertEqual(sample.label, 1)
+
 
 class BaselineCollateTest(unittest.TestCase):
     @staticmethod

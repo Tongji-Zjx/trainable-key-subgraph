@@ -129,7 +129,7 @@ def _validate_export_metadata(
         ("subject_id", sample.subject_id),
         ("session_id", sample.session_id),
         ("label", sample.label),
-        ("split", sample.split),
+        ("split", record.source_split or sample.split),
         ("relative_path", sample.relative_path),
     )
     for name, value in expected:
@@ -239,23 +239,30 @@ class BaselineHardSubgraphDataset(Dataset):
         protocol_path = resolve_manifest_path(payload["data_protocol"], self.project_root)
         protocol = validate_data_protocol(protocol_path, self.project_root)
         split = str(payload["split"])
+        source_split = str(payload.get("source_split", split))
         paths = protocol["paths"]
         self.raw_dataset = GraphSequenceDataset(
             self.project_root / paths["dataset_root"],
             self.project_root / paths["sample_index_csv"],
             self.project_root / paths["splits_csv"],
-            split=split,
+            split=source_split,
             edge_presence_threshold=float(protocol["edge_presence_threshold"]),
         )
-        raw_indices = {
+        all_raw_indices = {
             assignment.sample_key: index
             for index, assignment in enumerate(self.raw_dataset.assignments)
         }
-        if set(raw_indices) != {record.sample_key for record in records}:
+        record_keys = {record.sample_key for record in records}
+        missing = record_keys - set(all_raw_indices)
+        if missing:
+            raise ValueError("manifest samples are missing from the raw Dataset")
+        if source_split == split and set(all_raw_indices) != record_keys:
             raise ValueError("manifest and raw Dataset sample sets differ")
+        raw_indices = {key: all_raw_indices[key] for key in record_keys}
         self.records = records
         self.raw_indices = raw_indices
         self.split = split
+        self.source_split = source_split
         self.feature_builder = GraphFeatureBuilder()
 
     def __len__(self) -> int:
@@ -302,7 +309,7 @@ class BaselineHardSubgraphDataset(Dataset):
             subject_id=raw_sample.subject_id,
             session_id=raw_sample.session_id,
             label=raw_sample.label,
-            split=raw_sample.split,
+            split=record.split,
             windows=tuple(windows),
         )
 
