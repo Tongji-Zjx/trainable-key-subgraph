@@ -22,6 +22,7 @@ from keysubgraph.models.baseline_classifier import (  # noqa: E402
     BaselineModelConfig,
     HISTORY_MODES,
     SignedSequenceBaseline,
+    TEMPORAL_ORDERS,
 )
 from keysubgraph.training.baseline_trainer import (  # noqa: E402
     BaselineTrainingConfig,
@@ -64,6 +65,10 @@ def parse_args() -> argparse.Namespace:
         "--history-mode", choices=HISTORY_MODES, default="full"
     )
     parser.add_argument("--history-keep-ratio", type=float, default=1.0)
+    parser.add_argument(
+        "--temporal-order", choices=TEMPORAL_ORDERS, default="ordered"
+    )
+    parser.add_argument("--permutation-seed", type=int, default=42)
     parser.add_argument(
         "--smoke", action="store_true", help="Run one batch per partition for one epoch."
     )
@@ -108,6 +113,8 @@ def main() -> int:
             classifier_dropout=args.classifier_dropout,
             history_mode=args.history_mode,
             history_keep_ratio=args.history_keep_ratio,
+            temporal_order=args.temporal_order,
+            permutation_seed=args.permutation_seed,
         )
     )
     config = BaselineTrainingConfig(
@@ -149,6 +156,8 @@ def main() -> int:
             "smoke": bool(args.smoke),
             "history_mode": args.history_mode,
             "history_keep_ratio": args.history_keep_ratio,
+            "temporal_order": args.temporal_order,
+            "permutation_seed": args.permutation_seed,
             "elapsed_seconds": time.perf_counter() - started,
             "cuda_peak_memory_mib": (
                 torch.cuda.max_memory_allocated(device) / (1024.0 * 1024.0)

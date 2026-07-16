@@ -246,6 +246,14 @@ class BaselineHistoryModeTest(unittest.TestCase):
             )
         with self.assertRaisesRegex(ValueError, "only for truncate_history"):
             BaselineModelConfig(history_mode="current_only", history_keep_ratio=0.5)
+        with self.assertRaisesRegex(ValueError, "temporal_order"):
+            BaselineModelConfig(temporal_order="reverse")
+        with self.assertRaisesRegex(ValueError, "non-negative"):
+            BaselineModelConfig(temporal_order="shuffled", permutation_seed=-1)
+        with self.assertRaisesRegex(ValueError, "requires history_mode='full'"):
+            BaselineModelConfig(
+                history_mode="current_only", temporal_order="shuffled"
+            )
 
     def test_all_history_modes_have_identical_parameter_count(self):
         counts = []
@@ -346,6 +354,42 @@ class BaselineHistoryModeTest(unittest.TestCase):
             self.assertIsNotNone(gradient)
             self.assertTrue(bool(torch.isfinite(gradient).all()))
             self.assertGreater(float(gradient.abs().sum()), 0.0)
+
+    def test_shuffled_order_is_frozen_and_preserves_each_window_set(self):
+        torch.manual_seed(26)
+        model = SignedSequenceBaseline(
+            replace(self._config("full"), temporal_order="shuffled", permutation_seed=101)
+        )
+        model.eval()
+        batch = _sequence_batch(extra_time_padding=True)
+
+        first = model(batch)
+        second = model(batch)
+
+        self.assertTrue(torch.equal(first.sequence_window_index, second.sequence_window_index))
+        self.assertFalse(
+            torch.equal(
+                first.sequence_window_index[0, :2], batch.window_index[0, :2]
+            )
+        )
+        for sample_index in range(batch.batch_size):
+            count = int(batch.time_mask[sample_index].sum())
+            original = sorted(batch.window_index[sample_index, :count].tolist())
+            shuffled = sorted(first.sequence_window_index[sample_index, :count].tolist())
+            self.assertEqual(shuffled, original)
+            self.assertEqual(
+                first.sequence_window_index[sample_index, count:].tolist(),
+                batch.window_index[sample_index, count:].tolist(),
+            )
+
+    def test_ordered_mode_keeps_original_window_index(self):
+        model = SignedSequenceBaseline(self._config("full"))
+        model.eval()
+        batch = _sequence_batch(extra_time_padding=True)
+
+        output = model(batch)
+
+        self.assertTrue(torch.equal(output.sequence_window_index, batch.window_index))
 
 
 if __name__ == "__main__":

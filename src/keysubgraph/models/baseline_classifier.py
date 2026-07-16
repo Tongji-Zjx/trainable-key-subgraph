@@ -2,6 +2,8 @@
 
 from __future__ import absolute_import, division, print_function
 
+import hashlib
+import random
 from dataclasses import dataclass
 
 import torch
@@ -13,6 +15,7 @@ from .baseline_subgraph_encoder import SignedSubgraphEncoder, WindowMeanPooling
 
 
 HISTORY_MODES = ("full", "current_only", "truncate_history", "independent_bag")
+TEMPORAL_ORDERS = ("ordered", "shuffled")
 
 
 @dataclass(frozen=True)
@@ -30,6 +33,8 @@ class BaselineModelConfig:
     use_structural_features: bool = False
     history_mode: str = "full"
     history_keep_ratio: float = 1.0
+    temporal_order: str = "ordered"
+    permutation_seed: int = 42
 
     def __post_init__(self) -> None:
         integer_fields = (
@@ -55,6 +60,12 @@ class BaselineModelConfig:
             raise ValueError(
                 "history_keep_ratio differs from 1 only for truncate_history"
             )
+        if self.temporal_order not in TEMPORAL_ORDERS:
+            raise ValueError("unsupported baseline temporal_order")
+        if self.permutation_seed < 0:
+            raise ValueError("permutation_seed must be non-negative")
+        if self.temporal_order == "shuffled" and self.history_mode != "full":
+            raise ValueError("shuffled temporal order currently requires history_mode='full'")
 
 
 @dataclass(frozen=True)
@@ -67,6 +78,7 @@ class BaselineModelOutput:
     final_hidden_state: torch.Tensor
     time_mask: torch.Tensor
     history_mask: torch.Tensor
+    sequence_window_index: torch.Tensor
 
 
 class SignedSequenceBaseline(nn.Module):
@@ -109,6 +121,32 @@ class SignedSequenceBaseline(nn.Module):
         return values.index_select(0, safe_index.reshape(-1)).reshape(
             window_index.shape[0], window_index.shape[1], flat_windows.shape[-1]
         )
+
+    def _sequence_window_index(self, batch: BaselineBatch) -> torch.Tensor:
+        """Return the frozen per-sample window order used by the sequence model."""
+
+        if self.config.temporal_order == "ordered":
+            return batch.window_index
+        sequence_index = batch.window_index.clone()
+        for sample_index, sample_key in enumerate(batch.sample_keys):
+            valid_count = int(batch.time_mask[sample_index].sum().item())
+            if valid_count < 2:
+                continue
+            material = "{}\0{}".format(
+                self.config.permutation_seed, sample_key
+            ).encode("utf-8")
+            stable_seed = int.from_bytes(
+                hashlib.sha256(material).digest()[:8], byteorder="big"
+            )
+            order = list(range(valid_count))
+            random.Random(stable_seed).shuffle(order)
+            permutation = torch.tensor(
+                order, dtype=torch.long, device=batch.window_index.device
+            )
+            sequence_index[sample_index, :valid_count] = batch.window_index[
+                sample_index, :valid_count
+            ].index_select(0, permutation)
+        return sequence_index
 
     def _history_mask(self, time_mask: torch.Tensor) -> torch.Tensor:
         """Return windows allowed to update recurrent state for this condition."""
@@ -177,7 +215,8 @@ class SignedSequenceBaseline(nn.Module):
         )
         projected = self.input_projection(flat_window_embeddings)
         projected = self.input_activation(self.input_normalization(projected))
-        padded_windows = self._pad_windows(projected, batch.window_index)
+        sequence_window_index = self._sequence_window_index(batch)
+        padded_windows = self._pad_windows(projected, sequence_window_index)
 
         state, stacked_states, history_mask = self._encode_history(
             padded_windows, batch.time_mask
@@ -192,4 +231,5 @@ class SignedSequenceBaseline(nn.Module):
             final_hidden_state=state,
             time_mask=batch.time_mask,
             history_mask=history_mask,
+            sequence_window_index=sequence_window_index,
         )

@@ -477,6 +477,8 @@ def load_baseline_checkpoint(
     checkpoint_model_config = dict(checkpoint.get("model_config", {}))
     checkpoint_model_config.setdefault("history_mode", "full")
     checkpoint_model_config.setdefault("history_keep_ratio", 1.0)
+    checkpoint_model_config.setdefault("temporal_order", "ordered")
+    checkpoint_model_config.setdefault("permutation_seed", 42)
     if checkpoint_model_config != asdict(model.config):
         raise ValueError("baseline checkpoint model configuration differs")
     model.load_state_dict(checkpoint["model_state_dict"])
