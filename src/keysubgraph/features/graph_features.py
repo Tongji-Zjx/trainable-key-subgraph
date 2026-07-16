@@ -159,6 +159,49 @@ class GraphFeatureBuilder:
             dim=-1,
         )
 
+    def build_static_node_features(
+        self,
+        adjacency: torch.Tensor,
+        communities: torch.Tensor,
+        edge_presence_threshold: float,
+    ) -> torch.Tensor:
+        """Build signed structural node features without temporal differences.
+
+        The returned columns are absolute degree, positive degree, negative
+        magnitude degree, positive/negative ratios, and seven community
+        structural features. Community identifiers are only used for grouping.
+        """
+
+        if adjacency.dim() != 2 or adjacency.shape[0] != adjacency.shape[1]:
+            raise ValueError("adjacency must be a square matrix")
+        if communities.dim() != 1 or communities.numel() != adjacency.shape[0]:
+            raise ValueError("community labels must align with adjacency")
+        if edge_presence_threshold < 0.0:
+            raise ValueError("edge_presence_threshold must be non-negative")
+        degree = adjacency.abs().sum(dim=-1)
+        positive_degree = adjacency.clamp_min(0.0).sum(dim=-1)
+        negative_degree = (-adjacency.clamp_max(0.0)).sum(dim=-1)
+        denominator = positive_degree + negative_degree + self.epsilon
+        positive_ratio = positive_degree / denominator
+        negative_ratio = negative_degree / denominator
+        community_features = self._community_features(
+            adjacency, communities, edge_presence_threshold
+        )
+        features = torch.cat(
+            (
+                degree.unsqueeze(-1),
+                positive_degree.unsqueeze(-1),
+                negative_degree.unsqueeze(-1),
+                positive_ratio.unsqueeze(-1),
+                negative_ratio.unsqueeze(-1),
+                community_features,
+            ),
+            dim=-1,
+        )
+        if not bool(torch.isfinite(features).all()):
+            raise ValueError("static node features contain non-finite values")
+        return features
+
     def build_timepoint(
         self, sample: GraphSequenceSample, time_index: int
     ) -> GraphTimepointFeatures:

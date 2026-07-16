@@ -23,6 +23,12 @@ from keysubgraph.analysis.statistics import (  # noqa: E402
     apply_bh_fdr,
     run_structural_analysis,
 )
+from keysubgraph.analysis.original_graph import (  # noqa: E402
+    build_original_graph_record,
+    compute_original_graph_metrics,
+    iter_original_graph_metrics,
+    iter_original_graph_records,
+)
 from keysubgraph.analysis.structural_metrics import (  # noqa: E402
     METRIC_NAMES,
     aggregate_sample_metrics,
@@ -169,6 +175,39 @@ class AnalysisTest(unittest.TestCase):
         self.assertEqual(len(low_controls), 1)
         self.assertEqual(low_controls[0]["source"], "low_score")
         self.assertEqual(low_controls[0]["node_ids"], [2, 3, 4])
+
+    def test_original_graph_record_uses_all_nodes_and_signed_edges(self):
+        sample = _control_sample()
+        record = build_original_graph_record(sample, 0)
+
+        self.assertEqual(record["source"], "original")
+        self.assertEqual(record["node_ids"], [0, 1, 2, 3, 4])
+        self.assertEqual(len(record["edge_index"]), 10)
+        self.assertTrue(any(weight > 0.0 for weight in record["original_edge_weights"]))
+        self.assertTrue(any(weight < 0.0 for weight in record["original_edge_weights"]))
+        self.assertTrue(all(left < right for left, right in record["edge_index"]))
+        metrics = compute_subgraph_metrics(record)
+        direct_metrics = compute_original_graph_metrics(sample, 0)
+        self.assertEqual(metrics["node_count"], 5.0)
+        self.assertEqual(metrics["edge_count"], 10.0)
+        self.assertAlmostEqual(metrics["density"], 1.0)
+        self.assertTrue(math.isnan(metrics["edge_dynamic_mean_abs"]))
+        for metric in METRIC_NAMES:
+            if math.isnan(metrics[metric]):
+                self.assertTrue(math.isnan(direct_metrics[metric]))
+            else:
+                self.assertAlmostEqual(metrics[metric], direct_metrics[metric], places=6)
+        self.assertEqual(list(iter_original_graph_records((sample,))), [record])
+        iterated_metrics = list(iter_original_graph_metrics((sample,)))
+        self.assertEqual(len(iterated_metrics), 1)
+        self.assertEqual(iterated_metrics[0]["sample_id"], direct_metrics["sample_id"])
+        for metric in METRIC_NAMES:
+            if math.isnan(direct_metrics[metric]):
+                self.assertTrue(math.isnan(iterated_metrics[0][metric]))
+            else:
+                self.assertAlmostEqual(
+                    iterated_metrics[0][metric], direct_metrics[metric], places=6
+                )
 
     def test_statistics_and_fdr_outputs(self):
         adjusted = apply_bh_fdr([0.01, 0.04, 0.03])

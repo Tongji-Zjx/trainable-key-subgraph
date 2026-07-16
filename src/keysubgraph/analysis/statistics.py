@@ -155,9 +155,19 @@ def _json_safe(value: Any) -> Any:
 def run_structural_analysis(
     subgraph_records: Iterable[Dict[str, Any]], output_dir: Path
 ) -> Dict[str, Path]:
-    subgraph_rows = [compute_subgraph_metrics(record) for record in subgraph_records]
+    return run_structural_metric_analysis(
+        (compute_subgraph_metrics(record) for record in subgraph_records), output_dir
+    )
+
+
+def run_structural_metric_analysis(
+    metric_rows: Iterable[Dict[str, Any]], output_dir: Path
+) -> Dict[str, Path]:
+    """Aggregate, test, and save precomputed rows in the canonical metric schema."""
+
+    subgraph_rows = list(metric_rows)
     if not subgraph_rows:
-        raise ValueError("no valid subgraphs were provided")
+        raise ValueError("no valid structural metric rows were provided")
     sample_rows = aggregate_sample_metrics(subgraph_rows)
     test_rows = run_univariate_tests(sample_rows)
     comparison_rows = summarize_sources(test_rows)

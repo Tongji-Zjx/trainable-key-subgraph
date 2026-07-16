@@ -1,0 +1,43 @@
+schema_version: 1
+
+evidence_level: exploratory_in_sample
+
+data:
+  node_feature_context: induced_subgraph
+  include_temporal_deltas: false
+  use_node_identity: false
+  batching: padded_to_batch_maxima_no_truncation
+
+model:
+  node_feature_dim: 12
+  node_hidden_dim: 64
+  signed_gnn_layers: 2
+  signed_gnn_dropout: 0.1
+  use_residual: true
+  fusion_dim: 128
+  gru_hidden_dim: 128
+  classifier_hidden_dim: 64
+  classifier_dropout: 0.2
+  num_classes: 2
+  use_structural_features: false
+  history_mode: full
+
+training:
+  epochs: 100
+  batch_size: 4
+  num_workers: 4
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  gradient_clip_norm: 5.0
+  early_stopping_patience: 15
+  seed: 42
+  selection_metric: unweighted_log_loss
+
+evaluation:
+  threshold_source: validation
+  primary_metric: unweighted_log_loss
+  secondary_metrics:
+    - roc_auc
+    - balanced_accuracy
+    - accuracy
+    - f1
