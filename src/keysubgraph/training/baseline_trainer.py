@@ -474,7 +474,10 @@ def load_baseline_checkpoint(
         "training_mode"
     ) != "signed_sequence_baseline":
         raise ValueError("checkpoint is not a signed sequence baseline")
-    if checkpoint.get("model_config") != asdict(model.config):
+    checkpoint_model_config = dict(checkpoint.get("model_config", {}))
+    checkpoint_model_config.setdefault("history_mode", "full")
+    checkpoint_model_config.setdefault("history_keep_ratio", 1.0)
+    if checkpoint_model_config != asdict(model.config):
         raise ValueError("baseline checkpoint model configuration differs")
     model.load_state_dict(checkpoint["model_state_dict"])
     if optimizer is not None:

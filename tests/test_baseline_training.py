@@ -138,6 +138,8 @@ class BaselineTrainingTest(unittest.TestCase):
             gru_hidden_dim=10,
             classifier_hidden_dim=6,
             classifier_dropout=0.0,
+            history_mode="truncate_history",
+            history_keep_ratio=0.5,
         )
         model = SignedSequenceBaseline(config)
         output_dir = self.root / "training"
@@ -170,9 +172,41 @@ class BaselineTrainingTest(unittest.TestCase):
             result["best_checkpoint"], restored, device=torch.device("cpu")
         )
         self.assertEqual(checkpoint["model_config"], asdict(config))
+        self.assertEqual(checkpoint["model_config"]["history_mode"], "truncate_history")
+        self.assertEqual(checkpoint["model_config"]["history_keep_ratio"], 0.5)
         self.assertIn("classification_threshold", checkpoint)
         restored.eval()
         self.assertTrue(torch.isfinite(restored(_sequence_batch()).logits).all())
+
+    def test_legacy_full_checkpoint_defaults_history_keep_ratio(self):
+        config = BaselineModelConfig(
+            node_hidden_dim=8,
+            signed_gnn_layers=1,
+            signed_gnn_dropout=0.0,
+            fusion_dim=12,
+            gru_hidden_dim=10,
+            classifier_hidden_dim=6,
+            classifier_dropout=0.0,
+        )
+        model = SignedSequenceBaseline(config)
+        path = self.root / "legacy_full.pt"
+        payload = {
+            "schema_version": 1,
+            "training_mode": "signed_sequence_baseline",
+            "model_config": asdict(config),
+            "model_state_dict": model.state_dict(),
+        }
+        del payload["model_config"]["history_keep_ratio"]
+        torch.save(payload, str(path))
+
+        restored = SignedSequenceBaseline(config)
+        checkpoint = load_baseline_checkpoint(
+            path, restored, device=torch.device("cpu")
+        )
+
+        self.assertNotIn("history_keep_ratio", checkpoint["model_config"])
+        for expected, actual in zip(model.parameters(), restored.parameters()):
+            self.assertTrue(torch.equal(expected, actual))
 
 
 if __name__ == "__main__":

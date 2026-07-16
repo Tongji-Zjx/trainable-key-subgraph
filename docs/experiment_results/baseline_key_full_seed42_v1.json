@@ -1,0 +1,75 @@
+{
+  "schema_version": 1,
+  "experiment_id": "baseline_key_full_seed42_v1",
+  "record_status": "frozen_from_server_report",
+  "evidence_level": "exploratory_in_sample",
+  "known_limitation": "The key-subgraph extractor was trained with all 938 labels; these metrics are not an independent generalization estimate.",
+  "model": {
+    "subgraph_source": "key",
+    "history_mode": "full",
+    "history_keep_ratio": 1.0,
+    "temporal_order": "ordered",
+    "include_temporal_deltas": false,
+    "use_structural_features": false,
+    "prior_mode": "none",
+    "node_feature_context": "induced_subgraph",
+    "use_node_identity": false
+  },
+  "training": {
+    "seed": 42,
+    "requested_epochs": 100,
+    "epochs_completed": 24,
+    "early_stopping_patience": 15,
+    "selection_metric": "unweighted_log_loss",
+    "best_epoch": 9,
+    "best_epoch_train_weighted_loss": 0.689177,
+    "elapsed_seconds": 337.2193937972188,
+    "cuda_peak_memory_mib": 51.51220703125,
+    "server_checkpoint": "outputs/baseline_training/key_full_seed42_v1/best_checkpoint.pt"
+  },
+  "partitions": {
+    "train": {
+      "sample_count": 657,
+      "class_counts": {"0": 408, "1": 249}
+    },
+    "validation": {
+      "sample_count": 141,
+      "class_counts": {"0": 87, "1": 54}
+    },
+    "test": {
+      "sample_count": 140,
+      "class_counts": {"0": 87, "1": 53}
+    }
+  },
+  "classification_threshold": {
+    "value": 0.460415,
+    "selected_on": "validation",
+    "reused_on_test": true
+  },
+  "metrics": {
+    "validation": {
+      "unweighted_log_loss": 0.678096,
+      "roc_auc": 0.46126,
+      "balanced_accuracy": 0.537676,
+      "accuracy": 0.602837,
+      "f1": 0.333333,
+      "confusion_matrix": [[71, 16], [40, 14]],
+      "sensitivity": 0.259259,
+      "specificity": 0.816092,
+      "constant_prevalence_log_loss": 0.665537205844495,
+      "relative_log_loss_change_vs_constant_percent": 1.886965
+    },
+    "test": {
+      "unweighted_log_loss": 0.668603,
+      "roc_auc": 0.545218,
+      "balanced_accuracy": 0.543049,
+      "accuracy": 0.642857,
+      "f1": 0.21875,
+      "confusion_matrix": [[83, 4], [46, 7]],
+      "sensitivity": 0.132075,
+      "specificity": 0.954023,
+      "constant_prevalence_log_loss": 0.6633608207289565,
+      "relative_log_loss_change_vs_constant_percent": 0.790259
+    }
+  }
+}

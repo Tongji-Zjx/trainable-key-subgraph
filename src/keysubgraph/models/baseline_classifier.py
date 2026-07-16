@@ -12,6 +12,9 @@ from keysubgraph.data.baseline_collate import BaselineBatch
 from .baseline_subgraph_encoder import SignedSubgraphEncoder, WindowMeanPooling
 
 
+HISTORY_MODES = ("full", "current_only", "truncate_history", "independent_bag")
+
+
 @dataclass(frozen=True)
 class BaselineModelConfig:
     node_feature_dim: int = 12
@@ -26,6 +29,7 @@ class BaselineModelConfig:
     num_classes: int = 2
     use_structural_features: bool = False
     history_mode: str = "full"
+    history_keep_ratio: float = 1.0
 
     def __post_init__(self) -> None:
         integer_fields = (
@@ -43,8 +47,14 @@ class BaselineModelConfig:
             raise ValueError("baseline currently supports binary classification only")
         if self.use_structural_features:
             raise ValueError("structural features are not enabled in the neutral baseline")
-        if self.history_mode != "full":
-            raise ValueError("the first baseline implementation supports history_mode='full'")
+        if self.history_mode not in HISTORY_MODES:
+            raise ValueError("unsupported baseline history_mode")
+        if self.history_keep_ratio <= 0.0 or self.history_keep_ratio > 1.0:
+            raise ValueError("history_keep_ratio must be in (0, 1]")
+        if self.history_mode != "truncate_history" and self.history_keep_ratio != 1.0:
+            raise ValueError(
+                "history_keep_ratio differs from 1 only for truncate_history"
+            )
 
 
 @dataclass(frozen=True)
@@ -56,6 +66,7 @@ class BaselineModelOutput:
     hidden_states: torch.Tensor
     final_hidden_state: torch.Tensor
     time_mask: torch.Tensor
+    history_mask: torch.Tensor
 
 
 class SignedSequenceBaseline(nn.Module):
@@ -99,6 +110,59 @@ class SignedSequenceBaseline(nn.Module):
             window_index.shape[0], window_index.shape[1], flat_windows.shape[-1]
         )
 
+    def _history_mask(self, time_mask: torch.Tensor) -> torch.Tensor:
+        """Return windows allowed to update recurrent state for this condition."""
+
+        if time_mask.dim() != 2 or not bool(time_mask.any(dim=1).all()):
+            raise ValueError("each baseline sample needs at least one valid timepoint")
+        mode = self.config.history_mode
+        if mode in ("full", "independent_bag"):
+            return time_mask
+        valid_counts = time_mask.sum(dim=1)
+        positions = torch.arange(time_mask.shape[1], device=time_mask.device)
+        if mode == "current_only":
+            return time_mask & (positions.unsqueeze(0) == (valid_counts - 1).unsqueeze(1))
+        keep_counts = torch.ceil(
+            valid_counts.to(dtype=torch.float32) * self.config.history_keep_ratio
+        ).to(dtype=torch.long).clamp_min(1)
+        starts = valid_counts - keep_counts
+        return time_mask & (positions.unsqueeze(0) >= starts.unsqueeze(1))
+
+    def _encode_history(
+        self, padded_windows: torch.Tensor, time_mask: torch.Tensor
+    ):
+        history_mask = self._history_mask(time_mask)
+        zero_state = padded_windows.new_zeros(
+            padded_windows.shape[0], self.config.gru_hidden_dim
+        )
+        hidden_states = []
+        if self.config.history_mode == "independent_bag":
+            state_sum = zero_state
+            for time_index in range(padded_windows.shape[1]):
+                candidate = self.gru_cell(
+                    padded_windows[:, time_index], zero_state
+                )
+                valid = history_mask[:, time_index].unsqueeze(-1)
+                independent_state = torch.where(
+                    valid, candidate, torch.zeros_like(candidate)
+                )
+                state_sum = state_sum + independent_state
+                hidden_states.append(independent_state)
+            denominator = history_mask.sum(dim=1).clamp_min(1).to(
+                dtype=padded_windows.dtype
+            ).unsqueeze(-1)
+            state = state_sum / denominator
+        else:
+            state = zero_state
+            for time_index in range(padded_windows.shape[1]):
+                candidate = self.gru_cell(padded_windows[:, time_index], state)
+                active = history_mask[:, time_index].unsqueeze(-1)
+                state = torch.where(active, candidate, state)
+                hidden_states.append(state)
+        if not hidden_states:
+            raise ValueError("baseline batch contains no timepoints")
+        return state, torch.stack(hidden_states, dim=1), history_mask
+
     def forward(self, batch: BaselineBatch) -> BaselineModelOutput:
         if batch.node_feature_dim != self.config.node_feature_dim:
             raise ValueError("batch node feature dimension does not match model")
@@ -115,16 +179,9 @@ class SignedSequenceBaseline(nn.Module):
         projected = self.input_activation(self.input_normalization(projected))
         padded_windows = self._pad_windows(projected, batch.window_index)
 
-        state = projected.new_zeros(batch.batch_size, self.config.gru_hidden_dim)
-        hidden_states = []
-        for time_index in range(padded_windows.shape[1]):
-            candidate = self.gru_cell(padded_windows[:, time_index], state)
-            valid = batch.time_mask[:, time_index].unsqueeze(-1)
-            state = torch.where(valid, candidate, state)
-            hidden_states.append(state)
-        if not hidden_states:
-            raise ValueError("baseline batch contains no timepoints")
-        stacked_states = torch.stack(hidden_states, dim=1)
+        state, stacked_states, history_mask = self._encode_history(
+            padded_windows, batch.time_mask
+        )
         logits = self.classifier(state)
         return BaselineModelOutput(
             logits=logits,
@@ -134,4 +191,5 @@ class SignedSequenceBaseline(nn.Module):
             hidden_states=stacked_states,
             final_hidden_state=state,
             time_mask=batch.time_mask,
+            history_mask=history_mask,
         )

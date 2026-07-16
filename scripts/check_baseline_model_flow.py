@@ -20,6 +20,7 @@ from keysubgraph.data.baseline_collate import create_baseline_loader  # noqa: E4
 from keysubgraph.data.baseline_dataset import BaselineHardSubgraphDataset  # noqa: E402
 from keysubgraph.models.baseline_classifier import (  # noqa: E402
     BaselineModelConfig,
+    HISTORY_MODES,
     SignedSequenceBaseline,
 )
 from keysubgraph.training.baseline_trainer import baseline_class_weights  # noqa: E402
@@ -31,6 +32,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--batch-size", type=int, default=2)
     parser.add_argument("--num-workers", type=int, default=0)
+    parser.add_argument("--history-mode", choices=HISTORY_MODES, default="full")
+    parser.add_argument("--history-keep-ratio", type=float, default=1.0)
     return parser.parse_args()
 
 
@@ -47,7 +50,12 @@ def main() -> int:
         pin_memory=device.type == "cuda",
     )
     batch = next(iter(loader)).to(device)
-    model = SignedSequenceBaseline(BaselineModelConfig()).to(device)
+    model = SignedSequenceBaseline(
+        BaselineModelConfig(
+            history_mode=args.history_mode,
+            history_keep_ratio=args.history_keep_ratio,
+        )
+    ).to(device)
     labels_for_weights = [record.label for record in dataset.records]
     if len(set(labels_for_weights)) == 2:
         class_weights = baseline_class_weights(labels_for_weights).to(device)
@@ -65,6 +73,8 @@ def main() -> int:
         gradient_report[name] = float(parameter.grad.abs().sum().detach().cpu())
     payload = {
         "device": str(device),
+        "history_mode": args.history_mode,
+        "history_keep_ratio": args.history_keep_ratio,
         "batch_size": batch.batch_size,
         "subgraph_count": batch.subgraph_count,
         "window_count": batch.window_count,
@@ -78,7 +88,13 @@ def main() -> int:
         "negative_branch_gradient": gradient_report[
             "subgraph_encoder.layers.0.negative_projection.weight"
         ],
-        "gru_gradient": gradient_report["gru_cell.weight_hh"],
+        "gru_gradient": gradient_report["gru_cell.weight_ih"],
+        "gru_input_gradient": gradient_report["gru_cell.weight_ih"],
+        "gru_recurrent_gradient": gradient_report["gru_cell.weight_hh"],
+        "gru_recurrent_gradient_expected_nonzero": args.history_mode in (
+            "full",
+            "truncate_history",
+        ),
         "classifier_gradient": gradient_report["classifier.3.weight"],
     }
     print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))

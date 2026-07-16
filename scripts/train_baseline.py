@@ -20,6 +20,7 @@ from keysubgraph.data.baseline_collate import create_baseline_loader  # noqa: E4
 from keysubgraph.data.baseline_dataset import BaselineHardSubgraphDataset  # noqa: E402
 from keysubgraph.models.baseline_classifier import (  # noqa: E402
     BaselineModelConfig,
+    HISTORY_MODES,
     SignedSequenceBaseline,
 )
 from keysubgraph.training.baseline_trainer import (  # noqa: E402
@@ -59,6 +60,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--classifier-hidden", type=int, default=64)
     parser.add_argument("--signed-dropout", type=float, default=0.1)
     parser.add_argument("--classifier-dropout", type=float, default=0.2)
+    parser.add_argument(
+        "--history-mode", choices=HISTORY_MODES, default="full"
+    )
+    parser.add_argument("--history-keep-ratio", type=float, default=1.0)
     parser.add_argument(
         "--smoke", action="store_true", help="Run one batch per partition for one epoch."
     )
@@ -101,6 +106,8 @@ def main() -> int:
             gru_hidden_dim=args.gru_hidden,
             classifier_hidden_dim=args.classifier_hidden,
             classifier_dropout=args.classifier_dropout,
+            history_mode=args.history_mode,
+            history_keep_ratio=args.history_keep_ratio,
         )
     )
     config = BaselineTrainingConfig(
@@ -140,6 +147,8 @@ def main() -> int:
         {
             "device": str(device),
             "smoke": bool(args.smoke),
+            "history_mode": args.history_mode,
+            "history_keep_ratio": args.history_keep_ratio,
             "elapsed_seconds": time.perf_counter() - started,
             "cuda_peak_memory_mib": (
                 torch.cuda.max_memory_allocated(device) / (1024.0 * 1024.0)

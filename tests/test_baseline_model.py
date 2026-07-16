@@ -2,6 +2,7 @@ from __future__ import absolute_import, division, print_function
 
 import sys
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 import torch
@@ -210,6 +211,141 @@ class SignedSequenceBaselineTest(unittest.TestCase):
             ]
             self.assertTrue(all(item is not None for item in gradients))
             self.assertTrue(all(bool(torch.isfinite(item).all()) for item in gradients))
+
+
+class BaselineHistoryModeTest(unittest.TestCase):
+    @staticmethod
+    def _config(mode, keep_ratio=1.0):
+        return BaselineModelConfig(
+            node_hidden_dim=16,
+            fusion_dim=24,
+            gru_hidden_dim=20,
+            classifier_hidden_dim=10,
+            signed_gnn_dropout=0.0,
+            classifier_dropout=0.0,
+            history_mode=mode,
+            history_keep_ratio=keep_ratio,
+        )
+
+    @staticmethod
+    def _paired_models(left_config, right_config):
+        torch.manual_seed(21)
+        left = SignedSequenceBaseline(left_config)
+        right = SignedSequenceBaseline(right_config)
+        right.load_state_dict(left.state_dict())
+        left.eval()
+        right.eval()
+        return left, right
+
+    def test_history_configuration_is_strict(self):
+        with self.assertRaisesRegex(ValueError, "unsupported"):
+            BaselineModelConfig(history_mode="reset_state")
+        with self.assertRaisesRegex(ValueError, r"\(0, 1\]"):
+            BaselineModelConfig(
+                history_mode="truncate_history", history_keep_ratio=0.0
+            )
+        with self.assertRaisesRegex(ValueError, "only for truncate_history"):
+            BaselineModelConfig(history_mode="current_only", history_keep_ratio=0.5)
+
+    def test_all_history_modes_have_identical_parameter_count(self):
+        counts = []
+        for mode in ("full", "current_only", "truncate_history", "independent_bag"):
+            ratio = 0.5 if mode == "truncate_history" else 1.0
+            model = SignedSequenceBaseline(self._config(mode, ratio))
+            counts.append(sum(parameter.numel() for parameter in model.parameters()))
+        self.assertEqual(len(set(counts)), 1)
+
+    def test_current_only_ignores_early_windows(self):
+        torch.manual_seed(22)
+        model = SignedSequenceBaseline(self._config("current_only"))
+        model.eval()
+        batch = _sequence_batch()
+        changed_features = batch.node_features.clone()
+        changed_features[0] = changed_features[0] * -7.0 + 13.0
+        changed = replace(batch, node_features=changed_features)
+
+        original_output = model(batch)
+        changed_output = model(changed)
+
+        self.assertTrue(
+            torch.allclose(
+                original_output.logits[0], changed_output.logits[0], atol=1e-6, rtol=0.0
+            )
+        )
+        self.assertEqual(
+            original_output.history_mask.tolist(), [[False, True], [True, False]]
+        )
+
+    def test_truncate_history_uses_ceil_of_keep_ratio(self):
+        torch.manual_seed(23)
+        model = SignedSequenceBaseline(self._config("truncate_history", 0.5))
+        model.eval()
+
+        output = model(_sequence_batch())
+
+        self.assertEqual(output.history_mask.tolist(), [[False, True], [True, False]])
+
+    def test_truncate_ratio_one_is_numerically_equal_to_full(self):
+        full, truncated = self._paired_models(
+            self._config("full"), self._config("truncate_history", 1.0)
+        )
+        batch = _sequence_batch(extra_time_padding=True)
+
+        full_output = full(batch)
+        truncated_output = truncated(batch)
+
+        self.assertTrue(
+            torch.allclose(full_output.logits, truncated_output.logits, atol=1e-7, rtol=0.0)
+        )
+        self.assertTrue(torch.equal(full_output.history_mask, truncated_output.history_mask))
+
+    def test_single_window_full_equals_current_only(self):
+        full, current = self._paired_models(
+            self._config("full"), self._config("current_only")
+        )
+        batch = _sequence_batch()
+
+        full_output = full(batch)
+        current_output = current(batch)
+
+        self.assertTrue(
+            torch.allclose(
+                full_output.logits[1], current_output.logits[1], atol=1e-7, rtol=0.0
+            )
+        )
+
+    def test_independent_bag_is_invariant_to_window_permutation(self):
+        torch.manual_seed(24)
+        model = SignedSequenceBaseline(self._config("independent_bag"))
+        model.eval()
+        batch = _sequence_batch()
+        permuted_index = batch.window_index.clone()
+        permuted_index[0, 0] = batch.window_index[0, 1]
+        permuted_index[0, 1] = batch.window_index[0, 0]
+        permuted = replace(batch, window_index=permuted_index)
+
+        original_output = model(batch)
+        permuted_output = model(permuted)
+
+        self.assertTrue(
+            torch.allclose(
+                original_output.logits, permuted_output.logits, atol=1e-6, rtol=0.0
+            )
+        )
+
+    def test_each_history_mode_backpropagates_through_gru(self):
+        for mode in ("current_only", "truncate_history", "independent_bag"):
+            ratio = 0.5 if mode == "truncate_history" else 1.0
+            torch.manual_seed(25)
+            model = SignedSequenceBaseline(self._config(mode, ratio))
+            loss = torch.nn.functional.cross_entropy(
+                model(_sequence_batch()).logits, torch.tensor([0, 1])
+            )
+            loss.backward()
+            gradient = model.gru_cell.weight_ih.grad
+            self.assertIsNotNone(gradient)
+            self.assertTrue(bool(torch.isfinite(gradient).all()))
+            self.assertGreater(float(gradient.abs().sum()), 0.0)
 
 
 if __name__ == "__main__":
