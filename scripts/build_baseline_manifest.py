@@ -30,6 +30,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--checkpoint", type=Path)
     parser.add_argument(
+        "--subgraph-source",
+        choices=("key", "low_score", "top_degree", "random"),
+        default="key",
+    )
+    parser.add_argument("--matched-control-manifest", type=Path)
+    parser.add_argument(
         "--evidence-level",
         choices=("exploratory_in_sample", "confirmatory_cross_fitted"),
         default="exploratory_in_sample",
@@ -49,6 +55,8 @@ def main() -> int:
         checkpoint_path=args.checkpoint,
         evidence_level=args.evidence_level,
         overwrite=args.overwrite,
+        matched_control_manifest_path=args.matched_control_manifest,
+        subgraph_source=args.subgraph_source,
     )
     print(
         json.dumps(
@@ -59,6 +67,7 @@ def main() -> int:
                 "subgraph_count": payload["subgraph_count"],
                 "checkpoint_sha256": payload["checkpoint_sha256"],
                 "data_protocol_sha256": payload["data_protocol_sha256"],
+                "subgraph_source": payload["subgraph_source"],
             },
             ensure_ascii=False,
             indent=2,

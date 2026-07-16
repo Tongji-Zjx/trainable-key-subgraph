@@ -174,6 +174,13 @@ def create_baseline_downstream_splits(
             "source_split": "all",
             "checkpoint_sha256": parent_payload["checkpoint_sha256"],
             "hard_extraction_config": parent_payload.get("hard_extraction_config"),
+            "subgraph_source": parent_payload.get("subgraph_source", "key"),
+            "matched_control_manifest": parent_payload.get(
+                "matched_control_manifest", ""
+            ),
+            "matched_control_manifest_sha256": parent_payload.get(
+                "matched_control_manifest_sha256", ""
+            ),
             "parent_manifest": _portable_path(parent_manifest_path, project_root),
             "parent_manifest_sha256": parent_hash,
             "downstream_splits_csv": _portable_path(csv_path, project_root),
@@ -211,6 +218,10 @@ def create_baseline_downstream_splits(
                 "group_count": len({_group_id(record) for record in records}),
                 "parent_manifest_sha256": parent_hash,
                 "downstream_splits_json_sha256": json_hash,
+                "subgraph_source": parent_payload.get("subgraph_source", "key"),
+                "matched_control_manifest_sha256": parent_payload.get(
+                    "matched_control_manifest_sha256", ""
+                ),
             },
         )
         results[split] = str(manifest_json)

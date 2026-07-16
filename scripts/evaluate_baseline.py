@@ -62,6 +62,14 @@ def main() -> int:
         "downstream_splits_json_sha256"
     ):
         raise ValueError("checkpoint and evaluation manifest use different downstream splits")
+    if manifest_payload.get("subgraph_source", "key") != checkpoint.get(
+        "subgraph_source", "key"
+    ):
+        raise ValueError("checkpoint and evaluation manifest use different subgraph sources")
+    if manifest_payload.get("matched_control_manifest_sha256", "") != checkpoint.get(
+        "matched_control_manifest_sha256", ""
+    ):
+        raise ValueError("checkpoint and evaluation manifest use different matched cohorts")
     if manifest_payload["split"] == "validation" and file_sha256(
         args.manifest
     ) != checkpoint["validation_manifest_sha256"]:
@@ -108,6 +116,10 @@ def main() -> int:
         "checkpoint_sha256": file_sha256(args.checkpoint),
         "baseline_manifest_sha256": file_sha256(args.manifest),
         "classification_threshold_source": "checkpoint_validation",
+        "subgraph_source": manifest_payload.get("subgraph_source", "key"),
+        "matched_control_manifest_sha256": manifest_payload.get(
+            "matched_control_manifest_sha256", ""
+        ),
         "metrics": metrics,
     }
     output = args.output or (

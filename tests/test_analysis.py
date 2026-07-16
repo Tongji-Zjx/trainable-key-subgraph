@@ -35,6 +35,9 @@ from keysubgraph.analysis.structural_metrics import (  # noqa: E402
     compute_subgraph_metrics,
 )
 from keysubgraph.data.graph_dataset import GraphSequenceSample  # noqa: E402
+from keysubgraph.data.baseline_controls import (  # noqa: E402
+    build_matched_source_payloads,
+)
 
 
 def _record(sample_id="sample", label=0):
@@ -175,6 +178,66 @@ class AnalysisTest(unittest.TestCase):
         self.assertEqual(len(low_controls), 1)
         self.assertEqual(low_controls[0]["source"], "low_score")
         self.assertEqual(low_controls[0]["node_ids"], [2, 3, 4])
+
+    def test_baseline_control_payloads_share_exact_tuple_inventory(self):
+        sample = _control_sample()
+        key = _record()
+        key.update(
+            {
+                "time_index": 0,
+                "node_ids": [0, 1, 2],
+                "edge_index": [[0, 1], [1, 2]],
+                "score_connectivity": 1.0,
+                "candidate_score": 0.9,
+                "seed_node": 1,
+            }
+        )
+        low = dict(key)
+        low.update(
+            {
+                "node_ids": [2, 3, 4],
+                "node_names": ["c", "d", "e"],
+                "edge_index": [[2, 3], [3, 4]],
+                "original_edge_weights": [0.6, 0.5],
+                "community_labels": [1, 1, 1],
+                "candidate_score": 0.1,
+                "seed_node": 3,
+            }
+        )
+        payload = {
+            "timepoints": [
+                {
+                    "time_index": 0,
+                    "time_mask": True,
+                    "num_valid_subgraphs": 1,
+                    "subgraphs": [key],
+                    "candidate_pool": [key, low],
+                }
+            ]
+        }
+
+        sources, audit = build_matched_source_payloads(
+            sample, payload, random_seed=9, random_repeat_index=0
+        )
+
+        self.assertTrue(audit["included"])
+        self.assertEqual(audit["matched_tuple_count"], 1)
+        self.assertEqual(
+            set(sources), {"key", "low_score", "top_degree", "random"}
+        )
+        for source, source_payload in sources.items():
+            timepoint = source_payload["timepoints"][0]
+            self.assertNotIn("candidate_pool", timepoint)
+            self.assertEqual(timepoint["num_valid_subgraphs"], 1)
+            self.assertEqual(timepoint["subgraphs"][0]["source"], source)
+            self.assertEqual(len(timepoint["subgraphs"][0]["node_ids"]), 3)
+            self.assertEqual(len(timepoint["subgraphs"][0]["edge_index"]), 2)
+
+        payload["timepoints"][0]["candidate_pool"] = [key]
+        sources, audit = build_matched_source_payloads(sample, payload, random_seed=9)
+        self.assertEqual(sources, {})
+        self.assertFalse(audit["included"])
+        self.assertEqual(audit["empty_timepoints"], [0])
 
     def test_original_graph_record_uses_all_nodes_and_signed_edges(self):
         sample = _control_sample()

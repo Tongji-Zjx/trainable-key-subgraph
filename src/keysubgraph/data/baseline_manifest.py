@@ -34,6 +34,9 @@ class BaselineManifestRecord:
     data_protocol_sha256: str
     edge_presence_threshold: float
     source_split: str = ""
+    subgraph_source: str = "key"
+    matched_control_manifest: str = ""
+    matched_control_manifest_sha256: str = ""
 
 
 def _portable_path(path: Path, project_root: Path) -> str:
@@ -87,6 +90,8 @@ def build_baseline_manifest(
     checkpoint_path: Optional[Path] = None,
     evidence_level: str = "exploratory_in_sample",
     overwrite: bool = False,
+    matched_control_manifest_path: Optional[Path] = None,
+    subgraph_source: str = "key",
 ) -> Dict[str, Any]:
     """Validate one complete export partition and freeze its inventory."""
 
@@ -122,6 +127,43 @@ def build_baseline_manifest(
     assignment_by_key = {item.sample_key: item for item in assignments}
     if not assignment_by_key:
         raise ValueError("requested split has no assignments")
+    matched_manifest_value = ""
+    matched_manifest_hash = ""
+    matched_source_records = None
+    if matched_control_manifest_path is not None:
+        matched_control_manifest_path = Path(matched_control_manifest_path).resolve()
+        with matched_control_manifest_path.open("r", encoding="utf-8") as handle:
+            matched_payload = json.load(handle)
+        if (
+            matched_payload.get("schema_version") != 1
+            or matched_payload.get("purpose") != "baseline_matched_subgraph_sources"
+            or not matched_payload.get("immutable")
+        ):
+            raise ValueError("unsupported matched-control manifest")
+        if matched_payload.get("split") != split:
+            raise ValueError("matched-control manifest split differs")
+        if matched_payload.get("data_protocol_sha256") != protocol_sha256:
+            raise ValueError("matched-control manifest protocol differs")
+        if subgraph_source not in matched_payload.get("sources", []):
+            raise ValueError("subgraph source is absent from matched-control manifest")
+        included_keys = set(matched_payload.get("included_sample_keys", []))
+        if not included_keys or not included_keys.issubset(assignment_by_key):
+            raise ValueError("matched-control sample cohort is invalid")
+        assignment_by_key = {
+            key: assignment_by_key[key] for key in included_keys
+        }
+        matched_source_records = {
+            str(item["sample_key"]): item
+            for item in matched_payload["source_records"][subgraph_source]
+        }
+        if set(matched_source_records) != included_keys:
+            raise ValueError("matched-control source inventory differs from cohort")
+        matched_manifest_value = _portable_path(
+            matched_control_manifest_path, project_root
+        )
+        matched_manifest_hash = file_sha256(matched_control_manifest_path)
+    elif subgraph_source != "key":
+        raise ValueError("non-key source requires a matched-control manifest")
 
     export_paths = sorted(export_dir.glob("*.json"))
     if not export_paths:
@@ -145,6 +187,8 @@ def build_baseline_manifest(
             checkpoint_sha256 = current_checkpoint
         elif current_checkpoint != checkpoint_sha256:
             raise ValueError("checkpoint hash differs across exports")
+        if str(payload.get("subgraph_source", "key")) != subgraph_source:
+            raise ValueError("hard export subgraph source differs")
 
     if set(payload_by_key) != set(assignment_by_key):
         missing = sorted(set(assignment_by_key) - set(payload_by_key))
@@ -154,6 +198,12 @@ def build_baseline_manifest(
                 missing[:1], extra[:1]
             )
         )
+    if matched_source_records is not None:
+        for sample_key, (path, unused_payload) in payload_by_key.items():
+            del unused_payload
+            expected = matched_source_records[sample_key]
+            if file_sha256(path) != expected.get("sha256"):
+                raise ValueError("hard export differs from matched-control inventory")
     if checkpoint_path is not None:
         checkpoint_path = Path(checkpoint_path).resolve()
         if file_sha256(checkpoint_path) != checkpoint_sha256:
@@ -218,6 +268,9 @@ def build_baseline_manifest(
                 data_protocol_sha256=protocol_sha256,
                 edge_presence_threshold=float(protocol["edge_presence_threshold"]),
                 source_split=assignment.split,
+                subgraph_source=subgraph_source,
+                matched_control_manifest=matched_manifest_value,
+                matched_control_manifest_sha256=matched_manifest_hash,
             )
         )
 
@@ -233,6 +286,9 @@ def build_baseline_manifest(
         "source_split": split,
         "checkpoint_sha256": checkpoint_sha256,
         "hard_extraction_config": extraction_config,
+        "subgraph_source": subgraph_source,
+        "matched_control_manifest": matched_manifest_value,
+        "matched_control_manifest_sha256": matched_manifest_hash,
         "sample_count": len(records),
         "timepoint_count": timepoint_total,
         "subgraph_count": subgraph_total,
@@ -251,6 +307,8 @@ def build_baseline_manifest(
         "site_count": len({record.site for record in records}),
         "checkpoint_sha256": checkpoint_sha256,
         "data_protocol_sha256": protocol_sha256,
+        "subgraph_source": subgraph_source,
+        "matched_control_manifest_sha256": matched_manifest_hash,
     }
     _atomic_csv(csv_path, records)
     _atomic_json(json_path, payload)
@@ -279,6 +337,14 @@ def read_baseline_manifest(
     for item in payload.get("records", []):
         current = dict(item)
         current.setdefault("source_split", current.get("split", ""))
+        current.setdefault("subgraph_source", payload.get("subgraph_source", "key"))
+        current.setdefault(
+            "matched_control_manifest", payload.get("matched_control_manifest", "")
+        )
+        current.setdefault(
+            "matched_control_manifest_sha256",
+            payload.get("matched_control_manifest_sha256", ""),
+        )
         record_payloads.append(current)
     records = tuple(BaselineManifestRecord(**item) for item in record_payloads)
     if not records or len(records) != int(payload.get("sample_count", -1)):
@@ -305,6 +371,33 @@ def read_baseline_manifest(
         for record in records
     ):
         raise ValueError("baseline manifest record checkpoint hashes differ")
+    subgraph_source = str(payload.get("subgraph_source", "key"))
+    if any(record.subgraph_source != subgraph_source for record in records):
+        raise ValueError("baseline manifest record subgraph sources differ")
+    matched_value = str(payload.get("matched_control_manifest", ""))
+    matched_hash = str(payload.get("matched_control_manifest_sha256", ""))
+    if bool(matched_value) != bool(matched_hash):
+        raise ValueError("matched-control manifest metadata is incomplete")
+    if any(
+        record.matched_control_manifest != matched_value
+        or record.matched_control_manifest_sha256 != matched_hash
+        for record in records
+    ):
+        raise ValueError("baseline records use different matched-control manifests")
+    if matched_value:
+        matched_path = resolve_manifest_path(matched_value, project_root)
+        if not matched_path.is_file() or file_sha256(matched_path) != matched_hash:
+            raise ValueError("matched-control manifest hash mismatch")
+        with matched_path.open("r", encoding="utf-8") as handle:
+            matched_payload = json.load(handle)
+        if matched_payload.get("purpose") != "baseline_matched_subgraph_sources":
+            raise ValueError("matched-control manifest has the wrong purpose")
+        if subgraph_source not in matched_payload.get("sources", []):
+            raise ValueError("baseline subgraph source is absent from matching artifact")
+        if {record.sample_key for record in records} - set(
+            matched_payload.get("included_sample_keys", [])
+        ):
+            raise ValueError("baseline samples are absent from matched-control cohort")
     if "timepoint_count" in payload and sum(
         record.timepoint_count for record in records
     ) != int(payload["timepoint_count"]):

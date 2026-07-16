@@ -262,6 +262,58 @@ class BaselineDataTest(unittest.TestCase):
         self.assertAlmostEqual(float(center[3]), 0.625, places=6)
         self.assertAlmostEqual(float(center[4]), 0.375, places=6)
 
+    def test_matched_control_manifest_binds_source_and_common_cohort(self):
+        source_root = self.root / "matched_sources"
+        low_export_dir = source_root / "low_score" / "validation"
+        low_export_dir.mkdir(parents=True)
+        original_path = self.export_dir / (self.sample_id + ".json")
+        with original_path.open("r", encoding="utf-8") as handle:
+            control_payload = json.load(handle)
+        control_payload["subgraph_source"] = "low_score"
+        control_path = low_export_dir / original_path.name
+        with control_path.open("w", encoding="utf-8") as handle:
+            json.dump(control_payload, handle)
+        matched_path = source_root / "matched_control_manifest.json"
+        with matched_path.open("w", encoding="utf-8") as handle:
+            json.dump(
+                {
+                    "schema_version": 1,
+                    "immutable": True,
+                    "purpose": "baseline_matched_subgraph_sources",
+                    "split": "validation",
+                    "data_protocol_sha256": file_sha256(self.protocol_path),
+                    "sources": ["key", "low_score", "top_degree", "random"],
+                    "included_sample_keys": [self.sample_key],
+                    "source_records": {
+                        "low_score": [
+                            {
+                                "sample_key": self.sample_key,
+                                "sha256": file_sha256(control_path),
+                            }
+                        ]
+                    },
+                },
+                handle,
+            )
+        control_manifest_dir = self.root / "low_score_manifest"
+
+        payload = build_baseline_manifest(
+            self.root,
+            self.protocol_path,
+            source_root / "low_score",
+            "validation",
+            control_manifest_dir,
+            matched_control_manifest_path=matched_path,
+            subgraph_source="low_score",
+        )
+        dataset = BaselineHardSubgraphDataset(
+            self.root, control_manifest_dir / "baseline_manifest.json"
+        )
+
+        self.assertEqual(payload["subgraph_source"], "low_score")
+        self.assertEqual(dataset[0].sample_key, self.sample_key)
+        self.assertTrue(payload["matched_control_manifest_sha256"])
+
     def test_label_is_target_only_and_metadata_changes_are_rejected(self):
         dataset = self._dataset(verify_exports=False)
         original_features = dataset[0].windows[0].subgraphs[0].node_features.clone()

@@ -313,6 +313,10 @@ def _checkpoint_payload(
         "downstream_splits_json_sha256": train_manifest_payload.get(
             "downstream_splits_json_sha256"
         ),
+        "subgraph_source": train_manifest_payload.get("subgraph_source", "key"),
+        "matched_control_manifest_sha256": train_manifest_payload.get(
+            "matched_control_manifest_sha256", ""
+        ),
     }
 
 
@@ -342,6 +346,11 @@ def train_baseline(
         raise ValueError("validation manifest must use split='validation'")
     for name in ("data_protocol_sha256", "checkpoint_sha256", "evidence_level"):
         if train_manifest_payload[name] != validation_manifest_payload[name]:
+            raise ValueError("train and validation manifests differ in {}".format(name))
+    for name in ("subgraph_source", "matched_control_manifest_sha256"):
+        if train_manifest_payload.get(name, "key" if name == "subgraph_source" else "") != validation_manifest_payload.get(
+            name, "key" if name == "subgraph_source" else ""
+        ):
             raise ValueError("train and validation manifests differ in {}".format(name))
     train_parent = train_manifest_payload.get("parent_manifest_sha256")
     validation_parent = validation_manifest_payload.get("parent_manifest_sha256")
