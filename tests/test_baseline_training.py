@@ -1,6 +1,7 @@
 from __future__ import absolute_import, division, print_function
 
 import json
+import hashlib
 import sys
 import tempfile
 import unittest
@@ -19,6 +20,9 @@ from keysubgraph.data.data_split import file_sha256  # noqa: E402
 from keysubgraph.models.baseline_classifier import (  # noqa: E402
     BaselineModelConfig,
     SignedSequenceBaseline,
+)
+from keysubgraph.features.structural_prior import (  # noqa: E402
+    STATIC_WINDOW_STRUCTURAL_FEATURES,
 )
 from keysubgraph.training.baseline_trainer import (  # noqa: E402
     BaselineTrainingConfig,
@@ -207,6 +211,71 @@ class BaselineTrainingTest(unittest.TestCase):
         self.assertNotIn("history_keep_ratio", checkpoint["model_config"])
         for expected, actual in zip(model.parameters(), restored.parameters()):
             self.assertTrue(torch.equal(expected, actual))
+
+    def test_structural_transform_is_frozen_hashed_and_restored(self):
+        config = BaselineModelConfig(
+            node_hidden_dim=8,
+            signed_gnn_layers=1,
+            signed_gnn_dropout=0.0,
+            fusion_dim=12,
+            gru_hidden_dim=10,
+            classifier_hidden_dim=6,
+            classifier_dropout=0.0,
+            structural_interface_version=1,
+            structural_group="D",
+            use_structural_features=True,
+            prior_mode="real",
+        )
+        transform = {
+            "schema_version": 1,
+            "fitted_on": "train_only",
+            "structural_group": "D",
+            "use_structural_features": True,
+            "prior_mode": "real",
+            "feature_names": list(STATIC_WINDOW_STRUCTURAL_FEATURES),
+            "mean": [float(index) for index in range(11)],
+            "std": [1.0 + index * 0.1 for index in range(11)],
+            "prior_scale": [1.0 + index * 0.05 for index in range(11)],
+            "beta": 1.0,
+            "permutation_seed": 42,
+            "sample_count": 1,
+            "train_sample_key_sha256": hashlib.sha256(
+                json.dumps(
+                    ["SITE/train_sample"], separators=(",", ":")
+                ).encode("utf-8")
+            ).hexdigest(),
+        }
+        output_dir = self.root / "structural_training"
+        model = SignedSequenceBaseline(config)
+        result = train_baseline(
+            model,
+            train_loader=[_sequence_batch()],
+            validation_loader=[_sequence_batch()],
+            train_labels=[0, 1],
+            device=torch.device("cpu"),
+            config=BaselineTrainingConfig(epochs=1, seed=13),
+            output_dir=output_dir,
+            train_manifest_path=self.train_manifest,
+            validation_manifest_path=self.validation_manifest,
+            project_root=self.root,
+            structural_transform=transform,
+        )
+
+        transform_path = output_dir / "structural_transform.json"
+        self.assertTrue(transform_path.is_file())
+        restored = SignedSequenceBaseline(config)
+        checkpoint = load_baseline_checkpoint(
+            result["best_checkpoint"], restored, device=torch.device("cpu")
+        )
+        self.assertEqual(checkpoint["structural_transform"], transform)
+        self.assertEqual(
+            checkpoint["structural_transform_sha256"], file_sha256(transform_path)
+        )
+        self.assertTrue(bool(restored.structural_transform_fitted))
+        self.assertTrue(torch.allclose(
+            restored.structural_prior_scale,
+            torch.tensor(transform["prior_scale"]),
+        ))
 
 
 if __name__ == "__main__":

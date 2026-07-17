@@ -17,6 +17,9 @@ if str(SRC_ROOT) not in sys.path:
 
 from keysubgraph.data.baseline_collate import create_baseline_loader  # noqa: E402
 from keysubgraph.data.baseline_dataset import BaselineHardSubgraphDataset  # noqa: E402
+from keysubgraph.features.structural_prior import (  # noqa: E402
+    STATIC_WINDOW_STRUCTURAL_FEATURES,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -44,6 +47,9 @@ def main() -> int:
     node_counts = []
     positive_edges = 0
     negative_edges = 0
+    structural_valid_counts = torch.zeros(
+        len(STATIC_WINDOW_STRUCTURAL_FEATURES), dtype=torch.long
+    )
     for batch_index, batch in enumerate(loader):
         if not bool(torch.isfinite(batch.node_features).all()):
             raise RuntimeError("baseline node features are non-finite")
@@ -55,6 +61,11 @@ def main() -> int:
             negative_edges += int(torch.triu(batch.adjacency < 0, diagonal=1).sum())
         if bool((batch.adjacency > 0).any()):
             positive_edges += int(torch.triu(batch.adjacency > 0, diagonal=1).sum())
+        if not bool(torch.isfinite(batch.window_structural_features).all()):
+            raise RuntimeError("window structural features are non-finite")
+        if bool((batch.window_structural_features[~batch.window_structural_mask] != 0).any()):
+            raise RuntimeError("missing structural features are not zero-filled")
+        structural_valid_counts += batch.window_structural_mask.sum(dim=0)
         sample_count += batch.batch_size
         timepoint_count += batch.window_count
         subgraph_count += batch.subgraph_count
@@ -73,6 +84,11 @@ def main() -> int:
         "positive_edge_count": positive_edges,
         "negative_edge_count": negative_edges,
         "signed_edges_present": positive_edges > 0 and negative_edges > 0,
+        "structural_feature_names": list(STATIC_WINDOW_STRUCTURAL_FEATURES),
+        "structural_valid_window_counts": {
+            name: int(structural_valid_counts[index])
+            for index, name in enumerate(STATIC_WINDOW_STRUCTURAL_FEATURES)
+        },
     }
     print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
     return 0

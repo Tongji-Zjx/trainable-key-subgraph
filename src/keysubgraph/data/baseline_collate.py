@@ -25,6 +25,8 @@ class BaselineBatch:
     window_to_sample: torch.Tensor
     window_time_index: torch.Tensor
     window_subgraph_count: torch.Tensor
+    window_structural_features: torch.Tensor
+    window_structural_mask: torch.Tensor
     window_index: torch.Tensor
     time_mask: torch.Tensor
     labels: torch.Tensor
@@ -61,6 +63,8 @@ class BaselineBatch:
             "window_to_sample",
             "window_time_index",
             "window_subgraph_count",
+            "window_structural_features",
+            "window_structural_mask",
             "window_index",
             "time_mask",
             "labels",
@@ -140,6 +144,27 @@ def baseline_padded_collate(
         adjacency[index, :node_count, :node_count] = subgraph.adjacency
         edge_mask[index, :node_count, :node_count] = subgraph.edge_mask
         node_mask[index, :node_count] = True
+    structural_dim = int(subgraphs[0].structural_features.numel())
+    if any(
+        item.structural_features.shape != (structural_dim,)
+        or item.structural_mask.shape != (structural_dim,)
+        for item in subgraphs
+    ):
+        raise ValueError("subgraph structural feature dimensions differ")
+    flat_structural = torch.stack([item.structural_features for item in subgraphs])
+    flat_structural_mask = torch.stack([item.structural_mask for item in subgraphs])
+    mapping = torch.tensor(subgraph_to_window, dtype=torch.long)
+    structural_sums = torch.zeros(len(window_to_sample), structural_dim, dtype=dtype)
+    structural_counts = torch.zeros(len(window_to_sample), structural_dim, dtype=torch.long)
+    structural_sums.index_add_(
+        0, mapping, flat_structural * flat_structural_mask.to(dtype)
+    )
+    structural_counts.index_add_(0, mapping, flat_structural_mask.to(torch.long))
+    window_structural_mask = structural_counts > 0
+    window_structural_features = structural_sums / structural_counts.clamp_min(1).to(dtype)
+    window_structural_features = window_structural_features.masked_fill(
+        ~window_structural_mask, 0.0
+    )
     return BaselineBatch(
         node_features=node_features,
         adjacency=adjacency,
@@ -149,6 +174,8 @@ def baseline_padded_collate(
         window_to_sample=torch.tensor(window_to_sample, dtype=torch.long),
         window_time_index=torch.tensor(window_time_index, dtype=torch.long),
         window_subgraph_count=torch.tensor(window_subgraph_count, dtype=torch.long),
+        window_structural_features=window_structural_features,
+        window_structural_mask=window_structural_mask,
         window_index=window_index,
         time_mask=time_mask,
         labels=torch.tensor([sample.label for sample in samples], dtype=torch.long),

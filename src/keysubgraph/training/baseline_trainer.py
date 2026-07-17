@@ -3,6 +3,7 @@
 from __future__ import absolute_import, division, print_function
 
 import json
+import hashlib
 import math
 import os
 import random
@@ -24,6 +25,7 @@ from torch.nn.utils import clip_grad_norm_
 
 from keysubgraph.data.baseline_manifest import read_baseline_manifest
 from keysubgraph.data.data_split import file_sha256
+from keysubgraph.features.structural_prior import STATIC_WINDOW_STRUCTURAL_FEATURES
 from keysubgraph.models.baseline_classifier import SignedSequenceBaseline
 
 
@@ -289,6 +291,8 @@ def _checkpoint_payload(
     train_manifest_path: Path,
     validation_manifest_path: Path,
     train_manifest_payload: Dict[str, Any],
+    structural_transform: Optional[Dict[str, Any]],
+    structural_transform_sha256: str,
 ) -> Dict[str, Any]:
     return {
         "schema_version": 1,
@@ -317,6 +321,8 @@ def _checkpoint_payload(
         "matched_control_manifest_sha256": train_manifest_payload.get(
             "matched_control_manifest_sha256", ""
         ),
+        "structural_transform": structural_transform,
+        "structural_transform_sha256": structural_transform_sha256,
     }
 
 
@@ -331,6 +337,7 @@ def train_baseline(
     train_manifest_path: Path,
     validation_manifest_path: Path,
     project_root: Path,
+    structural_transform: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     set_baseline_seed(config.seed)
     project_root = Path(project_root).resolve()
@@ -383,8 +390,55 @@ def train_baseline(
     history_path = output_dir / "history.json"
     best_path = output_dir / "best_checkpoint.pt"
     last_path = output_dir / "last_checkpoint.pt"
-    if any(path.exists() for path in (history_path, best_path, last_path)):
+    structural_transform_path = output_dir / "structural_transform.json"
+    if any(
+        path.exists()
+        for path in (history_path, best_path, last_path, structural_transform_path)
+    ):
         raise FileExistsError("baseline training outputs already exist")
+    structural_transform_hash = ""
+    if model.config.structural_interface_version == 1:
+        if not isinstance(structural_transform, dict):
+            raise ValueError("structural interface v1 requires a fitted transform")
+        if structural_transform.get("structural_group") != model.config.structural_group:
+            raise ValueError("structural transform group differs from model")
+        if structural_transform.get("prior_mode") != model.config.prior_mode:
+            raise ValueError("structural transform prior differs from model")
+        if bool(structural_transform.get("use_structural_features")) != bool(
+            model.config.use_structural_features
+        ):
+            raise ValueError("structural transform feature flag differs from model")
+        if structural_transform.get("fitted_on") != "train_only":
+            raise ValueError("structural transform was not fit on train only")
+        if structural_transform.get("feature_names") != list(
+            STATIC_WINDOW_STRUCTURAL_FEATURES
+        ):
+            raise ValueError("structural transform feature schema differs")
+        if len(structural_transform["feature_names"]) != model.config.structural_feature_dim:
+            raise ValueError("structural transform feature dimension differs")
+        if float(structural_transform.get("beta")) != model.config.prior_beta:
+            raise ValueError("structural transform beta differs from model")
+        if int(structural_transform.get("permutation_seed")) != model.config.prior_permutation_seed:
+            raise ValueError("structural transform permutation seed differs from model")
+        expected_key_hash = hashlib.sha256(
+            json.dumps(
+                sorted(record.sample_key for record in train_records),
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        if structural_transform.get("train_sample_key_sha256") != expected_key_hash:
+            raise ValueError("structural transform was fit on a different train cohort")
+        if int(structural_transform.get("sample_count", -1)) != len(train_records):
+            raise ValueError("structural transform train sample count differs")
+        _atomic_json(structural_transform_path, structural_transform)
+        structural_transform_hash = file_sha256(structural_transform_path)
+        model.configure_structural_transform(
+            torch.tensor(structural_transform["mean"], dtype=torch.float32),
+            torch.tensor(structural_transform["std"], dtype=torch.float32),
+            torch.tensor(structural_transform["prior_scale"], dtype=torch.float32),
+        )
+    elif structural_transform is not None:
+        raise ValueError("legacy baseline cannot accept a structural transform")
     model.to(device)
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=config.learning_rate, weight_decay=config.weight_decay
@@ -438,6 +492,8 @@ def train_baseline(
             train_manifest_path,
             validation_manifest_path,
             train_manifest_payload,
+            structural_transform,
+            structural_transform_hash,
         )
         _atomic_torch(last_path, checkpoint)
         value = _selection_value(validation_metrics, config.selection_metric)
@@ -468,6 +524,11 @@ def train_baseline(
         "history": history_path,
         "epochs_completed": len(history),
         "selection_metric": config.selection_metric,
+        "structural_transform": (
+            structural_transform_path
+            if model.config.structural_interface_version == 1
+            else None
+        ),
     }
 
 
@@ -488,6 +549,13 @@ def load_baseline_checkpoint(
     checkpoint_model_config.setdefault("history_keep_ratio", 1.0)
     checkpoint_model_config.setdefault("temporal_order", "ordered")
     checkpoint_model_config.setdefault("permutation_seed", 42)
+    checkpoint_model_config.setdefault("structural_interface_version", 0)
+    checkpoint_model_config.setdefault("structural_group", "neutral")
+    checkpoint_model_config.setdefault("structural_feature_dim", 11)
+    checkpoint_model_config.setdefault("structural_hidden_dim", 32)
+    checkpoint_model_config.setdefault("prior_mode", "none")
+    checkpoint_model_config.setdefault("prior_beta", 1.0)
+    checkpoint_model_config.setdefault("prior_permutation_seed", 42)
     if checkpoint_model_config != asdict(model.config):
         raise ValueError("baseline checkpoint model configuration differs")
     model.load_state_dict(checkpoint["model_state_dict"])

@@ -11,6 +11,7 @@ import torch
 from torch.utils.data import Dataset
 
 from keysubgraph.features.graph_features import GraphFeatureBuilder
+from keysubgraph.features.structural_prior import compute_static_subgraph_features
 
 from .baseline_manifest import (
     BaselineManifestRecord,
@@ -33,6 +34,8 @@ class BaselineSubgraph:
     node_features: torch.Tensor
     edge_index: torch.Tensor
     edge_weight: torch.Tensor
+    structural_features: torch.Tensor
+    structural_mask: torch.Tensor
 
     @property
     def node_count(self) -> int:
@@ -58,6 +61,12 @@ class BaselineSubgraph:
             ),
             edge_index=self.edge_index.to(device=device, non_blocking=non_blocking),
             edge_weight=self.edge_weight.to(device=device, non_blocking=non_blocking),
+            structural_features=self.structural_features.to(
+                device=device, non_blocking=non_blocking
+            ),
+            structural_mask=self.structural_mask.to(
+                device=device, non_blocking=non_blocking
+            ),
         )
 
 
@@ -248,6 +257,9 @@ def _local_subgraph(
     )
     edge_index = torch.tensor(local_edges, dtype=torch.long).transpose(0, 1).contiguous()
     edge_weight = torch.tensor(local_weights, dtype=torch.float32)
+    structural_features, structural_mask = compute_static_subgraph_features(
+        adjacency, communities, threshold
+    )
     return BaselineSubgraph(
         node_ids=node_ids,
         node_names=tuple(expected_names),
@@ -257,6 +269,8 @@ def _local_subgraph(
         node_features=node_features,
         edge_index=edge_index,
         edge_weight=edge_weight,
+        structural_features=structural_features,
+        structural_mask=structural_mask,
     )
 
 

@@ -49,6 +49,18 @@ def main() -> int:
     checkpoint = read_baseline_checkpoint_payload(
         args.checkpoint, device=torch.device("cpu")
     )
+    structural_version = int(
+        checkpoint.get("model_config", {}).get("structural_interface_version", 0)
+    )
+    if structural_version == 1:
+        transform_path = args.checkpoint.resolve().parent / "structural_transform.json"
+        if not transform_path.is_file():
+            raise ValueError("structural checkpoint is missing structural_transform.json")
+        if file_sha256(transform_path) != checkpoint.get("structural_transform_sha256"):
+            raise ValueError("structural transform hash differs from checkpoint")
+        with transform_path.open("r", encoding="utf-8") as handle:
+            if json.load(handle) != checkpoint.get("structural_transform"):
+                raise ValueError("structural transform payload differs from checkpoint")
     manifest_payload, _ = read_baseline_manifest(args.manifest, PROJECT_ROOT)
     if manifest_payload["data_protocol_sha256"] != checkpoint["data_protocol_sha256"]:
         raise ValueError("checkpoint and evaluation manifest use different protocols")
@@ -119,6 +131,13 @@ def main() -> int:
         "subgraph_source": manifest_payload.get("subgraph_source", "key"),
         "matched_control_manifest_sha256": manifest_payload.get(
             "matched_control_manifest_sha256", ""
+        ),
+        "structural_group": checkpoint.get("model_config", {}).get(
+            "structural_group", "neutral"
+        ),
+        "prior_mode": checkpoint.get("model_config", {}).get("prior_mode", "none"),
+        "structural_transform_sha256": checkpoint.get(
+            "structural_transform_sha256", ""
         ),
         "metrics": metrics,
     }

@@ -141,6 +141,14 @@ def _sequence_batch(extra_time_padding=False):
         window_to_sample=torch.tensor([0, 0, 1]),
         window_time_index=torch.tensor([0, 1, 0]),
         window_subgraph_count=torch.tensor([1, 1, 1]),
+        window_structural_features=torch.tensor(
+            [
+                [3.0, 2.0, 0.67, 0.4, 0.8, 0.5, 0.5, 0.3, 0.3, 0.5, 0.5],
+                [3.0, 2.0, 0.67, 0.5, 1.0, 0.6, 0.6, 0.4, 0.4, 0.6, 0.4],
+                [3.0, 2.0, 0.67, 0.3, 0.6, 0.4, 0.4, 0.2, 0.2, 0.4, 0.6],
+            ]
+        ),
+        window_structural_mask=torch.ones(3, 11, dtype=torch.bool),
         window_index=window_index,
         time_mask=time_mask,
         labels=torch.tensor([0, 1]),

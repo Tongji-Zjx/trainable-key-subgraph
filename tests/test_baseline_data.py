@@ -397,6 +397,8 @@ class BaselineCollateTest(unittest.TestCase):
             node_features=torch.full((node_count, 12), float(offset)),
             edge_index=edge_index,
             edge_weight=torch.tensor(weights, dtype=torch.float32),
+            structural_features=torch.arange(11, dtype=torch.float32),
+            structural_mask=torch.ones(11, dtype=torch.bool),
         )
 
     @classmethod

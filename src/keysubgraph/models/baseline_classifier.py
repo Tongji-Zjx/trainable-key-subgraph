@@ -10,6 +10,7 @@ import torch
 from torch import nn
 
 from keysubgraph.data.baseline_collate import BaselineBatch
+from keysubgraph.features.structural_prior import PRIOR_MODES
 
 from .baseline_subgraph_encoder import SignedSubgraphEncoder, WindowMeanPooling
 
@@ -31,6 +32,13 @@ class BaselineModelConfig:
     classifier_dropout: float = 0.2
     num_classes: int = 2
     use_structural_features: bool = False
+    structural_interface_version: int = 0
+    structural_group: str = "neutral"
+    structural_feature_dim: int = 11
+    structural_hidden_dim: int = 32
+    prior_mode: str = "none"
+    prior_beta: float = 1.0
+    prior_permutation_seed: int = 42
     history_mode: str = "full"
     history_keep_ratio: float = 1.0
     temporal_order: str = "ordered"
@@ -45,13 +53,42 @@ class BaselineModelConfig:
             self.gru_hidden_dim,
             self.classifier_hidden_dim,
             self.num_classes,
+            self.structural_feature_dim,
+            self.structural_hidden_dim,
         )
         if any(value < 1 for value in integer_fields):
             raise ValueError("baseline model dimensions must be positive")
         if self.num_classes != 2:
             raise ValueError("baseline currently supports binary classification only")
-        if self.use_structural_features:
-            raise ValueError("structural features are not enabled in the neutral baseline")
+        if self.structural_interface_version not in (0, 1):
+            raise ValueError("unsupported structural interface version")
+        if self.prior_mode not in PRIOR_MODES:
+            raise ValueError("unsupported structural prior mode")
+        if self.prior_beta < 0.0 or self.prior_permutation_seed < 0:
+            raise ValueError("invalid structural prior configuration")
+        if self.structural_interface_version == 0:
+            if self.use_structural_features or self.prior_mode != "none":
+                raise ValueError("legacy structural interface must remain neutral")
+            if self.structural_group != "neutral":
+                raise ValueError("legacy structural interface uses neutral group")
+        else:
+            if self.structural_group not in ("A", "B", "C", "D", "E"):
+                raise ValueError("structural interface v1 requires group A-E")
+            expected = {
+                "A": (False, "none"),
+                "B": (True, "none"),
+                "C": (True, "uniform"),
+                "D": (True, "real"),
+                "E": (True, "permuted"),
+            }[self.structural_group]
+            if (self.use_structural_features, self.prior_mode) != expected:
+                raise ValueError("structural group configuration differs from A-E design")
+            if not self.use_structural_features and (
+                self.structural_group != "A" or self.prior_mode != "none"
+            ):
+                raise ValueError("only structural group A uses zero features")
+            if self.use_structural_features and self.structural_group == "A":
+                raise ValueError("structural group A must use zero features")
         if self.history_mode not in HISTORY_MODES:
             raise ValueError("unsupported baseline history_mode")
         if self.history_keep_ratio <= 0.0 or self.history_keep_ratio > 1.0:
@@ -95,8 +132,29 @@ class SignedSequenceBaseline(nn.Module):
             residual=config.use_residual,
         )
         self.window_pooling = WindowMeanPooling()
+        projection_input_dim = self.subgraph_encoder.output_dim
+        if config.structural_interface_version == 1:
+            self.structural_projection = nn.Sequential(
+                nn.Linear(
+                    config.structural_feature_dim,
+                    config.structural_hidden_dim,
+                    bias=False,
+                ),
+                nn.ReLU(),
+            )
+            self.register_buffer(
+                "structural_mean", torch.zeros(config.structural_feature_dim)
+            )
+            self.register_buffer(
+                "structural_std", torch.ones(config.structural_feature_dim)
+            )
+            self.register_buffer(
+                "structural_prior_scale", torch.ones(config.structural_feature_dim)
+            )
+            self.register_buffer("structural_transform_fitted", torch.tensor(False))
+            projection_input_dim += config.structural_hidden_dim
         self.input_projection = nn.Linear(
-            self.subgraph_encoder.output_dim, config.fusion_dim
+            projection_input_dim, config.fusion_dim
         )
         self.input_normalization = nn.LayerNorm(config.fusion_dim)
         self.input_activation = nn.ReLU()
@@ -107,6 +165,27 @@ class SignedSequenceBaseline(nn.Module):
             nn.Dropout(config.classifier_dropout),
             nn.Linear(config.classifier_hidden_dim, config.num_classes),
         )
+
+    def configure_structural_transform(
+        self, mean: torch.Tensor, std: torch.Tensor, prior_scale: torch.Tensor
+    ) -> None:
+        """Freeze one training-fold transform into model buffers."""
+
+        if self.config.structural_interface_version != 1:
+            raise ValueError("legacy baseline has no structural transform")
+        expected = (self.config.structural_feature_dim,)
+        if mean.shape != expected or std.shape != expected or prior_scale.shape != expected:
+            raise ValueError("structural transform dimension differs from model")
+        if not bool(torch.isfinite(mean).all()) or not bool(torch.isfinite(std).all()):
+            raise ValueError("structural transform contains non-finite values")
+        if bool((std <= 0.0).any()) or not bool(torch.isfinite(prior_scale).all()):
+            raise ValueError("structural scale must be finite and positive")
+        if bool((prior_scale <= 0.0).any()):
+            raise ValueError("structural prior scale must be positive")
+        self.structural_mean.copy_(mean.to(self.structural_mean))
+        self.structural_std.copy_(std.to(self.structural_std))
+        self.structural_prior_scale.copy_(prior_scale.to(self.structural_prior_scale))
+        self.structural_transform_fitted.fill_(True)
 
     @staticmethod
     def _pad_windows(
@@ -213,7 +292,31 @@ class SignedSequenceBaseline(nn.Module):
             batch.window_count,
             batch.window_subgraph_count,
         )
-        projected = self.input_projection(flat_window_embeddings)
+        fusion_input = flat_window_embeddings
+        if self.config.structural_interface_version == 1:
+            if not bool(self.structural_transform_fitted):
+                raise ValueError("structural transform has not been configured")
+            if batch.window_structural_features.shape != (
+                batch.window_count, self.config.structural_feature_dim
+            ):
+                raise ValueError("window structural feature dimension differs")
+            if batch.window_structural_mask.shape != batch.window_structural_features.shape:
+                raise ValueError("window structural mask differs")
+            if self.config.use_structural_features:
+                structural = (
+                    batch.window_structural_features - self.structural_mean
+                ) / self.structural_std
+                structural = structural.masked_fill(~batch.window_structural_mask, 0.0)
+                structural = structural * self.structural_prior_scale
+            else:
+                structural = batch.window_structural_features.new_zeros(
+                    batch.window_count, self.config.structural_feature_dim
+                )
+            structural_embedding = self.structural_projection(structural)
+            fusion_input = torch.cat(
+                (flat_window_embeddings, structural_embedding), dim=-1
+            )
+        projected = self.input_projection(fusion_input)
         projected = self.input_activation(self.input_normalization(projected))
         sequence_window_index = self._sequence_window_index(batch)
         padded_windows = self._pad_windows(projected, sequence_window_index)
