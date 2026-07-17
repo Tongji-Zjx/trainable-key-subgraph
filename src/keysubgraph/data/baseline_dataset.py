@@ -179,7 +179,22 @@ def _local_subgraph(
     local_weights = []
     seen = set()
     threshold = raw_sample.edge_presence_threshold
-    for edge, weight_value in zip(edges, weights):
+    source = str(exported.get("source", "key"))
+    rewiring = exported.get("rewiring")
+    source_edges = None
+    if source == "key_rewired":
+        if not isinstance(rewiring, dict):
+            raise ValueError("key_rewired subgraph is missing rewiring provenance")
+        if rewiring.get("method") != "signed_endpoint_resampling_without_replacement":
+            raise ValueError("unsupported key rewiring method")
+        source_edges = rewiring.get("source_edge_index")
+        if not isinstance(source_edges, list) or len(source_edges) != len(edges):
+            raise ValueError("key rewiring source edge inventory is invalid")
+    elif rewiring is not None:
+        raise ValueError("rewiring provenance is only valid for key_rewired")
+
+    source_seen = set()
+    for edge_position, (edge, weight_value) in enumerate(zip(edges, weights)):
         if not isinstance(edge, list) or len(edge) != 2:
             raise ValueError("each edge_index item must contain two endpoints")
         left_global, right_global = edge
@@ -192,9 +207,21 @@ def _local_subgraph(
             raise ValueError("hard subgraph contains a duplicate undirected edge")
         seen.add(canonical)
         weight = float(weight_value)
-        raw_weight = float(raw_adjacency[left_global, right_global])
+        raw_left, raw_right = left_global, right_global
+        if source_edges is not None:
+            source_edge = source_edges[edge_position]
+            if not isinstance(source_edge, list) or len(source_edge) != 2:
+                raise ValueError("invalid key rewiring source edge")
+            raw_left, raw_right = int(source_edge[0]), int(source_edge[1])
+            if raw_left == raw_right or raw_left not in local_lookup or raw_right not in local_lookup:
+                raise ValueError("key rewiring source edge is outside node_ids")
+            source_canonical = tuple(sorted((raw_left, raw_right)))
+            if source_canonical in source_seen:
+                raise ValueError("key rewiring source edges contain duplicates")
+            source_seen.add(source_canonical)
+        raw_weight = float(raw_adjacency[raw_left, raw_right])
         if abs(raw_weight - weight) > 1e-6:
-            raise ValueError("exported edge weight differs from original graph")
+            raise ValueError("exported edge weight differs from its provenance edge")
         if abs(weight) <= threshold:
             raise ValueError("exported edge does not satisfy edge presence threshold")
         left_local = local_lookup[left_global]
@@ -203,6 +230,16 @@ def _local_subgraph(
         adjacency[right_local, left_local] = weight
         local_edges.append((left_local, right_local))
         local_weights.append(weight)
+
+    if source_edges is not None:
+        if seen == source_seen:
+            raise ValueError("key_rewired topology is identical to Key")
+        positive_count = sum(weight > 0.0 for weight in local_weights)
+        negative_count = sum(weight < 0.0 for weight in local_weights)
+        if positive_count != int(rewiring.get("positive_edge_count", -1)):
+            raise ValueError("key rewiring positive edge count differs")
+        if negative_count != int(rewiring.get("negative_edge_count", -1)):
+            raise ValueError("key rewiring negative edge count differs")
 
     edge_mask = adjacency.abs() > threshold
     edge_mask.fill_diagonal_(False)

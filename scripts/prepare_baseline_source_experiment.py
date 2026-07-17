@@ -14,7 +14,6 @@ SRC_ROOT = PROJECT_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
-from keysubgraph.data.baseline_controls import MATCHED_SOURCES  # noqa: E402
 from keysubgraph.data.baseline_downstream_split import (  # noqa: E402
     create_baseline_downstream_splits,
 )
@@ -64,6 +63,11 @@ def main():
     matched_manifest = matched_root / "matched_control_manifest.json"
     if not matched_manifest.is_file():
         raise FileNotFoundError(str(matched_manifest))
+    with matched_manifest.open("r", encoding="utf-8") as handle:
+        matched_payload = json.load(handle)
+    matched_sources = tuple(str(item) for item in matched_payload.get("sources", []))
+    if not matched_sources or len(set(matched_sources)) != len(matched_sources):
+        raise ValueError("matched-control manifest has invalid sources")
     split_config = SplitConfig(
         train_ratio=args.train_ratio,
         validation_ratio=args.validation_ratio,
@@ -75,7 +79,7 @@ def main():
     sources = {}
     reference_assignments = None
     assignment_hash = None
-    for source in MATCHED_SOURCES:
+    for source in matched_sources:
         manifest_dir = output_root / "manifests" / source
         parent = build_baseline_manifest(
             project_root=PROJECT_ROOT,

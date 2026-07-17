@@ -38,6 +38,12 @@ from keysubgraph.data.graph_dataset import GraphSequenceSample  # noqa: E402
 from keysubgraph.data.baseline_controls import (  # noqa: E402
     build_matched_source_payloads,
 )
+from keysubgraph.data.baseline_dataset import _local_subgraph  # noqa: E402
+from keysubgraph.data.key_rewiring import (  # noqa: E402
+    build_key_rewired_payloads,
+    rewire_key_subgraph,
+)
+from keysubgraph.features.graph_features import GraphFeatureBuilder  # noqa: E402
 
 
 def _record(sample_id="sample", label=0):
@@ -103,6 +109,115 @@ def _control_sample():
 
 
 class AnalysisTest(unittest.TestCase):
+    def test_signed_key_rewiring_is_reproducible_and_preserves_invariants(self):
+        key = _record()
+        key.update({
+            "time_index": 0,
+            "node_ids": [0, 1, 2, 3, 4],
+            "node_names": ["a", "b", "c", "d", "e"],
+            "community_labels": [0, 0, 1, 1, 1],
+            "edge_index": [[0, 1], [1, 2], [2, 3], [3, 4]],
+            "original_edge_weights": [0.5, 0.4, 0.6, 0.5],
+            "delta_edge_weight": [0.1, 0.2, 0.3, 0.4],
+            "delta_edge_mask": [True, True, True, True],
+        })
+        # Include a negative edge so sign-specific preservation is exercised.
+        key["edge_index"][1] = [0, 2]
+        key["original_edge_weights"][1] = -0.3
+
+        first = rewire_key_subgraph(key, "SITE/sample", 0, 0, seed=17)
+        second = rewire_key_subgraph(key, "SITE/sample", 0, 0, seed=17)
+
+        self.assertIsNotNone(first)
+        self.assertEqual(first, second)
+        self.assertEqual(first["source"], "key_rewired")
+        self.assertEqual(first["node_ids"], key["node_ids"])
+        self.assertEqual(len(first["edge_index"]), len(key["edge_index"]))
+        self.assertNotEqual(
+            {tuple(edge) for edge in first["edge_index"]},
+            {tuple(edge) for edge in key["edge_index"]},
+        )
+        self.assertEqual(
+            sorted(first["original_edge_weights"]),
+            sorted(key["original_edge_weights"]),
+        )
+        self.assertEqual(
+            sum(value > 0.0 for value in first["original_edge_weights"]), 3
+        )
+        self.assertEqual(
+            sum(value < 0.0 for value in first["original_edge_weights"]), 1
+        )
+        self.assertEqual(
+            len(first["rewiring"]["source_edge_index"]), len(key["edge_index"])
+        )
+
+    def test_key_rewired_dataset_validates_provenance_and_rebuilds_features(self):
+        sample = _control_sample()
+        key = _record()
+        key.update({
+            "time_index": 0,
+            "node_ids": [0, 1, 2, 3, 4],
+            "node_names": ["a", "b", "c", "d", "e"],
+            "community_labels": [0, 0, 1, 1, 1],
+            "edge_index": [[0, 1], [0, 2], [1, 2], [2, 3]],
+            "original_edge_weights": [0.5, -0.3, 0.4, 0.6],
+        })
+        rewired = rewire_key_subgraph(key, sample.sample_key, 0, 0, seed=23)
+        subgraph = _local_subgraph(rewired, sample, 0, GraphFeatureBuilder())
+
+        self.assertEqual(subgraph.edge_count, 4)
+        self.assertTrue(torch.equal(subgraph.edge_mask, subgraph.adjacency.abs() > 0.0))
+        self.assertTrue(any(float(value) < 0.0 for value in subgraph.edge_weight))
+        self.assertTrue(torch.allclose(
+            subgraph.node_features[:, 0], subgraph.adjacency.abs().sum(dim=1)
+        ))
+
+        tampered = dict(rewired)
+        tampered["original_edge_weights"] = list(rewired["original_edge_weights"])
+        tampered["original_edge_weights"][0] += 0.1
+        with self.assertRaisesRegex(ValueError, "provenance"):
+            _local_subgraph(tampered, sample, 0, GraphFeatureBuilder())
+
+    def test_key_rewired_payload_drops_unrewirable_tuples_and_matches_inventory(self):
+        key = _record()
+        key.update({
+            "time_index": 0,
+            "node_ids": [0, 1, 2, 3],
+            "node_names": ["a", "b", "c", "d"],
+            "community_labels": [0, 0, 1, 1],
+            "edge_index": [[0, 1], [1, 2]],
+            "original_edge_weights": [0.5, -0.25],
+        })
+        complete = dict(key)
+        complete.update({
+            "node_ids": [0, 1, 2],
+            "node_names": ["a", "b", "c"],
+            "community_labels": [0, 0, 1],
+            "edge_index": [[0, 1], [0, 2], [1, 2]],
+            "original_edge_weights": [0.5, -0.3, 0.4],
+        })
+        payload = {
+            "sample_key": "SITE/sample",
+            "timepoints": [{
+                "time_index": 0,
+                "time_mask": True,
+                "subgraphs": [key, complete],
+                "candidate_pool": [key, complete],
+                "num_valid_subgraphs": 2,
+            }],
+        }
+
+        sources, audit = build_key_rewired_payloads(payload, seed=31)
+
+        self.assertTrue(audit["included"])
+        self.assertEqual(audit["key_tuple_count"], 2)
+        self.assertEqual(audit["matched_tuple_count"], 1)
+        self.assertEqual(set(sources), {"key", "key_rewired"})
+        for source_payload in sources.values():
+            timepoint = source_payload["timepoints"][0]
+            self.assertNotIn("candidate_pool", timepoint)
+            self.assertEqual(timepoint["num_valid_subgraphs"], 1)
+
     def test_signed_metrics_and_community_ratios(self):
         metrics = compute_subgraph_metrics(_record())
 

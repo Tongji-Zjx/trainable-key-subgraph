@@ -31,7 +31,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--checkpoint", type=Path)
     parser.add_argument(
         "--subgraph-source",
-        choices=("key", "low_score", "top_degree", "random"),
+        choices=("key", "low_score", "top_degree", "random", "key_rewired"),
         default="key",
     )
     parser.add_argument("--matched-control-manifest", type=Path)
