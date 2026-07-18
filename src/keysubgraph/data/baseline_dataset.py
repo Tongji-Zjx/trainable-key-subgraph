@@ -190,6 +190,7 @@ def _local_subgraph(
     threshold = raw_sample.edge_presence_threshold
     source = str(exported.get("source", "key"))
     rewiring = exported.get("rewiring")
+    edge_perturbation = exported.get("edge_perturbation")
     source_edges = None
     if source == "key_rewired":
         if not isinstance(rewiring, dict):
@@ -201,6 +202,60 @@ def _local_subgraph(
             raise ValueError("key rewiring source edge inventory is invalid")
     elif rewiring is not None:
         raise ValueError("rewiring provenance is only valid for key_rewired")
+    if source.startswith("key_edge_"):
+        if not isinstance(edge_perturbation, dict):
+            raise ValueError("edge-perturbed subgraph is missing provenance")
+        if edge_perturbation.get("method") != "edge_deletion":
+            raise ValueError("unsupported Key edge perturbation method")
+        retained_count = int(edge_perturbation.get("retained_edge_count", -1))
+        deleted_count = int(edge_perturbation.get("deleted_edge_count", -1))
+        original_count = int(edge_perturbation.get("original_edge_count", -1))
+        deleted_edges = edge_perturbation.get("deleted_edges")
+        deleted_weights = edge_perturbation.get("deleted_weights")
+        deletion_order = edge_perturbation.get("deletion_order")
+        deleted_positions = edge_perturbation.get("deleted_source_positions")
+        if not (
+            retained_count == len(edges)
+            and deleted_count >= 0
+            and original_count == retained_count + deleted_count
+            and isinstance(deleted_edges, list)
+            and isinstance(deleted_weights, list)
+            and len(deleted_edges) == deleted_count
+            and len(deleted_weights) == deleted_count
+            and isinstance(deletion_order, list)
+            and sorted(int(value) for value in deletion_order) == list(range(original_count))
+            and isinstance(deleted_positions, list)
+            and [int(value) for value in deleted_positions] == [
+                int(value) for value in deletion_order[:deleted_count]
+            ]
+        ):
+            raise ValueError("Key edge perturbation inventory is invalid")
+        requested_ratio = float(edge_perturbation.get("requested_ratio", -1.0))
+        mode = str(edge_perturbation.get("mode", ""))
+        expected_source = (
+            "key_edge_000" if requested_ratio == 0.0
+            else "key_edge_{}_{:03d}".format(mode, int(round(requested_ratio * 100.0)))
+        )
+        if source != expected_source:
+            raise ValueError("Key edge perturbation source differs from provenance")
+        retained_canonical = {tuple(sorted((int(edge[0]), int(edge[1])))) for edge in edges}
+        deleted_canonical = set()
+        for edge, weight in zip(deleted_edges, deleted_weights):
+            if not isinstance(edge, list) or len(edge) != 2:
+                raise ValueError("deleted Key edge is invalid")
+            left, right = int(edge[0]), int(edge[1])
+            if left == right or left not in local_lookup or right not in local_lookup:
+                raise ValueError("deleted Key edge is outside node_ids")
+            canonical = tuple(sorted((left, right)))
+            if canonical in retained_canonical or canonical in deleted_canonical:
+                raise ValueError("deleted and retained Key edges overlap")
+            deleted_canonical.add(canonical)
+            if abs(float(raw_adjacency[left, right]) - float(weight)) > 1e-6:
+                raise ValueError("deleted Key edge weight differs from raw graph")
+        if len(deleted_canonical) != deleted_count:
+            raise ValueError("deleted Key edge count differs")
+    elif edge_perturbation is not None:
+        raise ValueError("edge perturbation provenance requires a key_edge source")
 
     source_seen = set()
     for edge_position, (edge, weight_value) in enumerate(zip(edges, weights)):
