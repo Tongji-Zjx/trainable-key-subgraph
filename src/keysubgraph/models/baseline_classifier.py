@@ -10,7 +10,11 @@ import torch
 from torch import nn
 
 from keysubgraph.data.baseline_collate import BaselineBatch
-from keysubgraph.features.structural_prior import PRIOR_MODES
+from keysubgraph.features.structural_prior import (
+    PRIOR_MODES,
+    build_temporal_window_features,
+    temporal_structural_group_configuration,
+)
 
 from .baseline_subgraph_encoder import SignedSubgraphEncoder, WindowMeanPooling
 
@@ -32,6 +36,7 @@ class BaselineModelConfig:
     classifier_dropout: float = 0.2
     num_classes: int = 2
     use_structural_features: bool = False
+    use_structural_deltas: bool = False
     structural_interface_version: int = 0
     structural_group: str = "neutral"
     structural_feature_dim: int = 11
@@ -39,6 +44,8 @@ class BaselineModelConfig:
     prior_mode: str = "none"
     prior_beta: float = 1.0
     prior_permutation_seed: int = 42
+    structural_delta_order: str = "ordered"
+    structural_delta_permutation_seed: int = 42
     history_mode: str = "full"
     history_keep_ratio: float = 1.0
     temporal_order: str = "ordered"
@@ -60,18 +67,18 @@ class BaselineModelConfig:
             raise ValueError("baseline model dimensions must be positive")
         if self.num_classes != 2:
             raise ValueError("baseline currently supports binary classification only")
-        if self.structural_interface_version not in (0, 1):
+        if self.structural_interface_version not in (0, 1, 2):
             raise ValueError("unsupported structural interface version")
         if self.prior_mode not in PRIOR_MODES:
             raise ValueError("unsupported structural prior mode")
         if self.prior_beta < 0.0 or self.prior_permutation_seed < 0:
             raise ValueError("invalid structural prior configuration")
         if self.structural_interface_version == 0:
-            if self.use_structural_features or self.prior_mode != "none":
+            if self.use_structural_features or self.use_structural_deltas or self.prior_mode != "none":
                 raise ValueError("legacy structural interface must remain neutral")
             if self.structural_group != "neutral":
                 raise ValueError("legacy structural interface uses neutral group")
-        else:
+        elif self.structural_interface_version == 1:
             if self.structural_group not in ("A", "B", "C", "D", "E"):
                 raise ValueError("structural interface v1 requires group A-E")
             expected = {
@@ -89,6 +96,25 @@ class BaselineModelConfig:
                 raise ValueError("only structural group A uses zero features")
             if self.use_structural_features and self.structural_group == "A":
                 raise ValueError("structural group A must use zero features")
+            if self.use_structural_deltas:
+                raise ValueError("structural interface v1 does not use temporal deltas")
+        else:
+            if self.structural_group not in ("A", "B", "F", "G", "H"):
+                raise ValueError("structural interface v2 requires group A/B/F/G/H")
+            expected = temporal_structural_group_configuration(self.structural_group)
+            actual = {
+                "use_structural_features": self.use_structural_features,
+                "use_structural_deltas": self.use_structural_deltas,
+                "structural_delta_order": self.structural_delta_order,
+            }
+            if actual != expected:
+                raise ValueError("temporal structural group configuration differs")
+            if self.prior_mode != "none" or self.structural_feature_dim != 22:
+                raise ValueError("temporal structural interface uses 22 unweighted features")
+        if self.structural_delta_order not in ("ordered", "shuffled"):
+            raise ValueError("unsupported structural delta order")
+        if self.structural_delta_permutation_seed < 0:
+            raise ValueError("structural delta permutation seed must be non-negative")
         if self.history_mode not in HISTORY_MODES:
             raise ValueError("unsupported baseline history_mode")
         if self.history_keep_ratio <= 0.0 or self.history_keep_ratio > 1.0:
@@ -133,7 +159,7 @@ class SignedSequenceBaseline(nn.Module):
         )
         self.window_pooling = WindowMeanPooling()
         projection_input_dim = self.subgraph_encoder.output_dim
-        if config.structural_interface_version == 1:
+        if config.structural_interface_version in (1, 2):
             self.structural_projection = nn.Sequential(
                 nn.Linear(
                     config.structural_feature_dim,
@@ -171,7 +197,7 @@ class SignedSequenceBaseline(nn.Module):
     ) -> None:
         """Freeze one training-fold transform into model buffers."""
 
-        if self.config.structural_interface_version != 1:
+        if self.config.structural_interface_version not in (1, 2):
             raise ValueError("legacy baseline has no structural transform")
         expected = (self.config.structural_feature_dim,)
         if mean.shape != expected or std.shape != expected or prior_scale.shape != expected:
@@ -293,25 +319,40 @@ class SignedSequenceBaseline(nn.Module):
             batch.window_subgraph_count,
         )
         fusion_input = flat_window_embeddings
-        if self.config.structural_interface_version == 1:
+        if self.config.structural_interface_version in (1, 2):
             if not bool(self.structural_transform_fitted):
                 raise ValueError("structural transform has not been configured")
-            if batch.window_structural_features.shape != (
+            if self.config.structural_interface_version == 1:
+                raw_structural = batch.window_structural_features
+                structural_mask = batch.window_structural_mask
+            else:
+                raw_structural, structural_mask = build_temporal_window_features(
+                    batch.window_structural_features,
+                    batch.window_structural_mask,
+                    batch.window_index,
+                    batch.time_mask,
+                    batch.sample_keys,
+                    delta_order=self.config.structural_delta_order,
+                    permutation_seed=self.config.structural_delta_permutation_seed,
+                )
+            if raw_structural.shape != (
                 batch.window_count, self.config.structural_feature_dim
             ):
                 raise ValueError("window structural feature dimension differs")
-            if batch.window_structural_mask.shape != batch.window_structural_features.shape:
+            if structural_mask.shape != raw_structural.shape:
                 raise ValueError("window structural mask differs")
-            if self.config.use_structural_features:
-                structural = (
-                    batch.window_structural_features - self.structural_mean
-                ) / self.structural_std
-                structural = structural.masked_fill(~batch.window_structural_mask, 0.0)
-                structural = structural * self.structural_prior_scale
+            structural = (raw_structural - self.structural_mean) / self.structural_std
+            structural = structural.masked_fill(~structural_mask, 0.0)
+            structural = structural * self.structural_prior_scale
+            if self.config.structural_interface_version == 1:
+                if not self.config.use_structural_features:
+                    structural.zero_()
             else:
-                structural = batch.window_structural_features.new_zeros(
-                    batch.window_count, self.config.structural_feature_dim
-                )
+                static_count = self.config.structural_feature_dim // 2
+                if not self.config.use_structural_features:
+                    structural[:, :static_count] = 0.0
+                if not self.config.use_structural_deltas:
+                    structural[:, static_count:] = 0.0
             structural_embedding = self.structural_projection(structural)
             fusion_input = torch.cat(
                 (flat_window_embeddings, structural_embedding), dim=-1

@@ -27,8 +27,12 @@ from keysubgraph.models.baseline_classifier import (  # noqa: E402
 from keysubgraph.features.structural_prior import (  # noqa: E402
     STATIC_WINDOW_STRUCTURAL_FEATURES,
     STRUCTURAL_GROUPS,
+    TEMPORAL_STRUCTURAL_GROUPS,
+    TEMPORAL_WINDOW_STRUCTURAL_FEATURES,
     fit_structural_transform,
+    fit_temporal_structural_transform,
     structural_group_configuration,
+    temporal_structural_group_configuration,
 )
 from keysubgraph.training.baseline_trainer import (  # noqa: E402
     BaselineTrainingConfig,
@@ -89,6 +93,12 @@ def parse_args() -> argparse.Namespace:
         help="Pre-fitted train-only A-E artifact; avoids refitting for every seed.",
     )
     parser.add_argument(
+        "--temporal-structural-group",
+        choices=TEMPORAL_STRUCTURAL_GROUPS,
+        help="A/B/F/G/H static-plus-first-difference experiment interface v2.",
+    )
+    parser.add_argument("--structural-delta-permutation-seed", type=int, default=42)
+    parser.add_argument(
         "--smoke", action="store_true", help="Run one batch per partition for one epoch."
     )
     return parser.parse_args()
@@ -103,8 +113,33 @@ def main() -> int:
     structural_transform = None
     structural_version = 0
     use_structural_features = False
+    use_structural_deltas = False
+    structural_delta_order = "ordered"
     prior_mode = "none"
-    if args.structural_group != "neutral":
+    structural_group = args.structural_group
+    if args.temporal_structural_group is not None:
+        if args.structural_group != "neutral":
+            raise ValueError("static A-E and temporal A/B/F/G/H groups are mutually exclusive")
+        structural_version = 2
+        structural_group = args.temporal_structural_group
+        condition = temporal_structural_group_configuration(structural_group)
+        use_structural_features = condition["use_structural_features"]
+        use_structural_deltas = condition["use_structural_deltas"]
+        structural_delta_order = condition["structural_delta_order"]
+        if args.structural_transform is not None:
+            with args.structural_transform.resolve().open("r", encoding="utf-8") as handle:
+                structural_transform = json.load(handle)
+            if structural_transform.get("structural_group") != structural_group:
+                raise ValueError("pre-fitted temporal structural transform group differs")
+            if int(structural_transform.get("structural_delta_permutation_seed")) != args.structural_delta_permutation_seed:
+                raise ValueError("pre-fitted temporal permutation seed differs")
+        else:
+            structural_transform = fit_temporal_structural_transform(
+                train_dataset,
+                structural_group,
+                permutation_seed=args.structural_delta_permutation_seed,
+            )
+    elif args.structural_group != "neutral":
         structural_version = 1
         use_structural_features, prior_mode = structural_group_configuration(
             args.structural_group
@@ -162,12 +197,23 @@ def main() -> int:
             temporal_order=args.temporal_order,
             permutation_seed=args.permutation_seed,
             use_structural_features=use_structural_features,
+            use_structural_deltas=use_structural_deltas,
             structural_interface_version=structural_version,
-            structural_group=args.structural_group,
-            structural_feature_dim=len(STATIC_WINDOW_STRUCTURAL_FEATURES),
+            structural_group=structural_group,
+            structural_feature_dim=(
+                len(TEMPORAL_WINDOW_STRUCTURAL_FEATURES)
+                if structural_version == 2
+                else len(STATIC_WINDOW_STRUCTURAL_FEATURES)
+            ),
             prior_mode=prior_mode,
-            prior_beta=args.prior_beta,
-            prior_permutation_seed=args.prior_permutation_seed,
+            prior_beta=0.0 if structural_version == 2 else args.prior_beta,
+            prior_permutation_seed=(
+                args.structural_delta_permutation_seed
+                if structural_version == 2
+                else args.prior_permutation_seed
+            ),
+            structural_delta_order=structural_delta_order,
+            structural_delta_permutation_seed=args.structural_delta_permutation_seed,
         )
     )
     config = BaselineTrainingConfig(
@@ -212,8 +258,11 @@ def main() -> int:
             "history_keep_ratio": args.history_keep_ratio,
             "temporal_order": args.temporal_order,
             "permutation_seed": args.permutation_seed,
-            "structural_group": args.structural_group,
+            "structural_group": structural_group,
             "prior_mode": prior_mode,
+            "use_structural_deltas": use_structural_deltas,
+            "structural_delta_order": structural_delta_order,
+            "structural_delta_permutation_seed": args.structural_delta_permutation_seed,
             "elapsed_seconds": time.perf_counter() - started,
             "cuda_peak_memory_mib": (
                 torch.cuda.max_memory_allocated(device) / (1024.0 * 1024.0)

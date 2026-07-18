@@ -25,8 +25,15 @@ STATIC_WINDOW_STRUCTURAL_FEATURES = (
     "positive_intra_ratio",
     "negative_intra_ratio",
 )
+TEMPORAL_DELTA_STRUCTURAL_FEATURES = tuple(
+    "delta_{}".format(name) for name in STATIC_WINDOW_STRUCTURAL_FEATURES
+)
+TEMPORAL_WINDOW_STRUCTURAL_FEATURES = (
+    STATIC_WINDOW_STRUCTURAL_FEATURES + TEMPORAL_DELTA_STRUCTURAL_FEATURES
+)
 PRIOR_MODES = ("none", "uniform", "real", "permuted")
 STRUCTURAL_GROUPS = ("A", "B", "C", "D", "E")
+TEMPORAL_STRUCTURAL_GROUPS = ("A", "B", "F", "G", "H")
 
 
 def compute_static_subgraph_features(
@@ -97,6 +104,88 @@ def structural_group_configuration(group: str) -> Tuple[bool, str]:
     if group not in mapping:
         raise ValueError("unsupported structural experiment group")
     return mapping[group]
+
+
+def temporal_structural_group_configuration(group: str) -> Dict[str, Any]:
+    """Return the pre-registered A/B/F/G/H temporal-delta condition."""
+
+    mapping = {
+        "A": (False, False, "ordered"),
+        "B": (True, False, "ordered"),
+        "F": (True, True, "ordered"),
+        "G": (False, True, "ordered"),
+        "H": (True, True, "shuffled"),
+    }
+    if group not in mapping:
+        raise ValueError("unsupported temporal structural experiment group")
+    use_static, use_delta, delta_order = mapping[group]
+    return {
+        "use_structural_features": use_static,
+        "use_structural_deltas": use_delta,
+        "structural_delta_order": delta_order,
+    }
+
+
+def _stable_window_order(sample_key: str, count: int, seed: int) -> List[int]:
+    material = "{}\0{}".format(seed, sample_key).encode("utf-8")
+    stable_seed = int.from_bytes(
+        hashlib.sha256(material).digest()[:8], byteorder="big"
+    )
+    order = list(range(count))
+    import random
+    random.Random(stable_seed).shuffle(order)
+    return order
+
+
+def build_temporal_window_features(
+    window_features: torch.Tensor,
+    window_mask: torch.Tensor,
+    window_index: torch.Tensor,
+    time_mask: torch.Tensor,
+    sample_keys: Sequence[str],
+    delta_order: str = "ordered",
+    permutation_seed: int = 42,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Append masked first differences without treating the first window as zero.
+
+    Deltas are assigned to the current window.  For the shuffled control, only
+    predecessor relationships change; the static window multiset is untouched.
+    """
+
+    feature_count = len(STATIC_WINDOW_STRUCTURAL_FEATURES)
+    if window_features.dim() != 2 or window_features.shape[1] != feature_count:
+        raise ValueError("static window structural feature dimension differs")
+    if window_mask.shape != window_features.shape:
+        raise ValueError("static window structural mask differs")
+    if window_index.shape != time_mask.shape or len(sample_keys) != window_index.shape[0]:
+        raise ValueError("temporal structural batch metadata differs")
+    if delta_order not in ("ordered", "shuffled") or permutation_seed < 0:
+        raise ValueError("invalid temporal structural delta order")
+    delta = torch.zeros_like(window_features)
+    delta_mask = torch.zeros_like(window_mask)
+    for sample_index, sample_key in enumerate(sample_keys):
+        count = int(time_mask[sample_index].sum().item())
+        indices = window_index[sample_index, :count]
+        if bool((indices < 0).any()):
+            raise ValueError("valid temporal windows contain padding indices")
+        if delta_order == "shuffled":
+            permutation = torch.tensor(
+                _stable_window_order(sample_key, count, permutation_seed),
+                dtype=torch.long,
+                device=window_index.device,
+            )
+            indices = indices.index_select(0, permutation)
+        for position in range(1, count):
+            previous = int(indices[position - 1].item())
+            current = int(indices[position].item())
+            valid = window_mask[current] & window_mask[previous]
+            delta[current] = (window_features[current] - window_features[previous]).masked_fill(
+                ~valid, 0.0
+            )
+            delta_mask[current] = valid
+    return torch.cat((window_features, delta), dim=-1), torch.cat(
+        (window_mask, delta_mask), dim=-1
+    )
 
 
 def _window_features(window) -> Tuple[np.ndarray, np.ndarray]:
@@ -268,4 +357,103 @@ def fit_structural_transform(
         "train_sample_key_sha256": sample_key_hash,
         "effect_estimation_unit": "sample_mean_over_valid_windows",
         "standardization_unit": "valid_training_windows",
+    }
+
+
+def fit_temporal_structural_transform(
+    dataset,
+    group: str,
+    permutation_seed: int = 42,
+    epsilon: float = 1e-6,
+) -> Dict[str, Any]:
+    """Fit one shared ordered static+delta normalizer using train samples only.
+
+    All A/B/F/G/H conditions deliberately receive the same statistics.  Group H
+    changes predecessor relationships only at model input, preventing a separate
+    normalizer from becoming an unintended experimental difference.
+    """
+
+    condition = temporal_structural_group_configuration(group)
+    if permutation_seed < 0 or epsilon <= 0.0:
+        raise ValueError("invalid temporal structural configuration")
+    if hasattr(dataset, "records"):
+        frozen_keys = [record.sample_key for record in dataset.records]
+    else:
+        frozen_keys = [dataset[index].sample_key for index in range(len(dataset))]
+    frozen_hash = hashlib.sha256(
+        json.dumps(sorted(frozen_keys), separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    all_values = []
+    all_masks = []
+    sample_keys = []
+    sample_window_counts = []
+    for sample_index in range(len(dataset)):
+        sample = dataset[sample_index]
+        if sample.split != "train":
+            raise ValueError("temporal structural transform can only be fit on train samples")
+        static_rows = []
+        static_masks = []
+        for window in sample.windows:
+            values, mask = _window_features(window)
+            static_rows.append(values)
+            static_masks.append(mask)
+        if not static_rows:
+            raise ValueError("training sample contains no structural windows")
+        static = np.stack(static_rows)
+        masks = np.stack(static_masks)
+        delta = np.zeros_like(static)
+        delta_masks = np.zeros_like(masks)
+        if len(static) > 1:
+            delta[1:] = static[1:] - static[:-1]
+            delta_masks[1:] = masks[1:] & masks[:-1]
+            delta[~delta_masks] = 0.0
+        all_values.append(np.concatenate((static, delta), axis=1))
+        all_masks.append(np.concatenate((masks, delta_masks), axis=1))
+        sample_keys.append(sample.sample_key)
+        sample_window_counts.append(len(static))
+    if not all_values:
+        raise ValueError("training Dataset contains no structural windows")
+    values = np.concatenate(all_values, axis=0)
+    masks = np.concatenate(all_masks, axis=0)
+    counts = masks.sum(axis=0)
+    if bool((counts == 0).any()):
+        missing = [
+            TEMPORAL_WINDOW_STRUCTURAL_FEATURES[index]
+            for index in np.flatnonzero(counts == 0)
+        ]
+        raise ValueError("temporal structural features are absent from train: {}".format(missing))
+    mean = (values * masks).sum(axis=0) / counts
+    centered = (values - mean) * masks
+    std = np.sqrt((centered * centered).sum(axis=0) / counts)
+    safe_std = np.maximum(std, epsilon)
+    sample_hash = hashlib.sha256(
+        json.dumps(sorted(sample_keys), separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    if sample_hash != frozen_hash:
+        raise RuntimeError("temporal structural fit sample inventory changed")
+    return {
+        "schema_version": 2,
+        "experiment": "temporal_structural_delta",
+        "fitted_on": "train_only",
+        "structural_group": group,
+        "use_structural_features": condition["use_structural_features"],
+        "use_structural_deltas": condition["use_structural_deltas"],
+        "structural_delta_order": condition["structural_delta_order"],
+        "structural_delta_permutation_seed": int(permutation_seed),
+        "normalization_delta_order": "ordered",
+        "feature_names": list(TEMPORAL_WINDOW_STRUCTURAL_FEATURES),
+        "mean": mean.tolist(),
+        "std": safe_std.tolist(),
+        "raw_std": std.tolist(),
+        "valid_window_counts": counts.astype(np.int64).tolist(),
+        "prior_mode": "none",
+        "prior_scale": [1.0] * len(TEMPORAL_WINDOW_STRUCTURAL_FEATURES),
+        "beta": 0.0,
+        "permutation_seed": int(permutation_seed),
+        "epsilon": float(epsilon),
+        "sample_count": len(dataset),
+        "window_count": int(sum(sample_window_counts)),
+        "train_sample_key_sha256": sample_hash,
+        "standardization_unit": "valid_training_windows_ordered_deltas",
+        "first_window_policy": "masked_not_zero_observation",
     }

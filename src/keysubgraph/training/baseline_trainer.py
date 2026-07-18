@@ -25,7 +25,10 @@ from torch.nn.utils import clip_grad_norm_
 
 from keysubgraph.data.baseline_manifest import read_baseline_manifest
 from keysubgraph.data.data_split import file_sha256
-from keysubgraph.features.structural_prior import STATIC_WINDOW_STRUCTURAL_FEATURES
+from keysubgraph.features.structural_prior import (
+    STATIC_WINDOW_STRUCTURAL_FEATURES,
+    TEMPORAL_WINDOW_STRUCTURAL_FEATURES,
+)
 from keysubgraph.models.baseline_classifier import SignedSequenceBaseline
 
 
@@ -397,9 +400,9 @@ def train_baseline(
     ):
         raise FileExistsError("baseline training outputs already exist")
     structural_transform_hash = ""
-    if model.config.structural_interface_version == 1:
+    if model.config.structural_interface_version in (1, 2):
         if not isinstance(structural_transform, dict):
-            raise ValueError("structural interface v1 requires a fitted transform")
+            raise ValueError("structural interface requires a fitted transform")
         if structural_transform.get("structural_group") != model.config.structural_group:
             raise ValueError("structural transform group differs from model")
         if structural_transform.get("prior_mode") != model.config.prior_mode:
@@ -408,11 +411,18 @@ def train_baseline(
             model.config.use_structural_features
         ):
             raise ValueError("structural transform feature flag differs from model")
+        if bool(structural_transform.get("use_structural_deltas", False)) != bool(
+            model.config.use_structural_deltas
+        ):
+            raise ValueError("structural transform delta flag differs from model")
         if structural_transform.get("fitted_on") != "train_only":
             raise ValueError("structural transform was not fit on train only")
-        if structural_transform.get("feature_names") != list(
+        expected_features = (
             STATIC_WINDOW_STRUCTURAL_FEATURES
-        ):
+            if model.config.structural_interface_version == 1
+            else TEMPORAL_WINDOW_STRUCTURAL_FEATURES
+        )
+        if structural_transform.get("feature_names") != list(expected_features):
             raise ValueError("structural transform feature schema differs")
         if len(structural_transform["feature_names"]) != model.config.structural_feature_dim:
             raise ValueError("structural transform feature dimension differs")
@@ -420,6 +430,11 @@ def train_baseline(
             raise ValueError("structural transform beta differs from model")
         if int(structural_transform.get("permutation_seed")) != model.config.prior_permutation_seed:
             raise ValueError("structural transform permutation seed differs from model")
+        if model.config.structural_interface_version == 2:
+            if structural_transform.get("structural_delta_order") != model.config.structural_delta_order:
+                raise ValueError("structural transform delta order differs from model")
+            if int(structural_transform.get("structural_delta_permutation_seed")) != model.config.structural_delta_permutation_seed:
+                raise ValueError("structural transform delta permutation seed differs")
         expected_key_hash = hashlib.sha256(
             json.dumps(
                 sorted(record.sample_key for record in train_records),
@@ -526,7 +541,7 @@ def train_baseline(
         "selection_metric": config.selection_metric,
         "structural_transform": (
             structural_transform_path
-            if model.config.structural_interface_version == 1
+            if model.config.structural_interface_version in (1, 2)
             else None
         ),
     }
@@ -551,11 +566,14 @@ def load_baseline_checkpoint(
     checkpoint_model_config.setdefault("permutation_seed", 42)
     checkpoint_model_config.setdefault("structural_interface_version", 0)
     checkpoint_model_config.setdefault("structural_group", "neutral")
+    checkpoint_model_config.setdefault("use_structural_deltas", False)
     checkpoint_model_config.setdefault("structural_feature_dim", 11)
     checkpoint_model_config.setdefault("structural_hidden_dim", 32)
     checkpoint_model_config.setdefault("prior_mode", "none")
     checkpoint_model_config.setdefault("prior_beta", 1.0)
     checkpoint_model_config.setdefault("prior_permutation_seed", 42)
+    checkpoint_model_config.setdefault("structural_delta_order", "ordered")
+    checkpoint_model_config.setdefault("structural_delta_permutation_seed", 42)
     if checkpoint_model_config != asdict(model.config):
         raise ValueError("baseline checkpoint model configuration differs")
     model.load_state_dict(checkpoint["model_state_dict"])

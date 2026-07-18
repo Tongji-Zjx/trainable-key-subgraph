@@ -23,6 +23,7 @@ from keysubgraph.models.baseline_classifier import (  # noqa: E402
 )
 from keysubgraph.features.structural_prior import (  # noqa: E402
     STATIC_WINDOW_STRUCTURAL_FEATURES,
+    TEMPORAL_WINDOW_STRUCTURAL_FEATURES,
 )
 from keysubgraph.training.baseline_trainer import (  # noqa: E402
     BaselineTrainingConfig,
@@ -276,6 +277,70 @@ class BaselineTrainingTest(unittest.TestCase):
             restored.structural_prior_scale,
             torch.tensor(transform["prior_scale"]),
         ))
+
+    def test_temporal_delta_transform_trains_saves_and_restores(self):
+        config = BaselineModelConfig(
+            node_hidden_dim=8,
+            signed_gnn_layers=1,
+            signed_gnn_dropout=0.0,
+            fusion_dim=12,
+            gru_hidden_dim=10,
+            classifier_hidden_dim=6,
+            classifier_dropout=0.0,
+            history_mode="independent_bag",
+            structural_interface_version=2,
+            structural_group="F",
+            structural_feature_dim=22,
+            use_structural_features=True,
+            use_structural_deltas=True,
+            structural_delta_order="ordered",
+            structural_delta_permutation_seed=42,
+            prior_mode="none",
+            prior_beta=0.0,
+        )
+        transform = {
+            "schema_version": 2,
+            "experiment": "temporal_structural_delta",
+            "fitted_on": "train_only",
+            "structural_group": "F",
+            "use_structural_features": True,
+            "use_structural_deltas": True,
+            "structural_delta_order": "ordered",
+            "structural_delta_permutation_seed": 42,
+            "feature_names": list(TEMPORAL_WINDOW_STRUCTURAL_FEATURES),
+            "mean": [0.0] * 22,
+            "std": [1.0] * 22,
+            "prior_mode": "none",
+            "prior_scale": [1.0] * 22,
+            "beta": 0.0,
+            "permutation_seed": 42,
+            "sample_count": 1,
+            "train_sample_key_sha256": hashlib.sha256(
+                json.dumps(["SITE/train_sample"], separators=(",", ":")).encode("utf-8")
+            ).hexdigest(),
+        }
+        output_dir = self.root / "temporal_structural_training"
+        model = SignedSequenceBaseline(config)
+        result = train_baseline(
+            model,
+            train_loader=[_sequence_batch()],
+            validation_loader=[_sequence_batch()],
+            train_labels=[0, 1],
+            device=torch.device("cpu"),
+            config=BaselineTrainingConfig(epochs=1, seed=17),
+            output_dir=output_dir,
+            train_manifest_path=self.train_manifest,
+            validation_manifest_path=self.validation_manifest,
+            project_root=self.root,
+            structural_transform=transform,
+        )
+        restored = SignedSequenceBaseline(config)
+        checkpoint = load_baseline_checkpoint(
+            result["best_checkpoint"], restored, device=torch.device("cpu")
+        )
+        self.assertEqual(checkpoint["model_config"]["structural_interface_version"], 2)
+        self.assertEqual(checkpoint["structural_transform"], transform)
+        self.assertTrue(bool(restored.structural_transform_fitted))
 
 
 if __name__ == "__main__":

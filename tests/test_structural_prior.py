@@ -16,8 +16,11 @@ if str(SRC_ROOT) not in sys.path:
 
 from keysubgraph.features.structural_prior import (  # noqa: E402
     STATIC_WINDOW_STRUCTURAL_FEATURES,
+    TEMPORAL_WINDOW_STRUCTURAL_FEATURES,
+    build_temporal_window_features,
     compute_static_subgraph_features,
     fit_structural_transform,
+    fit_temporal_structural_transform,
 )
 from keysubgraph.models.baseline_classifier import (  # noqa: E402
     BaselineModelConfig,
@@ -56,6 +59,52 @@ def _dataset(split="train"):
 
 
 class StructuralPriorTest(unittest.TestCase):
+    def test_temporal_deltas_are_masked_ordered_and_padding_safe(self):
+        values = torch.zeros(4, 11)
+        values[:, 0] = torch.tensor([1.0, 3.0, 8.0, 20.0])
+        masks = torch.ones(4, 11, dtype=torch.bool)
+        masks[1, 1] = False
+        window_index = torch.tensor([[0, 1, 2, -1], [3, -1, -1, -1]])
+        time_mask = window_index >= 0
+        output, output_mask = build_temporal_window_features(
+            values, masks, window_index, time_mask, ("S/a", "S/b")
+        )
+        self.assertEqual(output.shape, (4, 22))
+        self.assertEqual(output[:, 11].tolist(), [0.0, 2.0, 5.0, 0.0])
+        self.assertFalse(bool(output_mask[0, 11:].any()))
+        self.assertFalse(bool(output_mask[3, 11:].any()))
+        self.assertFalse(bool(output_mask[1, 12]))
+        self.assertEqual(output[1, 12].item(), 0.0)
+
+        padded_index = torch.cat((window_index, torch.full((2, 3), -1, dtype=torch.long)), dim=1)
+        padded_mask = padded_index >= 0
+        padded_output, padded_output_mask = build_temporal_window_features(
+            values, masks, padded_index, padded_mask, ("S/a", "S/b")
+        )
+        self.assertTrue(torch.equal(output, padded_output))
+        self.assertTrue(torch.equal(output_mask, padded_output_mask))
+
+    def test_shuffled_delta_is_frozen_and_changes_only_predecessors(self):
+        values = torch.zeros(5, 11)
+        values[:, 0] = torch.tensor([1.0, 2.0, 5.0, 11.0, 23.0])
+        masks = torch.ones_like(values, dtype=torch.bool)
+        index = torch.tensor([[0, 1, 2, 3, 4]])
+        time_mask = torch.ones_like(index, dtype=torch.bool)
+        ordered, _ = build_temporal_window_features(
+            values, masks, index, time_mask, ("S/a",), "ordered", 17
+        )
+        first, first_mask = build_temporal_window_features(
+            values, masks, index, time_mask, ("S/a",), "shuffled", 17
+        )
+        second, second_mask = build_temporal_window_features(
+            values, masks, index, time_mask, ("S/a",), "shuffled", 17
+        )
+        self.assertTrue(torch.equal(first, second))
+        self.assertTrue(torch.equal(first_mask, second_mask))
+        self.assertTrue(torch.equal(first[:, :11], values))
+        self.assertFalse(torch.equal(first[:, 11:], ordered[:, 11:]))
+        self.assertEqual(int(first_mask[:, 11].sum()), 4)
+
     def test_static_signed_features_and_missing_sign_masks(self):
         adjacency = torch.tensor([
             [0.0, 0.5, -0.3],
@@ -103,6 +152,52 @@ class StructuralPriorTest(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "train"):
             fit_structural_transform(_dataset(split="validation"), "B")
+
+    def test_temporal_groups_share_train_only_normalization(self):
+        dataset = _dataset()
+        for sample in dataset.samples:
+            first = sample.windows[0]
+            shifted = SimpleNamespace(subgraphs=(SimpleNamespace(
+                structural_features=first.subgraphs[0].structural_features + 0.5,
+                structural_mask=first.subgraphs[0].structural_mask.clone(),
+            ),))
+            object.__setattr__(sample, "windows", (first, shifted))
+        transforms = {
+            group: fit_temporal_structural_transform(dataset, group, permutation_seed=17)
+            for group in ("A", "B", "F", "G", "H")
+        }
+        reference = transforms["A"]
+        self.assertEqual(len(TEMPORAL_WINDOW_STRUCTURAL_FEATURES), 22)
+        for transform in transforms.values():
+            self.assertEqual(transform["mean"], reference["mean"])
+            self.assertEqual(transform["std"], reference["std"])
+            self.assertEqual(transform["first_window_policy"], "masked_not_zero_observation")
+        self.assertFalse(transforms["A"]["use_structural_features"])
+        self.assertTrue(transforms["F"]["use_structural_deltas"])
+        self.assertFalse(transforms["B"]["use_structural_deltas"])
+        self.assertEqual(transforms["H"]["structural_delta_order"], "shuffled")
+
+    def test_temporal_groups_are_parameter_matched(self):
+        counts = []
+        for group, static, delta, order in (
+            ("A", False, False, "ordered"),
+            ("B", True, False, "ordered"),
+            ("F", True, True, "ordered"),
+            ("G", False, True, "ordered"),
+            ("H", True, True, "shuffled"),
+        ):
+            model = SignedSequenceBaseline(BaselineModelConfig(
+                structural_interface_version=2,
+                structural_group=group,
+                structural_feature_dim=22,
+                use_structural_features=static,
+                use_structural_deltas=delta,
+                structural_delta_order=order,
+                prior_mode="none",
+                prior_beta=0.0,
+            ))
+            counts.append(sum(parameter.numel() for parameter in model.parameters()))
+        self.assertEqual(len(set(counts)), 1)
 
     def test_groups_have_equal_parameters_and_zero_group_ignores_features(self):
         models = []

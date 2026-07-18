@@ -1,0 +1,59 @@
+{
+  "schema_version": 1,
+  "analysis_id": "history_modes_seed42_v1_analysis",
+  "evidence_level": "exploratory_in_sample",
+  "training_seed": 42,
+  "analysis_seed": 42,
+  "audit": {
+    "experiment_count": 6,
+    "validation_samples_per_experiment": 141,
+    "test_samples_per_experiment": 140,
+    "test_subject_groups": 140,
+    "sample_keys_labels_subjects_and_sites_aligned": true,
+    "parent_manifest_hash_aligned": true,
+    "downstream_split_hash_aligned": true,
+    "bootstrap_repeats": 100000,
+    "sign_flip_permutation_repeats": 100000
+  },
+  "aggregate_metrics": {
+    "validation": {
+      "full": {"log_loss": 0.6780962851, "roc_auc": 0.4612601107, "balanced_accuracy": 0.5376756066},
+      "current_only": {"log_loss": 0.6763138336, "roc_auc": 0.4925500213, "balanced_accuracy": 0.5459770115},
+      "truncate_025": {"log_loss": 0.6797292336, "roc_auc": 0.4661558110, "balanced_accuracy": 0.5118135377},
+      "truncate_050": {"log_loss": 0.6756580824, "roc_auc": 0.4206045126, "balanced_accuracy": 0.5172413793},
+      "truncate_075": {"log_loss": 0.6719823537, "roc_auc": 0.4386973180, "balanced_accuracy": 0.5063856960},
+      "independent_bag": {"log_loss": 0.6720056361, "roc_auc": 0.5240527884, "balanced_accuracy": 0.5609833972}
+    },
+    "test": {
+      "full": {"log_loss": 0.6686030299, "roc_auc": 0.5452179571, "balanced_accuracy": 0.5430492301, "accuracy": 0.6428571429, "f1": 0.21875},
+      "current_only": {"log_loss": 0.6603991109, "roc_auc": 0.5571459553, "balanced_accuracy": 0.5626762091, "accuracy": 0.6214285714, "f1": 0.3908045977},
+      "truncate_025": {"log_loss": 0.6640492885, "roc_auc": 0.5679895901, "balanced_accuracy": 0.5790500976, "accuracy": 0.6142857143, "f1": 0.46},
+      "truncate_050": {"log_loss": 0.6741846346, "roc_auc": 0.5864237692, "balanced_accuracy": 0.4926263283, "accuracy": 0.3785714286, "f1": 0.5396825397},
+      "truncate_075": {"log_loss": 0.6701381140, "roc_auc": 0.5766644979, "balanced_accuracy": 0.5278681414, "accuracy": 0.6285714286, "f1": 0.1875},
+      "independent_bag": {"log_loss": 0.6528482568, "roc_auc": 0.6230752548, "balanced_accuracy": 0.5609412275, "accuracy": 0.5642857143, "f1": 0.4873949580}
+    }
+  },
+  "paired_test_comparisons": {
+    "delta_definition": "control per-subject log-loss minus full per-subject log-loss; positive favors full",
+    "full_vs_current_only": {"mean_delta": -0.0082039190, "ci95": [-0.0272345092, 0.0109929026], "p_value": 0.4056959430, "q_value_bh": 0.5071199288, "full_better_sample_fraction": 0.3928571429},
+    "full_vs_truncate_025": {"mean_delta": -0.0045537414, "ci95": [-0.0119568755, 0.0026458760], "p_value": 0.2206477935, "q_value_bh": 0.3677463225, "full_better_sample_fraction": 0.4571428571},
+    "full_vs_truncate_050": {"mean_delta": 0.0055816047, "ci95": [-0.0012777144, 0.0123030921], "p_value": 0.1096989030, "q_value_bh": 0.2742472575, "full_better_sample_fraction": 0.5714285714},
+    "full_vs_truncate_075": {"mean_delta": 0.0015350841, "ci95": [-0.0048409735, 0.0078899635], "p_value": 0.6392136079, "q_value_bh": 0.6392136079, "full_better_sample_fraction": 0.4785714286},
+    "full_vs_independent_bag": {"mean_delta": -0.0157547731, "ci95": [-0.0260253699, -0.0053992311], "p_value": 0.0032399676, "q_value_bh": 0.0161998380, "full_better_sample_fraction": 0.3857142857}
+  },
+  "constant_prevalence_reference": {
+    "train_positive_probability": 0.3789954338,
+    "test_log_loss": 0.6633608207,
+    "full_delta_null_minus_model": -0.0052422092,
+    "independent_bag_delta_null_minus_model": 0.0105125639,
+    "independent_bag_ci95": [-0.0100656521, 0.0316885762],
+    "independent_bag_p_value": 0.3242467575
+  },
+  "conclusions": {
+    "history_information_supported": false,
+    "monotonic_history_length_effect_supported": false,
+    "recursive_state_transfer_supported": false,
+    "single_seed_signal": "independent_bag outperformed full on paired test log-loss",
+    "requires_multiple_training_seeds": true
+  }
+}
