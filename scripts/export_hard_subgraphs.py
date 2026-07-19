@@ -4,6 +4,7 @@ from __future__ import absolute_import, print_function
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -110,6 +111,28 @@ def main() -> int:
         exports.append(str(output_path.resolve()))
         total_timepoints += len(result.timepoints)
         total_subgraphs += sum(item.num_valid_subgraphs for item in result.timepoints)
+    completion_path = args.output_dir / "_completion" / "{}.json".format(args.split)
+    completion_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = completion_path.with_suffix(completion_path.suffix + ".tmp")
+    with temporary.open("w", encoding="utf-8") as handle:
+        json.dump(
+            {
+                "schema_version": 1,
+                "complete": True,
+                "split": args.split,
+                "sample_count": count,
+                "timepoint_count": total_timepoints,
+                "selected_subgraph_count": total_subgraphs,
+                "checkpoint": str(args.checkpoint.resolve()),
+                "data_protocol_sha256": file_sha256(args.protocol),
+            },
+            handle,
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        )
+        handle.write("\n")
+    os.replace(str(temporary), str(completion_path))
     print(
         json.dumps(
             {
@@ -118,6 +141,7 @@ def main() -> int:
                 "sample_count": count,
                 "timepoint_count": total_timepoints,
                 "selected_subgraph_count": total_subgraphs,
+                "completion_marker": str(completion_path.resolve()),
                 "exports": exports,
             },
             ensure_ascii=False,

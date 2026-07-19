@@ -130,6 +130,7 @@ def build_baseline_manifest(
     matched_manifest_value = ""
     matched_manifest_hash = ""
     matched_source_records = None
+    matched_experiment_kind = ""
     if matched_control_manifest_path is not None:
         matched_control_manifest_path = Path(matched_control_manifest_path).resolve()
         with matched_control_manifest_path.open("r", encoding="utf-8") as handle:
@@ -140,13 +141,15 @@ def build_baseline_manifest(
             or not matched_payload.get("immutable")
         ):
             raise ValueError("unsupported matched-control manifest")
-        if matched_payload.get("split") != split:
+        partition_inventory = matched_payload.get("partition_inventories", {}).get(split)
+        if matched_payload.get("split") != split and partition_inventory is None:
             raise ValueError("matched-control manifest split differs")
         if matched_payload.get("data_protocol_sha256") != protocol_sha256:
             raise ValueError("matched-control manifest protocol differs")
         if subgraph_source not in matched_payload.get("sources", []):
             raise ValueError("subgraph source is absent from matched-control manifest")
-        included_keys = set(matched_payload.get("included_sample_keys", []))
+        matched_inventory = partition_inventory or matched_payload
+        included_keys = set(matched_inventory.get("included_sample_keys", []))
         if not included_keys or not included_keys.issubset(assignment_by_key):
             raise ValueError("matched-control sample cohort is invalid")
         assignment_by_key = {
@@ -154,7 +157,7 @@ def build_baseline_manifest(
         }
         matched_source_records = {
             str(item["sample_key"]): item
-            for item in matched_payload["source_records"][subgraph_source]
+            for item in matched_inventory["source_records"][subgraph_source]
         }
         if set(matched_source_records) != included_keys:
             raise ValueError("matched-control source inventory differs from cohort")
@@ -162,6 +165,7 @@ def build_baseline_manifest(
             matched_control_manifest_path, project_root
         )
         matched_manifest_hash = file_sha256(matched_control_manifest_path)
+        matched_experiment_kind = str(matched_payload.get("experiment_kind", ""))
     elif subgraph_source != "key":
         raise ValueError("non-key source requires a matched-control manifest")
 
@@ -289,6 +293,7 @@ def build_baseline_manifest(
         "subgraph_source": subgraph_source,
         "matched_control_manifest": matched_manifest_value,
         "matched_control_manifest_sha256": matched_manifest_hash,
+        "matched_control_experiment_kind": matched_experiment_kind,
         "sample_count": len(records),
         "timepoint_count": timepoint_total,
         "subgraph_count": subgraph_total,

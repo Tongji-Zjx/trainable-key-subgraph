@@ -314,6 +314,44 @@ class BaselineDataTest(unittest.TestCase):
         self.assertEqual(dataset[0].sample_key, self.sample_key)
         self.assertTrue(payload["matched_control_manifest_sha256"])
 
+    def test_partitioned_crossfit_control_manifest_uses_local_inventory(self):
+        source_root = self.root / "crossfit_sources"
+        random_export_dir = source_root / "random" / "validation"
+        random_export_dir.mkdir(parents=True)
+        original_path = self.export_dir / (self.sample_id + ".json")
+        with original_path.open("r", encoding="utf-8") as handle:
+            control_payload = json.load(handle)
+        control_payload["subgraph_source"] = "random"
+        control_path = random_export_dir / original_path.name
+        with control_path.open("w", encoding="utf-8") as handle:
+            json.dump(control_payload, handle)
+        matched_path = source_root / "key_random_control_manifest.json"
+        with matched_path.open("w", encoding="utf-8") as handle:
+            json.dump({
+                "schema_version": 1, "immutable": True,
+                "purpose": "baseline_matched_subgraph_sources",
+                "split": "crossfit_fold",
+                "data_protocol_sha256": file_sha256(self.protocol_path),
+                "sources": ["key", "random"],
+                "partition_inventories": {
+                    "validation": {
+                        "included_sample_keys": [self.sample_key],
+                        "source_records": {"random": [{
+                            "sample_key": self.sample_key,
+                            "sha256": file_sha256(control_path),
+                        }]},
+                    }
+                },
+            }, handle)
+        output_dir = self.root / "crossfit_random_manifest"
+        payload = build_baseline_manifest(
+            self.root, self.protocol_path, source_root / "random", "validation",
+            output_dir, matched_control_manifest_path=matched_path,
+            subgraph_source="random",
+        )
+        self.assertEqual(payload["sample_count"], 1)
+        self.assertEqual(payload["subgraph_source"], "random")
+
     def test_label_is_target_only_and_metadata_changes_are_rejected(self):
         dataset = self._dataset(verify_exports=False)
         original_features = dataset[0].windows[0].subgraphs[0].node_features.clone()

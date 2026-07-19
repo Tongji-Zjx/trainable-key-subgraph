@@ -74,11 +74,17 @@ def main() -> int:
         "downstream_splits_json_sha256"
     ):
         raise ValueError("checkpoint and evaluation manifest use different downstream splits")
-    if manifest_payload.get("subgraph_source", "key") != checkpoint.get(
+    is_key_perturbation = (
+        manifest_payload.get("matched_control_experiment_kind")
+        == "key_edge_deletion_dose_response"
+        and checkpoint.get("subgraph_source", "key") == "key"
+        and str(manifest_payload.get("subgraph_source", "")).startswith("key_edge_")
+    )
+    if not is_key_perturbation and manifest_payload.get("subgraph_source", "key") != checkpoint.get(
         "subgraph_source", "key"
     ):
         raise ValueError("checkpoint and evaluation manifest use different subgraph sources")
-    if manifest_payload.get("matched_control_manifest_sha256", "") != checkpoint.get(
+    if not is_key_perturbation and manifest_payload.get("matched_control_manifest_sha256", "") != checkpoint.get(
         "matched_control_manifest_sha256", ""
     ):
         raise ValueError("checkpoint and evaluation manifest use different matched cohorts")

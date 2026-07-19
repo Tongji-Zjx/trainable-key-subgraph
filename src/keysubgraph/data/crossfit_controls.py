@@ -9,6 +9,9 @@ import os
 from pathlib import Path
 
 from keysubgraph.analysis.controls import generate_random_controls
+from keysubgraph.data.data_protocol import validate_data_protocol
+from keysubgraph.data.data_split import file_sha256
+from keysubgraph.data.graph_dataset import GraphSequenceDataset
 
 
 KEY_RANDOM_CONTROL_SCHEMA_VERSION = 1
@@ -158,3 +161,118 @@ def freeze_key_random_inventory(sample_audits, output_path, fold, random_seed=42
         handle.write("\n")
     os.replace(str(temporary), str(output_path))
     return payload
+
+
+def _portable_path(path, project_root):
+    path = Path(path).resolve()
+    try:
+        return path.relative_to(Path(project_root).resolve()).as_posix()
+    except ValueError:
+        return path.as_posix()
+
+
+def _write_json(path, payload):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    with temporary.open("w", encoding="utf-8") as handle:
+        json.dump(payload, handle, ensure_ascii=False, indent=2, sort_keys=True)
+        handle.write("\n")
+    os.replace(str(temporary), str(path))
+
+
+def build_crossfit_key_random_exports(
+    project_root, protocol_path, key_export_root, output_root,
+    random_seed=42, repeat_index=0,
+):
+    """Materialize one fold-wide Key/Random control manifest shared by all partitions."""
+
+    project_root = Path(project_root).resolve()
+    protocol_path = Path(protocol_path).resolve()
+    protocol = validate_data_protocol(protocol_path, project_root)
+    protocol_hash = file_sha256(protocol_path)
+    key_export_root = Path(key_export_root).resolve()
+    output_root = Path(output_root).resolve()
+    manifest_path = output_root / "key_random_control_manifest.json"
+    if manifest_path.exists():
+        raise FileExistsError(str(manifest_path))
+    partitions = {}
+    checkpoint_hash = None
+    extraction_config = None
+    for split in ("train", "validation", "test"):
+        dataset = GraphSequenceDataset(
+            project_root / protocol["paths"]["dataset_root"],
+            project_root / protocol["paths"]["sample_index_csv"],
+            project_root / protocol["paths"]["splits_csv"], split,
+            float(protocol["edge_presence_threshold"]),
+        )
+        dataset_by_key = {
+            assignment.sample_key: dataset[index]
+            for index, assignment in enumerate(dataset.assignments)
+        }
+        export_dir = key_export_root / split
+        export_paths = sorted(export_dir.glob("*.json"))
+        if not export_paths:
+            raise ValueError("Key export partition is empty: {}".format(split))
+        records = {"key": [], "random": []}
+        included = []
+        excluded = []
+        audits = []
+        observed = set()
+        for export_path in export_paths:
+            with export_path.open("r", encoding="utf-8") as handle:
+                key_payload = json.load(handle)
+            sample_key = str(key_payload.get("sample_key", ""))
+            if sample_key in observed or sample_key not in dataset_by_key:
+                raise ValueError("duplicate or unknown Key export sample")
+            observed.add(sample_key)
+            if key_payload.get("data_protocol_sha256") != protocol_hash:
+                raise ValueError("Key export protocol hash differs")
+            current_checkpoint = str(key_payload.get("checkpoint_sha256", ""))
+            current_config = key_payload.get("hard_extraction_config")
+            if checkpoint_hash is None:
+                checkpoint_hash, extraction_config = current_checkpoint, current_config
+            elif checkpoint_hash != current_checkpoint or extraction_config != current_config:
+                raise ValueError("Key export extraction provenance differs")
+            payloads, audit = build_key_random_payloads(
+                dataset_by_key[sample_key], key_payload, random_seed, repeat_index
+            )
+            audit = dict(audit)
+            audit["sample_key"] = sample_key
+            audits.append(audit)
+            if not audit["included"]:
+                excluded.append({"sample_key": sample_key, "reason": "unmatched_random_control"})
+                continue
+            included.append(sample_key)
+            for source in ("key", "random"):
+                output_path = output_root / source / split / export_path.name
+                _write_json(output_path, payloads[source])
+                records[source].append({
+                    "sample_key": sample_key,
+                    "export_json": _portable_path(output_path, project_root),
+                    "sha256": file_sha256(output_path),
+                    "timepoint_count": len(payloads[source]["timepoints"]),
+                    "subgraph_count": sum(len(item["subgraphs"]) for item in payloads[source]["timepoints"]),
+                })
+        if observed != set(dataset_by_key):
+            raise ValueError("Key exports do not cover fold partition")
+        if not included:
+            raise RuntimeError("Random matching excluded an entire partition")
+        partitions[split] = {
+            "included_sample_keys": sorted(included), "excluded_samples": excluded,
+            "sample_audits": audits, "source_records": records,
+        }
+    manifest = {
+        "schema_version": 1, "immutable": True,
+        "purpose": "baseline_matched_subgraph_sources",
+        "experiment_kind": "crossfit_key_random_common_cohort",
+        "split": "crossfit_fold", "partitions": ["train", "validation", "test"],
+        "data_protocol": _portable_path(protocol_path, project_root),
+        "data_protocol_sha256": protocol_hash,
+        "checkpoint_sha256": checkpoint_hash,
+        "hard_extraction_config": extraction_config,
+        "random_seed": int(random_seed), "random_repeat_index": int(repeat_index),
+        "sources": ["key", "random"], "partition_inventories": partitions,
+    }
+    _write_json(manifest_path, manifest)
+    return manifest
