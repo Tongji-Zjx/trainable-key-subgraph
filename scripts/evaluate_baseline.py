@@ -61,7 +61,7 @@ def main() -> int:
         with transform_path.open("r", encoding="utf-8") as handle:
             if json.load(handle) != checkpoint.get("structural_transform"):
                 raise ValueError("structural transform payload differs from checkpoint")
-    manifest_payload, _ = read_baseline_manifest(args.manifest, PROJECT_ROOT)
+    manifest_payload, manifest_records = read_baseline_manifest(args.manifest, PROJECT_ROOT)
     if manifest_payload["data_protocol_sha256"] != checkpoint["data_protocol_sha256"]:
         raise ValueError("checkpoint and evaluation manifest use different protocols")
     if manifest_payload["checkpoint_sha256"] != checkpoint["extractor_checkpoint_sha256"]:
@@ -117,9 +117,13 @@ def main() -> int:
         max_batches=args.max_batches,
         include_predictions=True,
     )
-    labels = metrics.pop("labels")
-    probabilities = metrics.pop("probabilities")
-    del labels, probabilities
+    metrics.pop("labels")
+    metrics.pop("probabilities")
+    predictions = metrics.pop("predictions")
+    record_map = {record.sample_key: record for record in manifest_records}
+    for row in predictions:
+        record = record_map[row["sample_key"]]
+        row["session_id"] = record.session_id
     payload = {
         "schema_version": 1,
         "split": manifest_payload["split"],
@@ -140,6 +144,7 @@ def main() -> int:
             "structural_transform_sha256", ""
         ),
         "metrics": metrics,
+        "predictions": predictions,
     }
     output = args.output or (
         args.checkpoint.resolve().parent

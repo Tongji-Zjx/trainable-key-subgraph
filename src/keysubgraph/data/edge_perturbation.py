@@ -18,6 +18,7 @@ from .graph_dataset import GraphSequenceDataset
 
 EDGE_PERTURBATION_SCHEMA_VERSION = 1
 EDGE_PERTURBATION_RATIOS = (0.0, 0.10, 0.25, 0.50)
+CONFIRMATORY_EDGE_PERTURBATION_RATIOS = (0.0, 0.25, 0.50)
 EDGE_PERTURBATION_MODES = ("targeted", "random")
 EDGE_ALIGNED_FIELDS = (
     "edge_index",
@@ -122,7 +123,7 @@ def _edge_inventory(key_subgraph: Dict[str, Any]):
 def _deletion_count(edge_count: int, ratio: float) -> int:
     if ratio == 0.0:
         return 0
-    requested = int(math.floor(edge_count * ratio + 0.5))
+    requested = int(math.ceil(edge_count * ratio))
     return min(edge_count - 1, max(1, requested))
 
 

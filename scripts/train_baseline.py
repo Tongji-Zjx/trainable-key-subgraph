@@ -20,6 +20,7 @@ from keysubgraph.data.baseline_collate import create_baseline_loader  # noqa: E4
 from keysubgraph.data.baseline_dataset import BaselineHardSubgraphDataset  # noqa: E402
 from keysubgraph.models.baseline_classifier import (  # noqa: E402
     BaselineModelConfig,
+    ENCODER_TYPES,
     HISTORY_MODES,
     SignedSequenceBaseline,
     TEMPORAL_ORDERS,
@@ -65,6 +66,7 @@ def parse_args() -> argparse.Namespace:
         default="unweighted_log_loss",
     )
     parser.add_argument("--node-hidden", type=int, default=64)
+    parser.add_argument("--encoder-type", choices=ENCODER_TYPES, default="signed")
     parser.add_argument("--signed-layers", type=int, default=2)
     parser.add_argument("--fusion-dim", type=int, default=128)
     parser.add_argument("--gru-hidden", type=int, default=128)
@@ -185,6 +187,7 @@ def main() -> int:
     set_baseline_seed(args.seed)
     model = SignedSequenceBaseline(
         BaselineModelConfig(
+            encoder_type=args.encoder_type,
             node_hidden_dim=args.node_hidden,
             signed_gnn_layers=args.signed_layers,
             signed_gnn_dropout=args.signed_dropout,
@@ -258,6 +261,7 @@ def main() -> int:
             "history_keep_ratio": args.history_keep_ratio,
             "temporal_order": args.temporal_order,
             "permutation_seed": args.permutation_seed,
+            "encoder_type": args.encoder_type,
             "structural_group": structural_group,
             "prior_mode": prior_mode,
             "use_structural_deltas": use_structural_deltas,

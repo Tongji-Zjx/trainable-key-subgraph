@@ -17,10 +17,12 @@ from keysubgraph.features.structural_prior import (
 )
 
 from .baseline_subgraph_encoder import SignedSubgraphEncoder, WindowMeanPooling
+from .node_only_subgraph_encoder import NodeOnlySubgraphEncoder
 
 
 HISTORY_MODES = ("full", "current_only", "truncate_history", "independent_bag")
 TEMPORAL_ORDERS = ("ordered", "shuffled")
+ENCODER_TYPES = ("signed", "node_only")
 
 
 @dataclass(frozen=True)
@@ -50,6 +52,7 @@ class BaselineModelConfig:
     history_keep_ratio: float = 1.0
     temporal_order: str = "ordered"
     permutation_seed: int = 42
+    encoder_type: str = "signed"
 
     def __post_init__(self) -> None:
         integer_fields = (
@@ -129,6 +132,8 @@ class BaselineModelConfig:
             raise ValueError("permutation_seed must be non-negative")
         if self.temporal_order == "shuffled" and self.history_mode != "full":
             raise ValueError("shuffled temporal order currently requires history_mode='full'")
+        if self.encoder_type not in ENCODER_TYPES:
+            raise ValueError("unsupported baseline encoder_type")
 
 
 @dataclass(frozen=True)
@@ -150,7 +155,12 @@ class SignedSequenceBaseline(nn.Module):
     def __init__(self, config: BaselineModelConfig) -> None:
         super().__init__()
         self.config = config
-        self.subgraph_encoder = SignedSubgraphEncoder(
+        encoder_class = (
+            SignedSubgraphEncoder
+            if config.encoder_type == "signed"
+            else NodeOnlySubgraphEncoder
+        )
+        self.subgraph_encoder = encoder_class(
             node_feature_dim=config.node_feature_dim,
             hidden_dim=config.node_hidden_dim,
             layers=config.signed_gnn_layers,
@@ -309,9 +319,14 @@ class SignedSequenceBaseline(nn.Module):
     def forward(self, batch: BaselineBatch) -> BaselineModelOutput:
         if batch.node_feature_dim != self.config.node_feature_dim:
             raise ValueError("batch node feature dimension does not match model")
-        subgraph_embeddings = self.subgraph_encoder(
-            batch.node_features, batch.adjacency, batch.node_mask
-        )
+        if self.config.encoder_type == "signed":
+            subgraph_embeddings = self.subgraph_encoder(
+                batch.node_features, batch.adjacency, batch.node_mask
+            )
+        else:
+            subgraph_embeddings = self.subgraph_encoder(
+                batch.node_features, batch.node_mask
+            )
         flat_window_embeddings = self.window_pooling(
             subgraph_embeddings,
             batch.subgraph_to_window,

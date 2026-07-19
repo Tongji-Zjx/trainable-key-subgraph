@@ -574,6 +574,7 @@ def load_baseline_checkpoint(
     checkpoint_model_config.setdefault("prior_permutation_seed", 42)
     checkpoint_model_config.setdefault("structural_delta_order", "ordered")
     checkpoint_model_config.setdefault("structural_delta_permutation_seed", 42)
+    checkpoint_model_config.setdefault("encoder_type", "signed")
     if checkpoint_model_config != asdict(model.config):
         raise ValueError("baseline checkpoint model configuration differs")
     model.load_state_dict(checkpoint["model_state_dict"])
