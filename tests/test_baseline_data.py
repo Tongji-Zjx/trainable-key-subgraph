@@ -351,6 +351,10 @@ class BaselineDataTest(unittest.TestCase):
         )
         self.assertEqual(payload["sample_count"], 1)
         self.assertEqual(payload["subgraph_source"], "random")
+        dataset = BaselineHardSubgraphDataset(
+            self.root, output_dir / "baseline_manifest.json"
+        )
+        self.assertEqual(dataset[0].sample_key, self.sample_key)
 
     def test_label_is_target_only_and_metadata_changes_are_rejected(self):
         dataset = self._dataset(verify_exports=False)

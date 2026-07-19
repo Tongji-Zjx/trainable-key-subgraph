@@ -399,8 +399,11 @@ def read_baseline_manifest(
             raise ValueError("matched-control manifest has the wrong purpose")
         if subgraph_source not in matched_payload.get("sources", []):
             raise ValueError("baseline subgraph source is absent from matching artifact")
+        matched_inventory = matched_payload.get("partition_inventories", {}).get(
+            source_split, matched_payload
+        )
         if {record.sample_key for record in records} - set(
-            matched_payload.get("included_sample_keys", [])
+            matched_inventory.get("included_sample_keys", [])
         ):
             raise ValueError("baseline samples are absent from matched-control cohort")
     if "timepoint_count" in payload and sum(
