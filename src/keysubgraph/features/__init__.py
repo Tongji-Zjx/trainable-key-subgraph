@@ -10,6 +10,15 @@ from .hard_graph_features import (
     HardGraphFeatureBuilder,
     HardGraphWindow,
 )
+from .hard_graph_cache import (
+    CachedHardSubgraph,
+    CachedHardWindow,
+    HardExportFeatureAdapter,
+    HardGraphSampleCache,
+    load_hard_graph_cache,
+    save_hard_graph_cache,
+)
+from .tg_standardizer import TGTheoryFeatureStandardizer
 
 __all__ = [
     "GraphFeatureBuilder",
@@ -17,5 +26,12 @@ __all__ = [
     "HardGraphClassificationFeatures",
     "HardGraphFeatureBuilder",
     "HardGraphWindow",
+    "CachedHardSubgraph",
+    "CachedHardWindow",
+    "HardExportFeatureAdapter",
+    "HardGraphSampleCache",
+    "load_hard_graph_cache",
+    "save_hard_graph_cache",
+    "TGTheoryFeatureStandardizer",
     "align_current_to_previous",
 ]

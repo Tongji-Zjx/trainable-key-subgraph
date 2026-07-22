@@ -58,3 +58,22 @@ soft_loss:
   supervised_contrastive: 0.0
   warmup_epochs: 15
 
+hard_export:
+  max_subgraphs: 4
+  min_nodes: 2
+  min_edges: 1
+  max_nodes_per_subgraph: 20
+  max_edges_per_subgraph: 80
+  overlap_threshold: 0.60
+  min_export_gain: 0.0
+  prefilter_discriminative_top_r1: 32
+  prefilter_spectral_top_r2: 8
+  beta_spectral: 0.20
+  beta_gw: 0.10
+  beta_overlap: 0.10
+  beta_size: 0.05
+  candidate_score_scaler_fit_split: train
+  allow_empty_window: true
+  duplicate_candidates_to_fill_k: false
+  union_add_induced_edges: false
+  union_edge_weight_source: original_signed

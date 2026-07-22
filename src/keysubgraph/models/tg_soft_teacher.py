@@ -194,6 +194,13 @@ class TGSoftTeacher(nn.Module):
             gw_result,
         )
 
+    def score_timepoint(self, sample, time_index: int):
+        """Frozen-export interface shared with the hard candidate generator."""
+
+        features = self.feature_builder.build_timepoint(sample, time_index)
+        output = self._score_timepoint(sample, time_index)[0]
+        return features, output
+
     def forward(
         self, batch: GraphSequenceBatch, return_details: bool = False
     ) -> TGSoftTeacherOutput:
@@ -242,4 +249,3 @@ class TGSoftTeacher(nn.Module):
             gw_identity_upper_bounds=torch.stack(gw_distance),
             selections=tuple(nested) if return_details else None,
         )
-

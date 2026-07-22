@@ -3,8 +3,11 @@
 from __future__ import absolute_import, division, print_function
 
 import math
+import json
+import os
 from dataclasses import asdict, dataclass
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from pathlib import Path
+from typing import Any, ClassVar, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
@@ -26,6 +29,8 @@ class HardUnionGraph:
     edge_index: Tuple[Tuple[int, int], ...]
     original_edge_weights: Tuple[float, ...]
     adjacency: torch.Tensor
+    community_labels: Tuple[int, ...] = ()
+    edge_presence_threshold: float = 0.0
 
     @property
     def num_nodes(self) -> int:
@@ -41,14 +46,31 @@ def build_hard_union_graph(
     original_adjacency: torch.Tensor,
     node_names: Sequence[str],
     edge_mask: torch.Tensor,
+    communities: Optional[torch.Tensor] = None,
+    edge_presence_threshold: float = 0.0,
+    max_union_nodes: Optional[int] = None,
+    max_union_edges: Optional[int] = None,
 ) -> Optional[HardUnionGraph]:
     """Union selected candidates while restoring signed weights from the source graph."""
 
     if not candidates:
         return None
+    if original_adjacency.ndim != 2 or original_adjacency.shape[0] != original_adjacency.shape[1]:
+        raise ValueError("original adjacency must be square")
+    node_count = int(original_adjacency.shape[0])
+    if tuple(edge_mask.shape) != (node_count, node_count):
+        raise ValueError("edge mask must match original adjacency")
+    if len(node_names) != node_count:
+        raise ValueError("node names must align with original adjacency")
+    if communities is not None and tuple(communities.shape) != (node_count,):
+        raise ValueError("community labels must align with original adjacency")
+    if edge_presence_threshold < 0.0:
+        raise ValueError("edge presence threshold must be non-negative")
     nodes = sorted(set(node for candidate in candidates for node in candidate.node_ids))
     if not nodes:
         return None
+    if nodes[0] < 0 or nodes[-1] >= node_count:
+        raise ValueError("hard union contains an out-of-range node")
     edges = sorted(
         set(
             (min(left, right), max(left, right))
@@ -56,6 +78,17 @@ def build_hard_union_graph(
             for left, right in candidate.edge_index
         )
     )
+    for candidate in candidates:
+        candidate_nodes = set(int(node) for node in candidate.node_ids)
+        if any(
+            int(left) not in candidate_nodes or int(right) not in candidate_nodes
+            for left, right in candidate.edge_index
+        ):
+            raise ValueError("candidate edge endpoint is absent from candidate nodes")
+    if max_union_nodes is not None and len(nodes) > int(max_union_nodes):
+        raise ValueError("hard union exceeds its node budget")
+    if max_union_edges is not None and len(edges) > int(max_union_edges):
+        raise ValueError("hard union exceeds its edge budget")
     for left, right in edges:
         if left == right or not bool(edge_mask[left, right]):
             raise ValueError("hard union contains an edge absent from the original graph")
@@ -75,7 +108,54 @@ def build_hard_union_graph(
         edge_index=tuple(edges),
         original_edge_weights=tuple(weights),
         adjacency=adjacency,
+        community_labels=(
+            tuple(int(communities[node]) for node in nodes)
+            if communities is not None
+            else ()
+        ),
+        edge_presence_threshold=float(edge_presence_threshold),
     )
+
+
+class HardUnionGraphBuilder(object):
+    """Canonical non-induced hard union with explicit empty-window semantics."""
+
+    def __init__(
+        self,
+        max_union_nodes: Optional[int] = None,
+        max_union_edges: Optional[int] = None,
+    ) -> None:
+        if max_union_nodes is not None and int(max_union_nodes) < 1:
+            raise ValueError("max_union_nodes must be positive")
+        if max_union_edges is not None and int(max_union_edges) < 1:
+            raise ValueError("max_union_edges must be positive")
+        self.max_union_nodes = (
+            None if max_union_nodes is None else int(max_union_nodes)
+        )
+        self.max_union_edges = (
+            None if max_union_edges is None else int(max_union_edges)
+        )
+
+    def build(
+        self,
+        original_adjacency: torch.Tensor,
+        node_names: Sequence[str],
+        edge_mask: torch.Tensor,
+        selected_subgraphs: Sequence[Any],
+        communities: Optional[torch.Tensor] = None,
+        edge_presence_threshold: float = 0.0,
+    ) -> Tuple[Optional[HardUnionGraph], bool]:
+        graph = build_hard_union_graph(
+            selected_subgraphs,
+            original_adjacency,
+            node_names,
+            edge_mask,
+            communities=communities,
+            edge_presence_threshold=edge_presence_threshold,
+            max_union_nodes=self.max_union_nodes,
+            max_union_edges=self.max_union_edges,
+        )
+        return graph, graph is not None
 
 
 @dataclass(frozen=True)
@@ -167,6 +247,23 @@ class HardExportFidelityEvaluator:
             gw.residual,
         )
 
+    def fast_spectral_soft_to_hard(
+        self,
+        soft_adjacency: torch.Tensor,
+        soft_edge_mask: torch.Tensor,
+        hard_union: HardUnionGraph,
+    ) -> float:
+        """Compute the stage-two spectral filter without invoking GW."""
+
+        _, soft_spectrum, _ = self._geometry(soft_adjacency, soft_edge_mask)
+        hard_mask = hard_union.adjacency.abs() > hard_union.edge_presence_threshold
+        _, hard_spectrum, _ = self._geometry(hard_union.adjacency, hard_mask)
+        return float(
+            spectral_winf_exact(
+                soft_spectrum.eigenvalues, hard_spectrum.eigenvalues
+            ).detach().cpu()
+        )
+
     def evaluate(
         self,
         full_adjacency: torch.Tensor,
@@ -240,6 +337,131 @@ def _candidate_overlap(left: Any, right: Any, epsilon: float) -> float:
     )
 
 
+@dataclass(frozen=True)
+class CandidateScoreStandardizer:
+    """Training-fold-only standardization of hard-candidate score components."""
+
+    feature_names: Tuple[str, ...]
+    mean: Tuple[float, ...]
+    scale: Tuple[float, ...]
+    weights: Tuple[float, ...]
+    fit_split: str
+    standard_deviation_floor: float
+    data_protocol_sha256: Optional[str] = None
+    teacher_checkpoint_sha256: Optional[str] = None
+
+    DEFAULT_FEATURE_NAMES: ClassVar[Tuple[str, ...]] = (
+        "score_node",
+        "score_edge",
+        "score_connectivity",
+        "score_dynamic",
+    )
+
+    def __post_init__(self) -> None:
+        size = len(self.feature_names)
+        if size < 1 or not (
+            len(self.mean) == len(self.scale) == len(self.weights) == size
+        ):
+            raise ValueError("candidate score scaler dimensions are inconsistent")
+        if self.fit_split != "train":
+            raise ValueError("candidate score scaler must be fitted on train only")
+        if self.standard_deviation_floor <= 0.0:
+            raise ValueError("candidate score scale floor must be positive")
+        if any(value < self.standard_deviation_floor for value in self.scale):
+            raise ValueError("candidate score scaler contains a sub-floor scale")
+        if any(value < 0.0 for value in self.weights):
+            raise ValueError("candidate score weights must be non-negative")
+
+    @classmethod
+    def fit(
+        cls,
+        candidates: Sequence[Any],
+        weights: Sequence[float],
+        fit_split: str = "train",
+        standard_deviation_floor: float = 1.0e-6,
+        feature_names: Sequence[str] = DEFAULT_FEATURE_NAMES,
+        data_protocol_sha256: Optional[str] = None,
+        teacher_checkpoint_sha256: Optional[str] = None,
+    ) -> "CandidateScoreStandardizer":
+        if fit_split != "train":
+            raise ValueError("candidate score scaler cannot fit validation or test")
+        names = tuple(str(name) for name in feature_names)
+        if not candidates:
+            raise ValueError("candidate score scaler requires training candidates")
+        if len(weights) != len(names):
+            raise ValueError("candidate score weights do not match score components")
+        matrix = torch.tensor(
+            [
+                [float(getattr(candidate, name)) for name in names]
+                for candidate in candidates
+            ],
+            dtype=torch.float64,
+        )
+        if not bool(torch.isfinite(matrix).all()):
+            raise ValueError("candidate scores contain non-finite values")
+        mean = matrix.mean(dim=0)
+        scale = matrix.std(dim=0, unbiased=False).clamp_min(
+            float(standard_deviation_floor)
+        )
+        return cls(
+            feature_names=names,
+            mean=tuple(float(value) for value in mean),
+            scale=tuple(float(value) for value in scale),
+            weights=tuple(float(value) for value in weights),
+            fit_split=fit_split,
+            standard_deviation_floor=float(standard_deviation_floor),
+            data_protocol_sha256=data_protocol_sha256,
+            teacher_checkpoint_sha256=teacher_checkpoint_sha256,
+        )
+
+    def score(self, candidate: Any) -> float:
+        standardized = [
+            (float(getattr(candidate, name)) - mean) / scale
+            for name, mean, scale in zip(self.feature_names, self.mean, self.scale)
+        ]
+        return sum(
+            weight * value for weight, value in zip(self.weights, standardized)
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        payload = asdict(self)
+        payload["schema_version"] = 1
+        payload["artifact_type"] = "tg_sgw_candidate_score_scaler"
+        return payload
+
+    @classmethod
+    def from_dict(cls, payload: Dict[str, Any]) -> "CandidateScoreStandardizer":
+        if payload.get("schema_version") != 1 or payload.get("artifact_type") != "tg_sgw_candidate_score_scaler":
+            raise ValueError("unsupported candidate score scaler artifact")
+        return cls(
+            feature_names=tuple(payload["feature_names"]),
+            mean=tuple(float(value) for value in payload["mean"]),
+            scale=tuple(float(value) for value in payload["scale"]),
+            weights=tuple(float(value) for value in payload["weights"]),
+            fit_split=str(payload["fit_split"]),
+            standard_deviation_floor=float(payload["standard_deviation_floor"]),
+            data_protocol_sha256=payload.get("data_protocol_sha256"),
+            teacher_checkpoint_sha256=payload.get("teacher_checkpoint_sha256"),
+        )
+
+    def save(self, path: Path, overwrite: bool = False) -> Path:
+        path = Path(path).resolve()
+        if path.exists() and not overwrite:
+            raise FileExistsError("candidate score scaler already exists")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix(path.suffix + ".tmp")
+        with temporary.open("w", encoding="utf-8") as handle:
+            json.dump(self.to_dict(), handle, ensure_ascii=False, indent=2, sort_keys=True)
+            handle.write("\n")
+        os.replace(str(temporary), str(path))
+        return path
+
+    @classmethod
+    def load(cls, path: Path) -> "CandidateScoreStandardizer":
+        with Path(path).resolve().open("r", encoding="utf-8") as handle:
+            return cls.from_dict(json.load(handle))
+
+
 class SpectralGWGreedyExporter:
     """Select at most K candidates using the set-level spectral--GW objective."""
 
@@ -251,15 +473,38 @@ class SpectralGWGreedyExporter:
         beta_overlap: float,
         min_export_gain: float = 0.0,
         epsilon: float = 1.0e-8,
+        beta_size: float = 0.0,
+        candidate_score_scaler: Optional[CandidateScoreStandardizer] = None,
+        prefilter_r1: Optional[int] = None,
+        prefilter_r2: Optional[int] = None,
+        max_union_nodes: Optional[int] = None,
+        max_union_edges: Optional[int] = None,
     ) -> None:
-        if any(value < 0.0 for value in (beta_lambda, beta_gw, beta_overlap)):
+        if any(value < 0.0 for value in (beta_lambda, beta_gw, beta_overlap, beta_size)):
             raise ValueError("greedy export penalties must be non-negative")
+        if prefilter_r1 is not None and int(prefilter_r1) < 1:
+            raise ValueError("prefilter_r1 must be positive")
+        if prefilter_r2 is not None and int(prefilter_r2) < 1:
+            raise ValueError("prefilter_r2 must be positive")
+        if prefilter_r1 is not None and prefilter_r2 is not None and int(prefilter_r2) > int(prefilter_r1):
+            raise ValueError("prefilter_r2 cannot exceed prefilter_r1")
         self.fidelity = fidelity_evaluator
         self.beta_lambda = float(beta_lambda)
         self.beta_gw = float(beta_gw)
         self.beta_overlap = float(beta_overlap)
+        self.beta_size = float(beta_size)
         self.min_export_gain = float(min_export_gain)
         self.epsilon = float(epsilon)
+        self.candidate_score_scaler = candidate_score_scaler
+        self.prefilter_r1 = None if prefilter_r1 is None else int(prefilter_r1)
+        self.prefilter_r2 = None if prefilter_r2 is None else int(prefilter_r2)
+        self.union_builder = HardUnionGraphBuilder(max_union_nodes, max_union_edges)
+        self.last_prefilter_summary: Dict[str, Any] = {}
+
+    def _discriminative_score(self, candidate: Any) -> float:
+        if self.candidate_score_scaler is None:
+            return float(candidate.candidate_score)
+        return float(self.candidate_score_scaler.score(candidate))
 
     def select(
         self,
@@ -269,32 +514,99 @@ class SpectralGWGreedyExporter:
         edge_mask: torch.Tensor,
         soft_adjacency: torch.Tensor,
         max_k: int,
+        communities: Optional[torch.Tensor] = None,
+        edge_presence_threshold: float = 0.0,
     ) -> Tuple[Tuple[Any, ...], Optional[HardUnionGraph], Tuple[Dict[str, Any], ...]]:
         if max_k < 1:
             raise ValueError("max_k must be positive")
+        if self.prefilter_r2 is not None and max_k > self.prefilter_r2:
+            raise ValueError("max_k cannot exceed prefilter_r2")
+        if not candidates:
+            self.last_prefilter_summary = {
+                "input_candidates": 0,
+                "discriminative_r1": 0,
+                "spectral_r2": 0,
+                "gw_evaluated_sets": 0,
+            }
+            return (), None, ()
+
+        discriminative_scores = {
+            index: self._discriminative_score(candidate)
+            for index, candidate in enumerate(candidates)
+        }
+        stage_one = sorted(
+            range(len(candidates)),
+            key=lambda index: (
+                -discriminative_scores[index],
+                int(candidates[index].seed_node),
+            ),
+        )[: min(len(candidates), self.prefilter_r1 or len(candidates))]
+        spectral_trials = []
+        for index in stage_one:
+            try:
+                union, valid = self.union_builder.build(
+                    original_adjacency,
+                    node_names,
+                    edge_mask,
+                    (candidates[index],),
+                    communities=communities,
+                    edge_presence_threshold=edge_presence_threshold,
+                )
+            except ValueError:
+                continue
+            if not valid or union is None:
+                continue
+            spectral_error = self.fidelity.fast_spectral_soft_to_hard(
+                soft_adjacency, edge_mask, union
+            )
+            spectral_trials.append(
+                (
+                    spectral_error,
+                    -discriminative_scores[index],
+                    int(candidates[index].seed_node),
+                    index,
+                )
+            )
+        spectral_trials.sort()
+        stage_two = [
+            item[3]
+            for item in spectral_trials[
+                : min(len(spectral_trials), self.prefilter_r2 or len(spectral_trials))
+            ]
+        ]
         selected_indices: List[int] = []
-        remaining = list(range(len(candidates)))
+        remaining = list(stage_two)
         current_objective = 0.0
         cache: Dict[Tuple[int, ...], Tuple[HardUnionGraph, float, float, bool, int, float]] = {}
         trace: List[Dict[str, Any]] = []
+        gw_evaluated_sets = 0
+        source_edge_count = max(
+            1, int(torch.triu(edge_mask, diagonal=1).sum().detach().cpu())
+        )
         while len(selected_indices) < max_k and remaining:
             trials = []
             for index in remaining:
                 key = tuple(sorted(selected_indices + [index]))
                 if key not in cache:
-                    union = build_hard_union_graph(
-                        [candidates[item] for item in key],
-                        original_adjacency,
-                        node_names,
-                        edge_mask,
-                    )
-                    if union is None:
+                    try:
+                        union, valid = self.union_builder.build(
+                            original_adjacency,
+                            node_names,
+                            edge_mask,
+                            [candidates[item] for item in key],
+                            communities=communities,
+                            edge_presence_threshold=edge_presence_threshold,
+                        )
+                    except ValueError:
+                        continue
+                    if not valid or union is None:
                         continue
                     spectral_error, gw_error, converged, iterations, residual = (
                         self.fidelity.fast_soft_to_hard(
                             soft_adjacency, edge_mask, union
                         )
                     )
+                    gw_evaluated_sets += 1
                     cache[key] = (
                         union,
                         spectral_error,
@@ -304,18 +616,30 @@ class SpectralGWGreedyExporter:
                         residual,
                     )
                 union, spectral_error, gw_error, converged, iterations, residual = cache[key]
-                chosen = [candidates[item] for item in key]
-                old_score_sum = sum(float(item.candidate_score) for item in chosen)
+                chosen_indices = list(key)
+                chosen = [candidates[item] for item in chosen_indices]
+                score_sum = sum(discriminative_scores[item] for item in chosen_indices)
                 overlap_penalty = sum(
                     _candidate_overlap(chosen[left], chosen[right], self.epsilon)
                     for left in range(len(chosen))
                     for right in range(left + 1, len(chosen))
                 )
+                node_denominator = float(
+                    self.union_builder.max_union_nodes or original_adjacency.shape[0]
+                )
+                edge_denominator = float(
+                    self.union_builder.max_union_edges or source_edge_count
+                )
+                size_penalty = (
+                    union.num_nodes / node_denominator
+                    + union.num_edges / edge_denominator
+                )
                 objective = (
-                    old_score_sum
+                    score_sum
                     - self.beta_lambda * spectral_error
                     - self.beta_gw * gw_error
                     - self.beta_overlap * overlap_penalty
+                    - self.beta_size * size_penalty
                 )
                 trials.append(
                     (
@@ -323,10 +647,11 @@ class SpectralGWGreedyExporter:
                         -int(candidates[index].seed_node),
                         index,
                         objective,
-                        old_score_sum,
+                        score_sum,
                         spectral_error,
                         gw_error,
                         overlap_penalty,
+                        size_penalty,
                         union,
                         converged,
                         iterations,
@@ -337,7 +662,7 @@ class SpectralGWGreedyExporter:
                 break
             best = max(trials, key=lambda item: (item[0], item[1]))
             marginal_gain = best[0]
-            if marginal_gain < self.min_export_gain:
+            if marginal_gain <= self.min_export_gain:
                 break
             index = best[2]
             selected_indices.append(index)
@@ -348,21 +673,41 @@ class SpectralGWGreedyExporter:
                     "candidate_id": int(candidates[index].seed_node),
                     "marginal_gain": marginal_gain,
                     "objective": current_objective,
+                    "discriminative_score_sum": best[4],
                     "old_score_sum": best[4],
                     "spectral_error": best[5],
                     "gw_error": best[6],
                     "overlap_penalty": best[7],
-                    "selected_union_num_nodes": best[8].num_nodes,
-                    "selected_union_num_edges": best[8].num_edges,
-                    "gw_solver_converged": best[9],
-                    "gw_solver_iterations": best[10],
-                    "gw_solver_residual": best[11],
+                    "size_penalty": best[8],
+                    "selected_union_num_nodes": best[9].num_nodes,
+                    "selected_union_num_edges": best[9].num_edges,
+                    "gw_solver_converged": best[10],
+                    "gw_solver_iterations": best[11],
+                    "gw_solver_residual": best[12],
+                    "prefilter_r1_count": len(stage_one),
+                    "prefilter_r2_count": len(stage_two),
                 }
             )
         selected = tuple(candidates[index] for index in selected_indices)
-        union = build_hard_union_graph(
-            selected, original_adjacency, node_names, edge_mask
+        union, _ = self.union_builder.build(
+            original_adjacency,
+            node_names,
+            edge_mask,
+            selected,
+            communities=communities,
+            edge_presence_threshold=edge_presence_threshold,
         )
+        self.last_prefilter_summary = {
+            "input_candidates": len(candidates),
+            "discriminative_r1": len(stage_one),
+            "spectral_r2": len(stage_two),
+            "gw_evaluated_sets": gw_evaluated_sets,
+            "candidate_score_scaler_fit_split": (
+                self.candidate_score_scaler.fit_split
+                if self.candidate_score_scaler is not None
+                else None
+            ),
+        }
         return selected, union, tuple(trace)
 
 

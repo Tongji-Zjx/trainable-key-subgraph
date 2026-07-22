@@ -28,6 +28,10 @@ from keysubgraph.models.soft_extractor import (  # noqa: E402
     SoftExtractorConfig,
     SoftGraphClassifier,
 )
+from keysubgraph.models import TGSoftTeacher, TGSoftTeacherConfig  # noqa: E402
+from keysubgraph.models.tg_sgw_types import TG_SGW_MODEL_NAME  # noqa: E402
+from keysubgraph.theory import CandidateScoreStandardizer  # noqa: E402
+from keysubgraph.training import load_tg_soft_teacher_checkpoint  # noqa: E402
 from keysubgraph.training.trainer import load_checkpoint  # noqa: E402
 
 
@@ -42,14 +46,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seeds-per-community", type=int, default=1)
     parser.add_argument("--neighborhood-hops", type=int, default=1)
     parser.add_argument("--max-nodes", type=int, default=20)
-    parser.add_argument("--max-edges", type=int, default=40)
+    parser.add_argument("--max-edges", type=int, default=80)
     parser.add_argument("--min-nodes", type=int, default=2)
     parser.add_argument("--min-edges", type=int, default=1)
-    parser.add_argument("--top-k", type=int, default=5)
-    parser.add_argument("--overlap-threshold", type=float, default=1.0)
-    parser.add_argument("--beta-lambda", type=float, default=0.10)
+    parser.add_argument("--top-k", type=int, default=4)
+    parser.add_argument("--overlap-threshold", type=float, default=0.60)
+    parser.add_argument("--beta-lambda", type=float, default=0.20)
     parser.add_argument("--beta-gw", type=float, default=0.10)
     parser.add_argument("--beta-overlap", type=float, default=0.10)
+    parser.add_argument("--beta-size", type=float, default=0.05)
+    parser.add_argument("--prefilter-r1", type=int, default=32)
+    parser.add_argument("--prefilter-r2", type=int, default=8)
+    parser.add_argument("--max-union-nodes", type=int)
+    parser.add_argument("--max-union-edges", type=int)
+    parser.add_argument("--candidate-score-scaler", type=Path)
     parser.add_argument("--min-export-gain", type=float, default=0.0)
     parser.add_argument("--eval-gw-entropic-reg", type=float, default=0.01)
     parser.add_argument("--eval-gw-max-iter", type=int, default=100)
@@ -67,20 +77,43 @@ def main() -> int:
         raise ValueError("strong theory export requires protocol_name=strict_theory")
     if args.split == "all" and protocol.get("experiment_mode") != "all_samples_exploratory":
         raise ValueError("--split all requires an all-sample protocol")
-    checkpoint = torch.load(
-        str(args.checkpoint.resolve()), map_location="cpu", weights_only=False
-    )
-    if checkpoint.get("data_protocol_sha256") != file_sha256(args.protocol):
-        raise ValueError("checkpoint does not match the current data protocol")
-    if checkpoint.get("edge_presence_threshold") != protocol["edge_presence_threshold"]:
-        raise ValueError("checkpoint and protocol edge thresholds differ")
-    model_config = SoftExtractorConfig(**checkpoint["model_config"])
-    if not model_config.theory_alignment_enabled:
-        raise ValueError(
-            "spectral-GW hard export requires a strong theory-aligned checkpoint"
+    try:
+        checkpoint = torch.load(
+            str(args.checkpoint.resolve()), map_location="cpu", weights_only=False
         )
-    model = SoftGraphClassifier(model_config)
-    load_checkpoint(args.checkpoint, model, device=torch.device("cpu"))
+    except TypeError:
+        checkpoint = torch.load(str(args.checkpoint.resolve()), map_location="cpu")
+    protocol_sha256 = file_sha256(args.protocol)
+    checkpoint_protocol_sha256 = (
+        checkpoint.get("protocol_sha256")
+        if checkpoint.get("model_name") == TG_SGW_MODEL_NAME
+        else checkpoint.get("data_protocol_sha256")
+    )
+    if checkpoint_protocol_sha256 != protocol_sha256:
+        raise ValueError("checkpoint does not match the current data protocol")
+    if (
+        checkpoint.get("model_name") != TG_SGW_MODEL_NAME
+        and checkpoint.get("edge_presence_threshold") != protocol["edge_presence_threshold"]
+    ):
+        raise ValueError("checkpoint and protocol edge thresholds differ")
+    if checkpoint.get("model_name") == TG_SGW_MODEL_NAME:
+        model = TGSoftTeacher(TGSoftTeacherConfig(**checkpoint["model_config"]))
+        load_tg_soft_teacher_checkpoint(
+            args.checkpoint,
+            model,
+            device=torch.device("cpu"),
+            expected_protocol_sha256=protocol_sha256,
+        )
+        if args.candidate_score_scaler is None:
+            raise ValueError("TG-SGW hard export requires --candidate-score-scaler")
+    else:
+        model_config = SoftExtractorConfig(**checkpoint["model_config"])
+        if not model_config.theory_alignment_enabled:
+            raise ValueError(
+                "spectral-GW hard export requires a strong theory-aligned checkpoint"
+            )
+        model = SoftGraphClassifier(model_config)
+        load_checkpoint(args.checkpoint, model, device=torch.device("cpu"))
     if args.device == "auto":
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     else:
@@ -98,12 +131,24 @@ def main() -> int:
         beta_lambda=args.beta_lambda,
         beta_gw=args.beta_gw,
         beta_overlap=args.beta_overlap,
+        beta_size=args.beta_size,
+        prefilter_discriminative_top_r1=args.prefilter_r1,
+        prefilter_spectral_top_r2=args.prefilter_r2,
+        max_union_nodes=args.max_union_nodes,
+        max_union_edges=args.max_union_edges,
         min_export_gain=args.min_export_gain,
         eval_gw_entropic_reg=args.eval_gw_entropic_reg,
         eval_gw_max_iter=args.eval_gw_max_iter,
         eval_gw_sinkhorn_iter=args.eval_gw_sinkhorn_iter,
     )
-    extractor = HardSubgraphExtractor(model, config)
+    candidate_scaler = None
+    if args.candidate_score_scaler is not None:
+        candidate_scaler = CandidateScoreStandardizer.load(args.candidate_score_scaler)
+        if candidate_scaler.data_protocol_sha256 != protocol_sha256:
+            raise ValueError("candidate scaler data protocol mismatch")
+        if candidate_scaler.teacher_checkpoint_sha256 != file_sha256(args.checkpoint):
+            raise ValueError("candidate scaler teacher checkpoint mismatch")
+    extractor = HardSubgraphExtractor(model, config, candidate_scaler)
     paths = protocol["paths"]
     dataset = GraphSequenceDataset(
         PROJECT_ROOT / paths["dataset_root"],

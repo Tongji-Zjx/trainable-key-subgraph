@@ -17,15 +17,26 @@ from .spectral_gw import (
     spectral_winf_exact,
 )
 from .evaluation import (
+    CandidateScoreStandardizer,
     EvolutionRepresentation,
     FidelityResult,
     HardExportFidelityEvaluator,
     HardUnionGraph,
+    HardUnionGraphBuilder,
     SpectralGWEvolutionEncoder,
     SpectralGWGreedyExporter,
     TheoryBoundEvaluator,
     build_hard_union_graph,
     one_step_sgw_error_bound,
+)
+from .tg_features import (
+    SGWFeatureExtractor,
+    SGWSequenceFeatures,
+    SGWTheoryFeatureConfig,
+    SGWWindowState,
+    TGSGWFeatureArtifact,
+    load_tg_sgw_feature_artifact,
+    save_tg_sgw_feature_artifact,
 )
 
 __all__ = [
@@ -44,12 +55,21 @@ __all__ = [
     "spectral_winf_dense",
     "spectral_winf_exact",
     "EvolutionRepresentation",
+    "CandidateScoreStandardizer",
     "FidelityResult",
     "HardExportFidelityEvaluator",
     "HardUnionGraph",
+    "HardUnionGraphBuilder",
     "SpectralGWEvolutionEncoder",
     "SpectralGWGreedyExporter",
     "TheoryBoundEvaluator",
     "build_hard_union_graph",
     "one_step_sgw_error_bound",
+    "SGWFeatureExtractor",
+    "SGWSequenceFeatures",
+    "SGWTheoryFeatureConfig",
+    "SGWWindowState",
+    "TGSGWFeatureArtifact",
+    "load_tg_sgw_feature_artifact",
+    "save_tg_sgw_feature_artifact",
 ]

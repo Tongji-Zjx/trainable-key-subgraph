@@ -2,6 +2,8 @@
 
 from .hard_extractor import (
     HardExtractionConfig,
+    HardCandidatePoolBuilder,
+    HardCandidatePoolResult,
     HardSampleResult,
     HardSubgraphCandidate,
     HardSubgraphExtractor,
@@ -11,6 +13,8 @@ from .hard_extractor import (
 
 __all__ = [
     "HardExtractionConfig",
+    "HardCandidatePoolBuilder",
+    "HardCandidatePoolResult",
     "HardSampleResult",
     "HardSubgraphCandidate",
     "HardSubgraphExtractor",

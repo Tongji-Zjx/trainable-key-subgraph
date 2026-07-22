@@ -14,11 +14,14 @@ from keysubgraph.data.data_split import file_sha256
 from keysubgraph.data.graph_dataset import GraphSequenceSample
 from keysubgraph.features.graph_features import GraphTimepointFeatures
 from keysubgraph.models.soft_extractor import SoftGraphClassifier, TimepointSelection
+from keysubgraph.models.tg_sgw_types import TGSGWTheoryConfig
 from keysubgraph.theory import (
+    CandidateScoreStandardizer,
     EvolutionRepresentation,
     FidelityResult,
     HardExportFidelityEvaluator,
     HardUnionGraph,
+    HardUnionGraphBuilder,
     SpectralGWEvolutionEncoder,
     SpectralGWGreedyExporter,
 )
@@ -29,11 +32,11 @@ class HardExtractionConfig:
     seeds_per_community: int = 1
     neighborhood_hops: int = 1
     max_nodes: int = 20
-    max_edges: int = 40
+    max_edges: int = 80
     min_nodes: int = 2
     min_edges: int = 1
-    top_k: int = 5
-    overlap_threshold: float = 1.0
+    top_k: int = 4
+    overlap_threshold: float = 0.60
     node_score_weight: float = 0.35
     edge_score_weight: float = 0.35
     connectivity_weight: float = 0.20
@@ -41,10 +44,15 @@ class HardExtractionConfig:
     local_confidence_weight: float = 0.0
     use_local_confidence_score: bool = False
     strategy: str = "spectral_gw_greedy"
-    beta_lambda: float = 0.10
+    beta_lambda: float = 0.20
     beta_gw: float = 0.10
     beta_overlap: float = 0.10
+    beta_size: float = 0.05
     min_export_gain: float = 0.0
+    prefilter_discriminative_top_r1: int = 32
+    prefilter_spectral_top_r2: int = 8
+    max_union_nodes: Optional[int] = None
+    max_union_edges: Optional[int] = None
     eval_gw_entropic_reg: float = 0.01
     eval_gw_max_iter: int = 100
     eval_gw_sinkhorn_iter: int = 100
@@ -58,11 +66,23 @@ class HardExtractionConfig:
             self.min_nodes,
             self.min_edges,
             self.top_k,
+            self.prefilter_discriminative_top_r1,
+            self.prefilter_spectral_top_r2,
         )
         if any(value < 1 for value in positive) or self.neighborhood_hops < 0:
             raise ValueError("hard extraction sizes are invalid")
         if self.min_nodes > self.max_nodes or self.min_edges > self.max_edges:
             raise ValueError("minimum candidate sizes exceed maximum sizes")
+        if not (
+            self.top_k
+            <= self.prefilter_spectral_top_r2
+            <= self.prefilter_discriminative_top_r1
+        ):
+            raise ValueError("hard export requires K <= R2 <= R1")
+        if self.max_union_nodes is not None and self.max_union_nodes < 1:
+            raise ValueError("max_union_nodes must be positive")
+        if self.max_union_edges is not None and self.max_union_edges < 1:
+            raise ValueError("max_union_edges must be positive")
         if not 0.0 <= self.overlap_threshold <= 2.0:
             raise ValueError("overlap_threshold must be in [0, 2]")
         weights = (
@@ -82,7 +102,7 @@ class HardExtractionConfig:
             raise ValueError("strong theory export requires spectral_gw_greedy")
         if any(
             value < 0.0
-            for value in (self.beta_lambda, self.beta_gw, self.beta_overlap)
+            for value in (self.beta_lambda, self.beta_gw, self.beta_overlap, self.beta_size)
         ):
             raise ValueError("spectral/GW/overlap penalties must be non-negative")
         if self.eval_gw_entropic_reg <= 0.0:
@@ -122,8 +142,125 @@ class HardSubgraphCandidate:
 
 
 @dataclass(frozen=True)
+class HardCandidatePoolResult:
+    candidates: Tuple[HardSubgraphCandidate, ...]
+    window_valid: bool
+    rejected_invalid: int
+    removed_duplicates: int
+
+
+class HardCandidatePoolBuilder(object):
+    """Validate and deterministically deduplicate frozen hard candidates."""
+
+    def __init__(
+        self,
+        min_nodes: int,
+        min_edges: int,
+        max_nodes: int,
+        max_edges: int,
+        require_connected: bool = True,
+        tolerance: float = 1.0e-6,
+    ) -> None:
+        if min_nodes < 1 or min_edges < 1:
+            raise ValueError("candidate minimum sizes must be positive")
+        if max_nodes < min_nodes or max_edges < min_edges:
+            raise ValueError("candidate maximum sizes must cover minimum sizes")
+        if tolerance < 0.0:
+            raise ValueError("candidate validation tolerance must be non-negative")
+        self.min_nodes = int(min_nodes)
+        self.min_edges = int(min_edges)
+        self.max_nodes = int(max_nodes)
+        self.max_edges = int(max_edges)
+        self.require_connected = bool(require_connected)
+        self.tolerance = float(tolerance)
+
+    @staticmethod
+    def _signature(candidate: HardSubgraphCandidate):
+        nodes = tuple(sorted(set(int(node) for node in candidate.node_ids)))
+        edges = tuple(
+            sorted(
+                set(
+                    (min(int(left), int(right)), max(int(left), int(right)))
+                    for left, right in candidate.edge_index
+                )
+            )
+        )
+        return nodes, edges
+
+    def _is_valid(
+        self,
+        candidate: HardSubgraphCandidate,
+        original_adjacency: torch.Tensor,
+        edge_mask: torch.Tensor,
+    ) -> bool:
+        nodes, edges = self._signature(candidate)
+        raw_edges = tuple(
+            (min(int(left), int(right)), max(int(left), int(right)))
+            for left, right in candidate.edge_index
+        )
+        node_count = int(original_adjacency.shape[0])
+        if not self.min_nodes <= len(nodes) <= self.max_nodes:
+            return False
+        if not self.min_edges <= len(edges) <= self.max_edges:
+            return False
+        if len(nodes) != len(candidate.node_ids) or len(edges) != len(candidate.edge_index):
+            return False
+        node_set = set(nodes)
+        if nodes[0] < 0 or nodes[-1] >= node_count:
+            return False
+        if len(candidate.original_edge_weights) != len(edges):
+            return False
+        for edge_index, (left, right) in enumerate(raw_edges):
+            if left == right or left not in node_set or right not in node_set:
+                return False
+            if not bool(edge_mask[left, right]):
+                return False
+            source_weight = float(original_adjacency[left, right].detach().cpu())
+            if abs(source_weight - float(candidate.original_edge_weights[edge_index])) > self.tolerance:
+                return False
+        if self.require_connected and _largest_connected_component_size(nodes, edges) != len(nodes):
+            return False
+        return True
+
+    def finalize(
+        self,
+        candidates: Sequence[HardSubgraphCandidate],
+        original_adjacency: torch.Tensor,
+        edge_mask: torch.Tensor,
+    ) -> HardCandidatePoolResult:
+        if original_adjacency.ndim != 2 or original_adjacency.shape[0] != original_adjacency.shape[1]:
+            raise ValueError("candidate source adjacency must be square")
+        if tuple(edge_mask.shape) != tuple(original_adjacency.shape):
+            raise ValueError("candidate edge mask must match adjacency")
+        valid = [
+            candidate
+            for candidate in candidates
+            if self._is_valid(candidate, original_adjacency, edge_mask)
+        ]
+        ordered = sorted(
+            valid,
+            key=lambda item: (-float(item.candidate_score), int(item.seed_node)),
+        )
+        unique = []
+        signatures = set()
+        for candidate in ordered:
+            signature = self._signature(candidate)
+            if signature in signatures:
+                continue
+            signatures.add(signature)
+            unique.append(candidate)
+        return HardCandidatePoolResult(
+            candidates=tuple(unique),
+            window_valid=bool(unique),
+            rejected_invalid=len(candidates) - len(valid),
+            removed_duplicates=len(valid) - len(unique),
+        )
+
+
+@dataclass(frozen=True)
 class HardTimepointResult:
     time_index: int
+    time_start: float
     original_node_count: int
     original_edge_count: int
     candidate_pool: Tuple[HardSubgraphCandidate, ...]
@@ -133,6 +270,10 @@ class HardTimepointResult:
     union_graph: Optional[HardUnionGraph]
     fidelity: Optional[FidelityResult]
     spectral_gw_greedy_trace: Tuple[Dict[str, Any], ...]
+    window_valid: bool
+    candidate_rejected_invalid: int
+    candidate_removed_duplicates: int
+    prefilter_summary: Dict[str, Any]
 
 
 @dataclass(frozen=True)
@@ -159,6 +300,10 @@ class HardSampleResult:
     Gamma_SGW_full_mask: Tuple[bool, ...]
     Gamma_SGW_soft_mask: Tuple[bool, ...]
     Gamma_SGW_hard_mask: Tuple[bool, ...]
+    num_valid_hard_windows: int
+    eligible_for_stage_c: bool
+    exclusion_reason: Optional[str]
+    candidate_score_scaler: Optional[Dict[str, Any]]
 
 
 def candidate_overlap(
@@ -203,8 +348,9 @@ class HardSubgraphExtractor:
 
     def __init__(
         self,
-        model: SoftGraphClassifier,
+        model: Any,
         config: Optional[HardExtractionConfig] = None,
+        candidate_score_scaler: Optional[CandidateScoreStandardizer] = None,
     ) -> None:
         self.model = model
         self.config = config or HardExtractionConfig()
@@ -212,14 +358,23 @@ class HardSubgraphExtractor:
         for parameter in self.model.parameters():
             parameter.requires_grad_(False)
         model_config = self.model.config
+        theory_defaults = TGSGWTheoryConfig()
         self.fidelity = HardExportFidelityEvaluator(
             laplacian_eta=model_config.laplacian_eta,
-            heat_kernel_t=model_config.heat_kernel_t,
-            spectral_quantile_grid=model_config.spectral_quantile_grid,
-            train_entropic_reg=model_config.gw_entropic_reg,
-            train_max_iter=model_config.gw_max_iter,
-            train_sinkhorn_iter=model_config.gw_sinkhorn_iter,
-            tolerance=model_config.gw_tolerance,
+            heat_kernel_t=getattr(
+                model_config,
+                "heat_kernel_t",
+                getattr(model_config, "diffusion_time", 1.0),
+            ),
+            spectral_quantile_grid=getattr(
+                model_config,
+                "spectral_quantile_grid",
+                theory_defaults.spectral_quantile_grid,
+            ),
+            train_entropic_reg=getattr(model_config, "gw_entropic_reg", 5.0e-2),
+            train_max_iter=getattr(model_config, "gw_max_iter", 20),
+            train_sinkhorn_iter=getattr(model_config, "gw_sinkhorn_iter", 20),
+            tolerance=getattr(model_config, "gw_tolerance", 1.0e-7),
             eval_entropic_reg=self.config.eval_gw_entropic_reg,
             eval_max_iter=self.config.eval_gw_max_iter,
             eval_sinkhorn_iter=self.config.eval_gw_sinkhorn_iter,
@@ -231,8 +386,22 @@ class HardSubgraphExtractor:
             beta_overlap=self.config.beta_overlap,
             min_export_gain=self.config.min_export_gain,
             epsilon=self.config.epsilon,
+            beta_size=self.config.beta_size,
+            candidate_score_scaler=candidate_score_scaler,
+            prefilter_r1=self.config.prefilter_discriminative_top_r1,
+            prefilter_r2=self.config.prefilter_spectral_top_r2,
+            max_union_nodes=self.config.max_union_nodes,
+            max_union_edges=self.config.max_union_edges,
         )
+        self.candidate_score_scaler = candidate_score_scaler
         self.evolution = SpectralGWEvolutionEncoder(self.fidelity)
+        self.candidate_pool_builder = HardCandidatePoolBuilder(
+            min_nodes=self.config.min_nodes,
+            min_edges=self.config.min_edges,
+            max_nodes=self.config.max_nodes,
+            max_edges=self.config.max_edges,
+        )
+        self.union_builder = HardUnionGraphBuilder()
 
     def _community_seeds(
         self, communities: torch.Tensor, node_scores: torch.Tensor
@@ -351,6 +520,30 @@ class HardSubgraphExtractor:
                 kept.append(candidate)
         return kept
 
+    def build_candidate_pool(self, sample: GraphSequenceSample, time_index: int):
+        """Build a frozen window candidate pool without running Top-K selection."""
+
+        if self.model.training:
+            raise RuntimeError("hard candidate generation requires model.eval()")
+        with torch.no_grad():
+            features, selection = self.model.score_timepoint(sample, time_index)
+            seeds = self._community_seeds(
+                sample.communities[time_index], selection.node_scores
+            )
+            candidates = []
+            for seed in seeds:
+                candidate = self._candidate(
+                    sample, time_index, seed, features, selection
+                )
+                if candidate is not None:
+                    candidates.append(candidate)
+            adjacency = sample.adjacency[time_index]
+            pool = self.candidate_pool_builder.finalize(
+                candidates, adjacency, features.edge_mask
+            )
+            deduplicated = tuple(self._deduplicate(pool.candidates))
+        return features, selection, pool, deduplicated
+
     def extract_sample(self, sample: GraphSequenceSample) -> HardSampleResult:
         timepoints = []
         full_adjacencies = []
@@ -360,18 +553,9 @@ class HardSubgraphExtractor:
         hard_edge_masks = []
         with torch.no_grad():
             for time_index in range(sample.num_timepoints):
-                features, selection = self.model.score_timepoint(sample, time_index)
-                seeds = self._community_seeds(
-                    sample.communities[time_index], selection.node_scores
+                features, selection, pool, deduplicated = self.build_candidate_pool(
+                    sample, time_index
                 )
-                candidates = []
-                for seed in seeds:
-                    candidate = self._candidate(
-                        sample, time_index, seed, features, selection
-                    )
-                    if candidate is not None:
-                        candidates.append(candidate)
-                deduplicated = self._deduplicate(candidates)
                 adjacency = sample.adjacency[time_index]
                 selected, union_graph, greedy_trace = self.greedy.select(
                     deduplicated,
@@ -380,6 +564,8 @@ class HardSubgraphExtractor:
                     features.edge_mask,
                     selection.soft_adjacency,
                     self.config.top_k,
+                    communities=sample.communities[time_index],
+                    edge_presence_threshold=sample.edge_presence_threshold,
                 )
                 fidelity = (
                     self.fidelity.evaluate(
@@ -395,9 +581,10 @@ class HardSubgraphExtractor:
                 timepoints.append(
                     HardTimepointResult(
                         time_index=time_index,
+                        time_start=float(sample.window_starts[time_index].detach().cpu()),
                         original_node_count=int(features.node_features.shape[0]),
                         original_edge_count=edge_count,
-                        candidate_pool=tuple(candidates),
+                        candidate_pool=tuple(deduplicated),
                         selected_subgraphs=selected,
                         num_valid_subgraphs=len(selected),
                         subgraph_mask=tuple(
@@ -406,6 +593,10 @@ class HardSubgraphExtractor:
                         union_graph=union_graph,
                         fidelity=fidelity,
                         spectral_gw_greedy_trace=greedy_trace,
+                        window_valid=union_graph is not None,
+                        candidate_rejected_invalid=pool.rejected_invalid,
+                        candidate_removed_duplicates=pool.removed_duplicates,
+                        prefilter_summary=dict(self.greedy.last_prefilter_summary),
                     )
                 )
                 full_adjacencies.append(adjacency)
@@ -429,6 +620,9 @@ class HardSubgraphExtractor:
         hard_evolution = self.evolution.encode(
             hard_adjacencies, hard_edge_masks, time_values
         )
+        valid_hard_windows = sum(
+            1 for timepoint in timepoints if timepoint.window_valid
+        )
         return HardSampleResult(
             sample_key=sample.sample_key,
             sample_id=sample.sample_id,
@@ -440,8 +634,12 @@ class HardSubgraphExtractor:
             relative_path=sample.relative_path,
             edge_presence_threshold=sample.edge_presence_threshold,
             laplacian_eta=self.model.config.laplacian_eta,
-            heat_kernel_t=self.model.config.heat_kernel_t,
-            node_measure=self.model.config.node_measure,
+            heat_kernel_t=getattr(
+                self.model.config,
+                "heat_kernel_t",
+                getattr(self.model.config, "diffusion_time", 1.0),
+            ),
+            node_measure=getattr(self.model.config, "node_measure", "uniform"),
             timepoints=tuple(timepoints),
             H_SGW_full=full_evolution.aggregated,
             H_SGW_soft=soft_evolution.aggregated,
@@ -452,6 +650,18 @@ class HardSubgraphExtractor:
             Gamma_SGW_full_mask=full_evolution.step_mask,
             Gamma_SGW_soft_mask=soft_evolution.step_mask,
             Gamma_SGW_hard_mask=hard_evolution.step_mask,
+            num_valid_hard_windows=valid_hard_windows,
+            eligible_for_stage_c=valid_hard_windows >= 2,
+            exclusion_reason=(
+                None
+                if valid_hard_windows >= 2
+                else "fewer_than_two_valid_hard_windows"
+            ),
+            candidate_score_scaler=(
+                self.candidate_score_scaler.to_dict()
+                if self.candidate_score_scaler is not None
+                else None
+            ),
         )
 
 
@@ -523,6 +733,10 @@ def export_hard_sample(
         "Gamma_SGW_full_mask": list(result.Gamma_SGW_full_mask),
         "Gamma_SGW_soft_mask": list(result.Gamma_SGW_soft_mask),
         "Gamma_SGW_hard_mask": list(result.Gamma_SGW_hard_mask),
+        "num_valid_hard_windows": result.num_valid_hard_windows,
+        "eligible_for_stage_c": result.eligible_for_stage_c,
+        "exclusion_reason": result.exclusion_reason,
+        "candidate_score_scaler": result.candidate_score_scaler,
     }
     for timepoint in result.timepoints:
         union = timepoint.union_graph
@@ -530,16 +744,22 @@ def export_hard_sample(
         payload["timepoints"].append(
             {
                 "time_index": timepoint.time_index,
+                "time_start": timepoint.time_start,
                 "time_mask": True,
                 "original_node_count": timepoint.original_node_count,
                 "original_edge_count": timepoint.original_edge_count,
                 "num_valid_subgraphs": timepoint.num_valid_subgraphs,
+                "window_valid": timepoint.window_valid,
+                "candidate_rejected_invalid": timepoint.candidate_rejected_invalid,
+                "candidate_removed_duplicates": timepoint.candidate_removed_duplicates,
+                "prefilter_summary": dict(timepoint.prefilter_summary),
                 "subgraph_mask": list(timepoint.subgraph_mask),
                 "hard_union_available": union is not None,
                 "union_node_ids": list(union.node_ids) if union is not None else None,
                 "union_node_names": list(union.node_names) if union is not None else None,
                 "union_edge_index": [list(edge) for edge in union.edge_index] if union is not None else None,
                 "union_original_edge_weights": list(union.original_edge_weights) if union is not None else None,
+                "union_community_labels": list(union.community_labels) if union is not None else None,
                 "union_num_nodes": union.num_nodes if union is not None else 0,
                 "union_num_edges": union.num_edges if union is not None else 0,
                 "spectral_gw_greedy_trace": list(timepoint.spectral_gw_greedy_trace),

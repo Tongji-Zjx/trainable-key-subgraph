@@ -19,6 +19,10 @@ from .tg_soft_teacher_checkpoint import (
     load_tg_soft_teacher_checkpoint,
     save_tg_soft_teacher_checkpoint,
 )
+from .tg_hard_student_checkpoint import (
+    load_tg_hard_student_checkpoint,
+    save_tg_hard_student_checkpoint,
+)
 from .tg_soft_teacher_trainer import (
     TGSoftTeacherTrainingConfig,
     run_tg_soft_teacher_epoch,
@@ -32,5 +36,7 @@ __all__.extend(
         "run_tg_soft_teacher_epoch",
         "save_tg_soft_teacher_checkpoint",
         "train_tg_soft_teacher",
+        "load_tg_hard_student_checkpoint",
+        "save_tg_hard_student_checkpoint",
     ]
 )
