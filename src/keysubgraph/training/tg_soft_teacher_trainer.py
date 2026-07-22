@@ -169,13 +169,14 @@ def train_tg_soft_teacher(
             save_tg_soft_teacher_checkpoint(output_dir / "best_checkpoint.pt", **checkpoint_kwargs)
         _atomic_json(history_path, history)
         print(
-            "epoch {}/{} train_loss={:.6f} validation_loss={:.6f} "
+            "epoch {}/{} train_loss={:.6f} train_auc={} validation_loss={:.6f} "
             "validation_balanced_accuracy={:.6f} validation_auc={} "
             "train_node_score={:.4f}+/-{:.4f} "
             "train_edge_score={:.4f}+/-{:.4f}".format(
                 epoch,
                 training_config.epochs,
                 train_metrics["loss"],
+                train_metrics["roc_auc"],
                 validation_metrics["loss"],
                 validation_metrics["balanced_accuracy"],
                 validation_metrics["roc_auc"],
