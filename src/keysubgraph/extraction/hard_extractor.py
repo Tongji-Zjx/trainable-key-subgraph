@@ -14,6 +14,14 @@ from keysubgraph.data.data_split import file_sha256
 from keysubgraph.data.graph_dataset import GraphSequenceSample
 from keysubgraph.features.graph_features import GraphTimepointFeatures
 from keysubgraph.models.soft_extractor import SoftGraphClassifier, TimepointSelection
+from keysubgraph.theory import (
+    EvolutionRepresentation,
+    FidelityResult,
+    HardExportFidelityEvaluator,
+    HardUnionGraph,
+    SpectralGWEvolutionEncoder,
+    SpectralGWGreedyExporter,
+)
 
 
 @dataclass(frozen=True)
@@ -32,6 +40,14 @@ class HardExtractionConfig:
     dynamic_weight: float = 0.10
     local_confidence_weight: float = 0.0
     use_local_confidence_score: bool = False
+    strategy: str = "spectral_gw_greedy"
+    beta_lambda: float = 0.10
+    beta_gw: float = 0.10
+    beta_overlap: float = 0.10
+    min_export_gain: float = 0.0
+    eval_gw_entropic_reg: float = 0.01
+    eval_gw_max_iter: int = 100
+    eval_gw_sinkhorn_iter: int = 100
     epsilon: float = 1e-8
 
     def __post_init__(self) -> None:
@@ -62,6 +78,17 @@ class HardExtractionConfig:
             raise ValueError(
                 "local candidate head is disabled in the verified soft_graph baseline"
             )
+        if self.strategy != "spectral_gw_greedy":
+            raise ValueError("strong theory export requires spectral_gw_greedy")
+        if any(
+            value < 0.0
+            for value in (self.beta_lambda, self.beta_gw, self.beta_overlap)
+        ):
+            raise ValueError("spectral/GW/overlap penalties must be non-negative")
+        if self.eval_gw_entropic_reg <= 0.0:
+            raise ValueError("evaluation GW regularization must be positive")
+        if self.eval_gw_max_iter < 1 or self.eval_gw_sinkhorn_iter < 1:
+            raise ValueError("evaluation GW iterations must be positive")
         if self.epsilon <= 0.0:
             raise ValueError("epsilon must be positive")
 
@@ -103,6 +130,9 @@ class HardTimepointResult:
     selected_subgraphs: Tuple[HardSubgraphCandidate, ...]
     num_valid_subgraphs: int
     subgraph_mask: Tuple[bool, ...]
+    union_graph: Optional[HardUnionGraph]
+    fidelity: Optional[FidelityResult]
+    spectral_gw_greedy_trace: Tuple[Dict[str, Any], ...]
 
 
 @dataclass(frozen=True)
@@ -116,7 +146,19 @@ class HardSampleResult:
     split: str
     relative_path: str
     edge_presence_threshold: float
+    laplacian_eta: float
+    heat_kernel_t: float
+    node_measure: str
     timepoints: Tuple[HardTimepointResult, ...]
+    H_SGW_full: Tuple[float, ...]
+    H_SGW_soft: Tuple[float, ...]
+    H_SGW_hard: Tuple[float, ...]
+    Gamma_SGW_full: Tuple[Tuple[float, ...], ...]
+    Gamma_SGW_soft: Tuple[Tuple[float, ...], ...]
+    Gamma_SGW_hard: Tuple[Tuple[float, ...], ...]
+    Gamma_SGW_full_mask: Tuple[bool, ...]
+    Gamma_SGW_soft_mask: Tuple[bool, ...]
+    Gamma_SGW_hard_mask: Tuple[bool, ...]
 
 
 def candidate_overlap(
@@ -169,6 +211,28 @@ class HardSubgraphExtractor:
         self.model.eval()
         for parameter in self.model.parameters():
             parameter.requires_grad_(False)
+        model_config = self.model.config
+        self.fidelity = HardExportFidelityEvaluator(
+            laplacian_eta=model_config.laplacian_eta,
+            heat_kernel_t=model_config.heat_kernel_t,
+            spectral_quantile_grid=model_config.spectral_quantile_grid,
+            train_entropic_reg=model_config.gw_entropic_reg,
+            train_max_iter=model_config.gw_max_iter,
+            train_sinkhorn_iter=model_config.gw_sinkhorn_iter,
+            tolerance=model_config.gw_tolerance,
+            eval_entropic_reg=self.config.eval_gw_entropic_reg,
+            eval_max_iter=self.config.eval_gw_max_iter,
+            eval_sinkhorn_iter=self.config.eval_gw_sinkhorn_iter,
+        )
+        self.greedy = SpectralGWGreedyExporter(
+            self.fidelity,
+            beta_lambda=self.config.beta_lambda,
+            beta_gw=self.config.beta_gw,
+            beta_overlap=self.config.beta_overlap,
+            min_export_gain=self.config.min_export_gain,
+            epsilon=self.config.epsilon,
+        )
+        self.evolution = SpectralGWEvolutionEncoder(self.fidelity)
 
     def _community_seeds(
         self, communities: torch.Tensor, node_scores: torch.Tensor
@@ -289,6 +353,11 @@ class HardSubgraphExtractor:
 
     def extract_sample(self, sample: GraphSequenceSample) -> HardSampleResult:
         timepoints = []
+        full_adjacencies = []
+        soft_adjacencies = []
+        hard_adjacencies = []
+        full_edge_masks = []
+        hard_edge_masks = []
         with torch.no_grad():
             for time_index in range(sample.num_timepoints):
                 features, selection = self.model.score_timepoint(sample, time_index)
@@ -303,7 +372,25 @@ class HardSubgraphExtractor:
                     if candidate is not None:
                         candidates.append(candidate)
                 deduplicated = self._deduplicate(candidates)
-                selected = tuple(deduplicated[: self.config.top_k])
+                adjacency = sample.adjacency[time_index]
+                selected, union_graph, greedy_trace = self.greedy.select(
+                    deduplicated,
+                    adjacency,
+                    sample.node_names[time_index],
+                    features.edge_mask,
+                    selection.soft_adjacency,
+                    self.config.top_k,
+                )
+                fidelity = (
+                    self.fidelity.evaluate(
+                        adjacency,
+                        selection.soft_adjacency,
+                        features.edge_mask,
+                        union_graph,
+                    )
+                    if union_graph is not None
+                    else None
+                )
                 edge_count = int(torch.triu(features.edge_mask, diagonal=1).sum())
                 timepoints.append(
                     HardTimepointResult(
@@ -316,8 +403,32 @@ class HardSubgraphExtractor:
                         subgraph_mask=tuple(
                             index < len(selected) for index in range(self.config.top_k)
                         ),
+                        union_graph=union_graph,
+                        fidelity=fidelity,
+                        spectral_gw_greedy_trace=greedy_trace,
                     )
                 )
+                full_adjacencies.append(adjacency)
+                soft_adjacencies.append(selection.soft_adjacency)
+                full_edge_masks.append(features.edge_mask)
+                hard_adjacencies.append(
+                    union_graph.adjacency if union_graph is not None else None
+                )
+                hard_edge_masks.append(
+                    union_graph.adjacency.abs() > 0.0
+                    if union_graph is not None
+                    else None
+                )
+        time_values = [float(value) for value in sample.window_starts.detach().cpu()]
+        full_evolution = self.evolution.encode(
+            full_adjacencies, full_edge_masks, time_values
+        )
+        soft_evolution = self.evolution.encode(
+            soft_adjacencies, full_edge_masks, time_values
+        )
+        hard_evolution = self.evolution.encode(
+            hard_adjacencies, hard_edge_masks, time_values
+        )
         return HardSampleResult(
             sample_key=sample.sample_key,
             sample_id=sample.sample_id,
@@ -328,7 +439,19 @@ class HardSubgraphExtractor:
             split=sample.split,
             relative_path=sample.relative_path,
             edge_presence_threshold=sample.edge_presence_threshold,
+            laplacian_eta=self.model.config.laplacian_eta,
+            heat_kernel_t=self.model.config.heat_kernel_t,
+            node_measure=self.model.config.node_measure,
             timepoints=tuple(timepoints),
+            H_SGW_full=full_evolution.aggregated,
+            H_SGW_soft=soft_evolution.aggregated,
+            H_SGW_hard=hard_evolution.aggregated,
+            Gamma_SGW_full=full_evolution.gamma,
+            Gamma_SGW_soft=soft_evolution.gamma,
+            Gamma_SGW_hard=hard_evolution.gamma,
+            Gamma_SGW_full_mask=full_evolution.step_mask,
+            Gamma_SGW_soft_mask=soft_evolution.step_mask,
+            Gamma_SGW_hard_mask=hard_evolution.step_mask,
         )
 
 
@@ -384,12 +507,26 @@ def export_hard_sample(
         "split": result.split,
         "relative_path": result.relative_path,
         "edge_presence_threshold": result.edge_presence_threshold,
+        "laplacian_eta": result.laplacian_eta,
+        "heat_kernel_t": result.heat_kernel_t,
+        "node_measure": result.node_measure,
         "hard_extraction_config": asdict(config),
         "checkpoint_sha256": file_sha256(checkpoint_path),
         "data_protocol_sha256": data_protocol_sha256,
         "timepoints": [],
+        "H_SGW_full": list(result.H_SGW_full),
+        "H_SGW_soft": list(result.H_SGW_soft),
+        "H_SGW_hard": list(result.H_SGW_hard),
+        "Gamma_SGW_full": [list(item) for item in result.Gamma_SGW_full],
+        "Gamma_SGW_soft": [list(item) for item in result.Gamma_SGW_soft],
+        "Gamma_SGW_hard": [list(item) for item in result.Gamma_SGW_hard],
+        "Gamma_SGW_full_mask": list(result.Gamma_SGW_full_mask),
+        "Gamma_SGW_soft_mask": list(result.Gamma_SGW_soft_mask),
+        "Gamma_SGW_hard_mask": list(result.Gamma_SGW_hard_mask),
     }
     for timepoint in result.timepoints:
+        union = timepoint.union_graph
+        fidelity = timepoint.fidelity.to_dict() if timepoint.fidelity is not None else {}
         payload["timepoints"].append(
             {
                 "time_index": timepoint.time_index,
@@ -398,6 +535,15 @@ def export_hard_sample(
                 "original_edge_count": timepoint.original_edge_count,
                 "num_valid_subgraphs": timepoint.num_valid_subgraphs,
                 "subgraph_mask": list(timepoint.subgraph_mask),
+                "hard_union_available": union is not None,
+                "union_node_ids": list(union.node_ids) if union is not None else None,
+                "union_node_names": list(union.node_names) if union is not None else None,
+                "union_edge_index": [list(edge) for edge in union.edge_index] if union is not None else None,
+                "union_original_edge_weights": list(union.original_edge_weights) if union is not None else None,
+                "union_num_nodes": union.num_nodes if union is not None else 0,
+                "union_num_edges": union.num_edges if union is not None else 0,
+                "spectral_gw_greedy_trace": list(timepoint.spectral_gw_greedy_trace),
+                **fidelity,
                 "candidate_pool": [
                     _candidate_dict(candidate, result, timepoint, None)
                     for candidate in timepoint.candidate_pool

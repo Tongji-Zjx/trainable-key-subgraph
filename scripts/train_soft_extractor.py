@@ -34,7 +34,7 @@ from keysubgraph.training.trainer import (  # noqa: E402
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--protocol", type=Path, default=PROJECT_ROOT / "configs" / "data_protocol.json")
+    parser.add_argument("--protocol", type=Path, default=PROJECT_ROOT / "configs" / "data_protocol_strict_theory.json")
     parser.add_argument("--output-dir", type=Path, default=PROJECT_ROOT / "outputs" / "training" / "soft_seed42")
     parser.add_argument("--device", default="auto")
     parser.add_argument("--epochs", type=int, default=50)
@@ -54,6 +54,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--graph-layers", type=int, default=2)
     parser.add_argument("--classifier-hidden", type=int, default=32)
     parser.add_argument("--dropout", type=float, default=0.1)
+    parser.add_argument("--laplacian-eta", type=float, default=1.0e-4)
+    parser.add_argument("--heat-kernel-t", type=float, default=0.5)
+    parser.add_argument("--gw-entropic-reg", type=float, default=0.05)
+    parser.add_argument("--gw-max-iter", type=int, default=200)
+    parser.add_argument("--gw-sinkhorn-iter", type=int, default=50)
+    parser.add_argument("--gw-tolerance", type=float, default=1.0e-7)
+    parser.add_argument("--lambda-classification", type=float, default=1.0)
+    parser.add_argument("--lambda-laplacian", type=float, default=1.0)
+    parser.add_argument("--lambda-gw", type=float, default=1.0)
+    parser.add_argument("--laplacian-warmup-epochs", type=int, default=5)
+    parser.add_argument("--gw-warmup-epochs", type=int, default=10)
     parser.add_argument("--resume", type=Path)
     parser.add_argument(
         "--smoke",
@@ -71,6 +82,12 @@ def main() -> int:
             "training output already exists; pass --resume instead of silently overwriting"
         )
     protocol = validate_data_protocol(args.protocol, PROJECT_ROOT)
+    if protocol.get("protocol_name", "strict_theory") != "strict_theory":
+        raise ValueError("train_soft_extractor.py requires protocol_name=strict_theory")
+    if protocol.get("experiment_mode") == "all_samples_exploratory":
+        raise ValueError(
+            "strict_theory training requires frozen train/validation/test partitions"
+        )
     paths = protocol["paths"]
     train_dataset = GraphSequenceDataset(
         PROJECT_ROOT / paths["dataset_root"],
@@ -113,6 +130,13 @@ def main() -> int:
             graph_layers=args.graph_layers,
             classifier_hidden_dim=args.classifier_hidden,
             dropout=args.dropout,
+            theory_alignment_enabled=True,
+            laplacian_eta=args.laplacian_eta,
+            heat_kernel_t=args.heat_kernel_t,
+            gw_entropic_reg=args.gw_entropic_reg,
+            gw_max_iter=args.gw_max_iter,
+            gw_sinkhorn_iter=args.gw_sinkhorn_iter,
+            gw_tolerance=args.gw_tolerance,
         )
     )
     config = TrainingConfig(
@@ -122,6 +146,11 @@ def main() -> int:
         target_node_ratio=args.target_node_ratio,
         target_edge_ratio=args.target_edge_ratio,
         budget_weight=args.budget_weight,
+        classification_weight=args.lambda_classification,
+        laplacian_weight=args.lambda_laplacian,
+        gw_weight=args.lambda_gw,
+        laplacian_warmup_epochs=args.laplacian_warmup_epochs,
+        gw_warmup_epochs=args.gw_warmup_epochs,
         gradient_clip_norm=args.gradient_clip,
         seed=args.seed,
         selection_metric=args.selection_metric,

@@ -1,0 +1,55 @@
+schema_version: 1
+
+theory_alignment:
+  enabled: true
+  mode: strong
+
+laplacian:
+  eta: 0.0001
+  fidelity_norm: frobenius
+  record_operator_norm: true
+
+spectral:
+  quantile_grid: [0.05, 0.10, 0.20, 0.30, 0.40, 0.50, 0.60, 0.70, 0.80, 0.90, 0.95]
+  compute_full_spectrum: true
+  compute_spectral_gap: true
+
+heat_kernel:
+  # This concrete initial value must be tuned on train/validation only.
+  time_scale: 0.5
+
+optimal_transport:
+  mode: gw
+  train_solver: entropic_gw
+  eval_solver: high_accuracy_entropic_gw_reference
+  entropic_reg: 0.05
+  eval_entropic_reg: 0.01
+  max_iter: 200
+  sinkhorn_iter: 50
+  eval_max_iter: 100
+  eval_sinkhorn_iter: 100
+  tolerance: 0.0000001
+  failure_strategy: use_last  # last iterate is retained with converged=false and residual logged
+  node_measure: uniform
+
+loss:
+  lambda_cls: 1.0
+  alpha_budget: 1.0
+  lambda_laplacian: 1.0
+  lambda_gw: 1.0
+  laplacian_warmup_epochs: 5
+  gw_warmup_epochs: 10
+
+hard_export:
+  strategy: spectral_gw_greedy
+  max_k: 5
+  beta_lambda: 0.10
+  beta_gw: 0.10
+  beta_overlap: 0.10
+  min_export_gain: 0.0
+  target_graph: soft
+
+protocol:
+  name: strict_theory
+  split_file: outputs/splits/splits.csv
+  index_file: outputs/index_no_coords/sample_index.csv

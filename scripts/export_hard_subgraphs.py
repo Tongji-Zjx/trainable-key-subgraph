@@ -33,7 +33,7 @@ from keysubgraph.training.trainer import load_checkpoint  # noqa: E402
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--protocol", type=Path, default=PROJECT_ROOT / "configs" / "data_protocol.json")
+    parser.add_argument("--protocol", type=Path, default=PROJECT_ROOT / "configs" / "data_protocol_strict_theory.json")
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--split", choices=("train", "validation", "test", "all"), default="validation")
     parser.add_argument("--output-dir", type=Path, default=PROJECT_ROOT / "outputs" / "hard_subgraphs")
@@ -47,6 +47,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--min-edges", type=int, default=1)
     parser.add_argument("--top-k", type=int, default=5)
     parser.add_argument("--overlap-threshold", type=float, default=1.0)
+    parser.add_argument("--beta-lambda", type=float, default=0.10)
+    parser.add_argument("--beta-gw", type=float, default=0.10)
+    parser.add_argument("--beta-overlap", type=float, default=0.10)
+    parser.add_argument("--min-export-gain", type=float, default=0.0)
+    parser.add_argument("--eval-gw-entropic-reg", type=float, default=0.01)
+    parser.add_argument("--eval-gw-max-iter", type=int, default=100)
+    parser.add_argument("--eval-gw-sinkhorn-iter", type=int, default=100)
     parser.add_argument("--overwrite", action="store_true")
     return parser.parse_args()
 
@@ -56,6 +63,8 @@ def main() -> int:
     if args.max_samples is not None and args.max_samples < 1:
         raise ValueError("max-samples must be positive")
     protocol = validate_data_protocol(args.protocol, PROJECT_ROOT)
+    if protocol.get("protocol_name", "strict_theory") != "strict_theory":
+        raise ValueError("strong theory export requires protocol_name=strict_theory")
     if args.split == "all" and protocol.get("experiment_mode") != "all_samples_exploratory":
         raise ValueError("--split all requires an all-sample protocol")
     checkpoint = torch.load(
@@ -66,6 +75,10 @@ def main() -> int:
     if checkpoint.get("edge_presence_threshold") != protocol["edge_presence_threshold"]:
         raise ValueError("checkpoint and protocol edge thresholds differ")
     model_config = SoftExtractorConfig(**checkpoint["model_config"])
+    if not model_config.theory_alignment_enabled:
+        raise ValueError(
+            "spectral-GW hard export requires a strong theory-aligned checkpoint"
+        )
     model = SoftGraphClassifier(model_config)
     load_checkpoint(args.checkpoint, model, device=torch.device("cpu"))
     if args.device == "auto":
@@ -82,6 +95,13 @@ def main() -> int:
         min_edges=args.min_edges,
         top_k=args.top_k,
         overlap_threshold=args.overlap_threshold,
+        beta_lambda=args.beta_lambda,
+        beta_gw=args.beta_gw,
+        beta_overlap=args.beta_overlap,
+        min_export_gain=args.min_export_gain,
+        eval_gw_entropic_reg=args.eval_gw_entropic_reg,
+        eval_gw_max_iter=args.eval_gw_max_iter,
+        eval_gw_sinkhorn_iter=args.eval_gw_sinkhorn_iter,
     )
     extractor = HardSubgraphExtractor(model, config)
     paths = protocol["paths"]
@@ -125,6 +145,8 @@ def main() -> int:
                 "selected_subgraph_count": total_subgraphs,
                 "checkpoint": str(args.checkpoint.resolve()),
                 "data_protocol_sha256": file_sha256(args.protocol),
+                "theory_alignment": checkpoint.get("theory_alignment"),
+                "hard_extraction_config": config.__dict__,
             },
             handle,
             ensure_ascii=False,

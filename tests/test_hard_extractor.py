@@ -86,6 +86,9 @@ class HardExtractorTest(unittest.TestCase):
         self.assertEqual(len(timepoint.candidate_pool), 1)
         self.assertEqual(timepoint.num_valid_subgraphs, 1)
         self.assertEqual(timepoint.subgraph_mask, (True, False, False))
+        self.assertIsNotNone(timepoint.union_graph)
+        self.assertIsNotNone(timepoint.fidelity)
+        self.assertEqual(len(timepoint.spectral_gw_greedy_trace), 1)
         candidate = timepoint.selected_subgraphs[0]
         self.assertEqual(candidate.node_ids, (0, 1, 2))
         self.assertEqual(len(candidate.edge_index), 3)
@@ -144,6 +147,15 @@ class HardExtractorTest(unittest.TestCase):
             self.assertTrue(required <= set(subgraph))
             self.assertTrue(any(weight < 0.0 for weight in subgraph["original_edge_weights"]))
             self.assertEqual(len(timepoint["candidate_pool"]), 1)
+            self.assertTrue(timepoint["hard_union_available"])
+            self.assertEqual(timepoint["union_num_nodes"], 3)
+            self.assertEqual(timepoint["union_num_edges"], 3)
+            self.assertTrue(any(weight < 0.0 for weight in timepoint["union_original_edge_weights"]))
+            self.assertIn("soft_to_hard_spectral_winf", timepoint)
+            self.assertIn("soft_to_hard_gw_error", timepoint)
+            self.assertIn("spectral_gw_greedy_trace", timepoint)
+            self.assertIn("H_SGW_full", payload)
+            self.assertIn("Gamma_SGW_hard", payload)
             with self.assertRaises(FileExistsError):
                 export_hard_sample(
                     result,

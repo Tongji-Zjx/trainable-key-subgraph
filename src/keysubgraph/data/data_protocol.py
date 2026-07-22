@@ -46,6 +46,7 @@ def freeze_data_protocol(
     splits_json: Path,
     output_path: Path,
     edge_presence_threshold: float = 0.0,
+    protocol_name: str = "strict_theory",
     overwrite: bool = False,
 ) -> Dict[str, Any]:
     """Validate data artifacts and write their reproducible contract."""
@@ -66,6 +67,8 @@ def freeze_data_protocol(
         )
     if edge_presence_threshold < 0.0:
         raise ValueError("edge_presence_threshold must be non-negative")
+    if protocol_name not in ("strict_theory", "all_samples_exploratory"):
+        raise ValueError("unsupported protocol_name")
 
     samples = read_sample_index(sample_index_csv)
     assignments = read_split_assignments(splits_csv)
@@ -85,12 +88,16 @@ def freeze_data_protocol(
 
     experiment_mode = split_payload.get("assignment_mode", "partitioned_evaluation")
     if experiment_mode == FULL_COHORT_MODE:
+        if protocol_name != "all_samples_exploratory":
+            raise ValueError("all-sample assignments require all_samples_exploratory protocol")
         if any(assignment.split != "all" for assignment in assignments):
             raise ValueError("all-sample protocol contains a non-'all' assignment")
         if split_payload.get("ratios") != {"all": 1.0}:
             raise ValueError("all-sample protocol must declare ratios={'all': 1.0}")
     elif any(assignment.split == "all" for assignment in assignments):
         raise ValueError("'all' assignments require all_samples_exploratory mode")
+    elif protocol_name != "strict_theory":
+        raise ValueError("partitioned evaluation requires strict_theory protocol")
 
     missing_files = [
         sample.relative_path
@@ -107,6 +114,7 @@ def freeze_data_protocol(
     payload = {
         "schema_version": 1,
         "immutable": True,
+        "protocol_name": protocol_name,
         "paths": {
             "dataset_root": _portable_path(dataset_protocol_path, project_root),
             "sample_index_csv": _portable_path(sample_index_csv, project_root),

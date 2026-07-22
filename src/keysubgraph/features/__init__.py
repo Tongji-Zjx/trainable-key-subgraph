@@ -5,9 +5,17 @@ from .graph_features import (
     GraphTimepointFeatures,
     align_current_to_previous,
 )
+from .hard_graph_features import (
+    HardGraphClassificationFeatures,
+    HardGraphFeatureBuilder,
+    HardGraphWindow,
+)
 
 __all__ = [
     "GraphFeatureBuilder",
     "GraphTimepointFeatures",
+    "HardGraphClassificationFeatures",
+    "HardGraphFeatureBuilder",
+    "HardGraphWindow",
     "align_current_to_previous",
 ]

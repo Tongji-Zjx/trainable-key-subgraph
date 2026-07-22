@@ -115,6 +115,7 @@ def main():
         )
     )
     config = TrainingConfig(
+        protocol_name="all_samples_exploratory",
         epochs=args.epochs,
         learning_rate=args.learning_rate,
         weight_decay=args.weight_decay,

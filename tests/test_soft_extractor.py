@@ -171,6 +171,45 @@ class SoftExtractorTest(unittest.TestCase):
         self.assertGreater(float(node_gradient.abs().sum()), 0.0)
         self.assertGreater(float(edge_gradient.abs().sum()), 0.0)
 
+    def test_strong_fidelity_losses_backpropagate_to_both_scorers(self):
+        model = SoftGraphClassifier(
+            SoftExtractorConfig(
+                node_score_hidden_dim=8,
+                edge_score_hidden_dim=8,
+                graph_hidden_dim=10,
+                graph_layers=1,
+                classifier_hidden_dim=6,
+                dropout=0.0,
+                theory_alignment_enabled=True,
+                heat_kernel_t=0.5,
+                gw_entropic_reg=0.05,
+                gw_max_iter=10,
+                gw_sinkhorn_iter=10,
+                gw_tolerance=1.0e-5,
+            )
+        )
+        output = model(self.batch)
+        self.assertIsNotNone(output.laplacian_fidelity)
+        self.assertIsNotNone(output.gw_fidelity)
+        loss = compute_soft_graph_loss(
+            output,
+            self.batch.labels,
+            budget_weight=0.0,
+            classification_weight=0.0,
+            laplacian_weight=1.0,
+            gw_weight=1.0,
+        )
+        loss.total.backward()
+
+        node_gradient = model.node_scorer.network[0].weight.grad
+        edge_gradient = model.edge_scorer.network[0].weight.grad
+        self.assertIsNotNone(node_gradient)
+        self.assertIsNotNone(edge_gradient)
+        self.assertGreater(float(node_gradient.abs().sum()), 0.0)
+        self.assertGreater(float(edge_gradient.abs().sum()), 0.0)
+        self.assertGreater(float(loss.laplacian_fidelity), 0.0)
+        self.assertGreater(float(loss.gw_fidelity), 0.0)
+
     def test_prediction_is_invariant_to_consistent_node_permutation(self):
         sample = _sample("SITE/original", 0, (4,))
         permutation = torch.tensor([2, 0, 3, 1])

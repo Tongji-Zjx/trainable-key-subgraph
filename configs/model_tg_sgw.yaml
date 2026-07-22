@@ -1,0 +1,60 @@
+schema_version: 1
+
+model:
+  name: tg_sgw_net_v2
+  num_classes: 2
+  use_pyg: false
+  use_transformer: false
+
+data:
+  batching: list
+  extractor_node_feature_dim: 13
+  classifier_node_feature_dim: 13
+  edge_feature_dim: 4
+  edge_presence_threshold_source: sample_metadata
+  require_min_windows: 2
+  require_strictly_increasing_time: true
+  node_alignment_key_priority: [node_ids, node_names]
+
+theory:
+  canonical_source: core_derivation_appendices_abc
+  laplacian_eta: 1.0e-3
+  laplacian_add_eta_to_numerator: true
+  diffusion_time: 1.0
+  gw_order: 2
+  gw_external_half_factor: false
+  time_quantity: speed
+  num_spectral_quantiles: 16
+  quantile_min: 0.05
+  quantile_max: 0.95
+  spectral_w1_grid_size: 256
+  node_measure: uniform
+
+dimensions:
+  graph_embedding: 96
+  temporal_hidden: 96
+  neural_representation: 192
+  theory_core: 18
+  theory_variation: 16
+  theory_classification: 34
+  final_representation: 226
+
+signed_gnn:
+  hidden_dim: 64
+  num_layers: 3
+  dropout: 0.20
+
+temporal:
+  type: masked_tcn
+  kernel_size: 3
+  dilations: [1, 2, 4]
+  dropout: 0.20
+
+soft_loss:
+  classification: 1.0
+  budget: 0.10
+  laplacian_max: 0.50
+  gw_identity_max: 0.10
+  supervised_contrastive: 0.0
+  warmup_epochs: 15
+

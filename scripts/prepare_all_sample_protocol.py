@@ -85,6 +85,7 @@ def main():
             splits_json=artifacts["json"],
             output_path=args.output,
             edge_presence_threshold=args.edge_presence_threshold,
+            protocol_name="all_samples_exploratory",
             overwrite=args.overwrite,
         )
     print(json.dumps(protocol, ensure_ascii=False, indent=2, sort_keys=True))

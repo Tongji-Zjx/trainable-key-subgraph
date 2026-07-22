@@ -94,6 +94,7 @@ class FullCohortTest(unittest.TestCase):
                 artifacts["csv"],
                 artifacts["json"],
                 protocol_path,
+                protocol_name="all_samples_exploratory",
             )
 
             loaded = read_split_assignments(artifacts["csv"])

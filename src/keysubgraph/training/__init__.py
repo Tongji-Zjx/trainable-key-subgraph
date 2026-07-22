@@ -15,3 +15,22 @@ __all__ = [
     "set_reproducible_seed",
     "train_model",
 ]
+from .tg_soft_teacher_checkpoint import (
+    load_tg_soft_teacher_checkpoint,
+    save_tg_soft_teacher_checkpoint,
+)
+from .tg_soft_teacher_trainer import (
+    TGSoftTeacherTrainingConfig,
+    run_tg_soft_teacher_epoch,
+    train_tg_soft_teacher,
+)
+
+__all__.extend(
+    [
+        "TGSoftTeacherTrainingConfig",
+        "load_tg_soft_teacher_checkpoint",
+        "run_tg_soft_teacher_epoch",
+        "save_tg_soft_teacher_checkpoint",
+        "train_tg_soft_teacher",
+    ]
+)

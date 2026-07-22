@@ -3,6 +3,7 @@
 from __future__ import absolute_import, division, print_function
 
 import json
+import hashlib
 import math
 import os
 import random
@@ -22,12 +23,18 @@ from keysubgraph.models.soft_extractor import SoftGraphClassifier
 
 @dataclass(frozen=True)
 class TrainingConfig:
+    protocol_name: str = "strict_theory"
     epochs: int = 50
     learning_rate: float = 1e-3
     weight_decay: float = 1e-4
     target_node_ratio: float = 0.30
     target_edge_ratio: float = 0.30
     budget_weight: float = 1.0
+    classification_weight: float = 1.0
+    laplacian_weight: float = 0.0
+    gw_weight: float = 0.0
+    laplacian_warmup_epochs: int = 5
+    gw_warmup_epochs: int = 10
     gradient_clip_norm: float = 5.0
     seed: int = 42
     selection_metric: str = "roc_auc"
@@ -35,6 +42,8 @@ class TrainingConfig:
     max_validation_batches: Optional[int] = None
 
     def __post_init__(self) -> None:
+        if self.protocol_name not in ("strict_theory", "all_samples_exploratory"):
+            raise ValueError("unsupported training protocol name")
         if self.epochs < 1:
             raise ValueError("epochs must be positive")
         if self.learning_rate <= 0.0 or self.weight_decay < 0.0:
@@ -45,6 +54,17 @@ class TrainingConfig:
             raise ValueError("target_edge_ratio must be in [0, 1]")
         if self.budget_weight < 0.0 or self.gradient_clip_norm <= 0.0:
             raise ValueError("loss weight and gradient clip must be positive")
+        if any(
+            value < 0.0
+            for value in (
+                self.classification_weight,
+                self.laplacian_weight,
+                self.gw_weight,
+            )
+        ):
+            raise ValueError("classification and fidelity weights must be non-negative")
+        if self.laplacian_warmup_epochs < 0 or self.gw_warmup_epochs < 0:
+            raise ValueError("fidelity warm-up epochs must be non-negative")
         if self.selection_metric not in ("roc_auc", "balanced_accuracy", "loss"):
             raise ValueError("unsupported selection_metric")
         for value in (self.max_train_batches, self.max_validation_batches):
@@ -98,12 +118,21 @@ def _run_epoch(
     optimizer: Optional[torch.optim.Optimizer],
     max_batches: Optional[int],
     include_predictions: bool = False,
+    epoch: int = 1,
 ) -> Dict[str, Any]:
     training = optimizer is not None
     model.train(training)
     total_loss = 0.0
     classification_loss = 0.0
     budget_loss = 0.0
+    laplacian_loss = 0.0
+    laplacian_operator_error = 0.0
+    gw_loss = 0.0
+    theory_timepoint_count = 0
+    gw_solve_count = 0
+    gw_converged_count = 0
+    gw_iteration_total = 0
+    gw_residual_max = 0.0
     sample_count = 0
     labels_all: List[int] = []
     probabilities_all: List[float] = []
@@ -120,12 +149,21 @@ def _run_epoch(
             if training:
                 optimizer.zero_grad(set_to_none=True)
             output = model(batch)
+            laplacian_weight = _warmup_weight(
+                config.laplacian_weight, epoch, config.laplacian_warmup_epochs
+            )
+            gw_weight = _warmup_weight(
+                config.gw_weight, epoch, config.gw_warmup_epochs
+            )
             loss = compute_soft_graph_loss(
                 output,
                 batch.labels,
                 target_node_ratio=config.target_node_ratio,
                 target_edge_ratio=config.target_edge_ratio,
                 budget_weight=config.budget_weight,
+                classification_weight=config.classification_weight,
+                laplacian_weight=laplacian_weight,
+                gw_weight=gw_weight,
                 class_weights=class_weights,
             )
             if not bool(torch.isfinite(loss.total)):
@@ -144,6 +182,21 @@ def _run_epoch(
             total_loss += float(loss.total.detach().cpu()) * current_size
             classification_loss += float(loss.classification.detach().cpu()) * current_size
             budget_loss += float(loss.budget.detach().cpu()) * current_size
+            timepoint_count = int(output.timepoint_sample_indices.numel())
+            if output.laplacian_fidelity is not None:
+                laplacian_loss += float(output.laplacian_fidelity.detach().cpu()) * timepoint_count
+                laplacian_operator_error += (
+                    float(output.laplacian_operator_error.detach().cpu()) * timepoint_count
+                )
+                gw_loss += float(output.gw_fidelity.detach().cpu()) * timepoint_count
+                theory_timepoint_count += timepoint_count
+                convergence = output.gw_solver_converged.detach().cpu()
+                iterations = output.gw_solver_iterations.detach().cpu()
+                residuals = output.gw_solver_residuals.detach().cpu()
+                gw_solve_count += int(convergence.numel())
+                gw_converged_count += int(convergence.sum())
+                gw_iteration_total += int(iterations.sum())
+                gw_residual_max = max(gw_residual_max, float(residuals.max()))
             sample_count += current_size
             probabilities = torch.softmax(output.logits.detach(), dim=-1)[:, 1].cpu()
             predictions = output.logits.detach().argmax(dim=-1).cpu()
@@ -178,6 +231,31 @@ def _run_epoch(
             "loss": total_loss / sample_count,
             "classification_loss": classification_loss / sample_count,
             "budget_loss": budget_loss / sample_count,
+            "laplacian_fidelity_loss": (
+                laplacian_loss / theory_timepoint_count
+                if theory_timepoint_count
+                else None
+            ),
+            "laplacian_operator_error": (
+                laplacian_operator_error / theory_timepoint_count
+                if theory_timepoint_count
+                else None
+            ),
+            "gw_fidelity_loss": (
+                gw_loss / theory_timepoint_count if theory_timepoint_count else None
+            ),
+            "gw_solver_converged_count": gw_converged_count,
+            "gw_solver_failure_count": gw_solve_count - gw_converged_count,
+            "gw_solver_mean_iterations": (
+                gw_iteration_total / gw_solve_count if gw_solve_count else None
+            ),
+            "gw_solver_max_residual": gw_residual_max if gw_solve_count else None,
+            "effective_laplacian_weight": _warmup_weight(
+                config.laplacian_weight, epoch, config.laplacian_warmup_epochs
+            ),
+            "effective_gw_weight": _warmup_weight(
+                config.gw_weight, epoch, config.gw_warmup_epochs
+            ),
             "mean_gradient_norm": (
                 sum(gradient_norms) / len(gradient_norms) if gradient_norms else None
             ),
@@ -196,6 +274,7 @@ def evaluate_model(
     class_weights: torch.Tensor,
     max_batches: Optional[int] = None,
     include_predictions: bool = False,
+    epoch: int = 1,
 ) -> Dict[str, Any]:
     return _run_epoch(
         model,
@@ -206,7 +285,16 @@ def evaluate_model(
         optimizer=None,
         max_batches=max_batches,
         include_predictions=include_predictions,
+        epoch=epoch,
     )
+
+
+def _warmup_weight(target: float, epoch: int, warmup_epochs: int) -> float:
+    if target <= 0.0 or warmup_epochs <= 0:
+        return float(target)
+    if epoch < 1:
+        raise ValueError("epoch must be positive")
+    return float(target) * min(1.0, epoch / float(warmup_epochs))
 
 
 def _atomic_torch_save(path: Path, payload: Dict[str, Any]) -> None:
@@ -260,16 +348,51 @@ def _checkpoint_payload(
         "selection_partition": selection_partition,
         "selection_metrics": selection_metrics,
         "data_protocol_sha256": file_sha256(protocol_path),
+        "source_code_sha256": _source_code_sha256(protocol_path),
         "data_artifact_sha256": protocol["sha256"],
         "edge_presence_threshold": protocol["edge_presence_threshold"],
         "class_weights": class_weights.tolist(),
         "rng_state": rng_state,
+        "theory_alignment": {
+            "enabled": bool(model.config.theory_alignment_enabled),
+            "mode": model.config.theory_alignment_mode,
+            "laplacian_eta": model.config.laplacian_eta,
+            "heat_kernel_t": model.config.heat_kernel_t,
+            "spectral_quantile_grid": list(model.config.spectral_quantile_grid),
+            "gw_mode": model.config.gw_mode,
+            "gw_entropic_reg": model.config.gw_entropic_reg,
+            "gw_max_iter": model.config.gw_max_iter,
+            "gw_tolerance": model.config.gw_tolerance,
+            "gw_sinkhorn_iter": model.config.gw_sinkhorn_iter,
+            "gw_failure_strategy": model.config.gw_failure_strategy,
+            "node_measure": model.config.node_measure,
+        },
     }
     if selection_partition == "validation":
         payload["validation_metrics"] = selection_metrics
     elif selection_partition == "cohort":
         payload["cohort_metrics"] = selection_metrics
     return payload
+
+
+def _source_code_sha256(protocol_path: Path) -> str:
+    """Hash executable project sources so dirty working trees remain traceable."""
+
+    project_root = Path(protocol_path).resolve().parents[1]
+    paths = []
+    for relative_root in ("src", "scripts"):
+        root = project_root / relative_root
+        if root.is_dir():
+            paths.extend(path for path in root.rglob("*.py") if path.is_file())
+    digest = hashlib.sha256()
+    for path in sorted(paths, key=lambda item: item.relative_to(project_root).as_posix()):
+        relative = path.relative_to(project_root).as_posix().encode("utf-8")
+        digest.update(len(relative).to_bytes(8, byteorder="big"))
+        digest.update(relative)
+        content = path.read_bytes()
+        digest.update(len(content).to_bytes(8, byteorder="big"))
+        digest.update(content)
+    return digest.hexdigest()
 
 
 def _restore_rng_state(checkpoint: Dict[str, Any], train_loader: Iterable) -> None:
@@ -362,6 +485,7 @@ def train_model(
             optimizer,
             config.max_train_batches,
             False,
+            epoch,
         )
         selection_metrics = evaluate_model(
             model,
@@ -371,6 +495,7 @@ def train_model(
             class_weights,
             config.max_validation_batches,
             False,
+            epoch,
         )
         row = {"epoch": epoch, "train": train_metrics, selection_partition: selection_metrics}
         history.append(row)

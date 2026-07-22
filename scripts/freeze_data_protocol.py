@@ -27,6 +27,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--splits-json", type=Path, default=PROJECT_ROOT / "outputs" / "splits" / "splits.json")
     parser.add_argument("--output", type=Path, default=PROJECT_ROOT / "configs" / "data_protocol.json")
     parser.add_argument("--edge-presence-threshold", type=float, default=0.0)
+    parser.add_argument(
+        "--protocol-name",
+        choices=("strict_theory", "all_samples_exploratory"),
+        default="strict_theory",
+    )
     parser.add_argument("--overwrite", action="store_true")
     return parser.parse_args()
 
@@ -45,6 +50,7 @@ def main() -> int:
             splits_json=args.splits_json,
             output_path=args.output,
             edge_presence_threshold=args.edge_presence_threshold,
+            protocol_name=args.protocol_name,
             overwrite=args.overwrite,
         )
     print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))

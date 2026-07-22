@@ -29,7 +29,7 @@ from keysubgraph.training.trainer import (  # noqa: E402
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--protocol", type=Path, default=PROJECT_ROOT / "configs" / "data_protocol.json")
+    parser.add_argument("--protocol", type=Path, default=PROJECT_ROOT / "configs" / "data_protocol_strict_theory.json")
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--split", choices=("validation", "test", "all"), required=True)
     parser.add_argument("--output", type=Path)
@@ -88,6 +88,7 @@ def main() -> int:
         torch.tensor(checkpoint_payload["class_weights"], dtype=torch.float32, device=device),
         max_batches=args.max_batches,
         include_predictions=True,
+        epoch=int(checkpoint_payload["epoch"]),
     )
     payload = {
         "schema_version": 1,
@@ -95,6 +96,7 @@ def main() -> int:
         "debug_limited_batches": args.max_batches,
         "exploratory_in_sample_evaluation": args.split == "all",
         "generalization_metrics_available": args.split == "test",
+        "protocol_name": protocol.get("protocol_name", "legacy"),
         "checkpoint_sha256": file_sha256(args.checkpoint),
         "data_protocol_sha256": file_sha256(args.protocol),
         "metrics": metrics,
