@@ -27,6 +27,11 @@ from .tg_hard_classifier import (
     TGHardClassifierOutput,
     TGHardSGWClassifier,
 )
+from .tg_hard_student_loss import (
+    TGHardStudentLoss,
+    TGHardStudentLossConfig,
+    compute_tg_hard_student_loss,
+)
 
 __all__ = [
     "BatchModelOutput",
@@ -52,5 +57,8 @@ __all__ = [
     "TGHardClassifierConfig",
     "TGHardClassifierOutput",
     "TGHardSGWClassifier",
+    "TGHardStudentLoss",
+    "TGHardStudentLossConfig",
+    "compute_tg_hard_student_loss",
     "compute_tg_soft_teacher_loss",
 ]

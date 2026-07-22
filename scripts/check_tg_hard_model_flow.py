@@ -21,6 +21,11 @@ from keysubgraph.features import (  # noqa: E402
     load_hard_graph_cache,
 )
 from keysubgraph.models import TGHardSGWClassifier  # noqa: E402
+from keysubgraph.models import (  # noqa: E402
+    TGHardStudentLossConfig,
+    compute_tg_hard_student_loss,
+)
+from keysubgraph.data.tg_student_dataset import load_tg_teacher_target  # noqa: E402
 from keysubgraph.theory import load_tg_sgw_feature_artifact  # noqa: E402
 from keysubgraph.training import (  # noqa: E402
     load_tg_hard_student_checkpoint,
@@ -35,6 +40,7 @@ def parse_args():
     parser.add_argument("--theory-scaler", type=Path, required=True)
     parser.add_argument("--candidate-scaler", type=Path, required=True)
     parser.add_argument("--output-checkpoint", type=Path, required=True)
+    parser.add_argument("--teacher-target", type=Path)
     parser.add_argument("--device", default="cpu")
     return parser.parse_args()
 
@@ -59,7 +65,25 @@ def main():
     standardized = scaler.transform(raw_theory)
     output = model((cache,), standardized)
     labels = torch.tensor([cache.label], dtype=torch.long, device=device)
-    loss = torch.nn.functional.cross_entropy(output.logits, labels)
+    if args.teacher_target is not None:
+        target = load_tg_teacher_target(args.teacher_target)
+        if target.sample_key != cache.sample_key or target.label != cache.label:
+            raise ValueError("teacher target does not match the hard sample")
+        if target.data_protocol_sha256 != cache.data_protocol_sha256:
+            raise ValueError("teacher target protocol mismatch")
+        if target.teacher_checkpoint_sha256 != cache.teacher_checkpoint_sha256:
+            raise ValueError("teacher target checkpoint mismatch")
+        loss_parts = compute_tg_hard_student_loss(
+            output,
+            labels,
+            target.logits.unsqueeze(0),
+            target.representation.unsqueeze(0),
+            TGHardStudentLossConfig(supervised_contrastive_weight=0.0),
+        )
+        loss = loss_parts.total
+    else:
+        loss_parts = None
+        loss = torch.nn.functional.cross_entropy(output.logits, labels)
     if not bool(torch.isfinite(loss)):
         raise RuntimeError("hard student smoke loss is non-finite")
     optimizer.zero_grad(set_to_none=True)
@@ -91,6 +115,15 @@ def main():
         "valid_windows": cache.num_valid_windows,
         "valid_transitions": int(theory_artifact.features.transition_mask.sum()),
         "loss": float(loss.detach().cpu()),
+        "classification_loss": (
+            float(loss_parts.classification.detach().cpu()) if loss_parts is not None else None
+        ),
+        "knowledge_distillation_loss": (
+            float(loss_parts.knowledge_distillation.detach().cpu()) if loss_parts is not None else None
+        ),
+        "representation_distillation_loss": (
+            float(loss_parts.representation_distillation.detach().cpu()) if loss_parts is not None else None
+        ),
         "gradient_norm": float(gradient_norm.detach().cpu()),
         "neural_dim": int(output.neural_representation.shape[1]),
         "theory_dim": int(output.theory_representation.shape[1]),

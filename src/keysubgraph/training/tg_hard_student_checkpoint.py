@@ -3,11 +3,13 @@
 from __future__ import absolute_import, print_function
 
 import os
+import random
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 import torch
+import numpy as np
 
 from keysubgraph.models.tg_sgw_types import (
     TG_SGW_CHECKPOINT_SCHEMA_VERSION,
@@ -26,6 +28,31 @@ def _atomic_save(path: Path, payload: Dict[str, Any]) -> None:
     os.replace(str(temporary), str(path))
 
 
+def _rng_state(data_loader=None) -> Dict[str, Any]:
+    generator = getattr(data_loader, "generator", None)
+    return {
+        "python": random.getstate(),
+        "numpy": np.random.get_state(),
+        "torch": torch.get_rng_state(),
+        "cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+        "data_loader_generator": generator.get_state() if generator is not None else None,
+    }
+
+
+def _restore_rng_state(payload: Dict[str, Any], data_loader=None) -> None:
+    state = payload.get("rng_state")
+    if not isinstance(state, dict):
+        raise ValueError("TG hard-student checkpoint has no reproducibility state")
+    random.setstate(state["python"])
+    np.random.set_state(state["numpy"])
+    torch.set_rng_state(state["torch"])
+    if torch.cuda.is_available() and state.get("cuda") is not None:
+        torch.cuda.set_rng_state_all(state["cuda"])
+    generator = getattr(data_loader, "generator", None)
+    if generator is not None and state.get("data_loader_generator") is not None:
+        generator.set_state(state["data_loader_generator"])
+
+
 def save_tg_hard_student_checkpoint(
     path: Path,
     model,
@@ -37,6 +64,13 @@ def save_tg_hard_student_checkpoint(
     theory_scaler_sha256: str,
     optimizer: Optional[torch.optim.Optimizer] = None,
     history=None,
+    loss_config=None,
+    training_config=None,
+    best_epoch: int = 0,
+    best_selection_value: float = float("-inf"),
+    classification_threshold: float = 0.5,
+    data_loader=None,
+    teacher_encoder_initialized: bool = False,
 ) -> Dict[str, Any]:
     if epoch < 0:
         raise ValueError("hard student checkpoint epoch cannot be negative")
@@ -55,6 +89,14 @@ def save_tg_hard_student_checkpoint(
         "theory_scaler_sha256": str(theory_scaler_sha256),
         "contract": TGSGWContract().to_dict(),
         "history": list(history or ()),
+        "loss_config": asdict(loss_config) if loss_config is not None else None,
+        "training_config": asdict(training_config) if training_config is not None else None,
+        "best_epoch": int(best_epoch),
+        "best_selection_value": float(best_selection_value),
+        "classification_threshold": float(classification_threshold),
+        "teacher_encoder_initialized": bool(teacher_encoder_initialized),
+        "rng_state": _rng_state(data_loader),
+        "torch_version": str(torch.__version__),
     }
     _atomic_save(path, payload)
     return payload
@@ -67,6 +109,8 @@ def load_tg_hard_student_checkpoint(
     optimizer: Optional[torch.optim.Optimizer] = None,
     expected_protocol_sha256: Optional[str] = None,
     expected_teacher_checkpoint_sha256: Optional[str] = None,
+    data_loader=None,
+    restore_rng: bool = False,
 ) -> Dict[str, Any]:
     try:
         payload = torch.load(str(Path(path).resolve()), map_location=device, weights_only=False)
@@ -85,4 +129,6 @@ def load_tg_hard_student_checkpoint(
         if state is None:
             raise ValueError("TG hard student checkpoint has no optimizer state")
         optimizer.load_state_dict(state)
+    if restore_rng:
+        _restore_rng_state(payload, data_loader=data_loader)
     return payload

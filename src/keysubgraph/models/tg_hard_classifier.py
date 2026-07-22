@@ -52,6 +52,7 @@ class TGHardClassifierOutput:
     logits: torch.Tensor
     final_representation: torch.Tensor
     neural_representation: torch.Tensor
+    projected_neural_representation: torch.Tensor
     theory_representation: torch.Tensor
     encoded_windows: torch.Tensor
     time_mask: torch.Tensor
@@ -94,6 +95,9 @@ class TGHardSGWClassifier(nn.Module):
             epsilon=self.config.epsilon,
         )
         self.neural_normalization = nn.LayerNorm(192)
+        self.representation_projection = nn.Linear(192, 192)
+        nn.init.eye_(self.representation_projection.weight)
+        nn.init.zeros_(self.representation_projection.bias)
         layers = []
         current = self.config.final_representation_dim
         for hidden in self.config.classifier_hidden_dims:
@@ -190,10 +194,12 @@ class TGHardSGWClassifier(nn.Module):
         if final.shape[1] != self.config.final_representation_dim:
             raise RuntimeError("TG hard fusion did not produce 226 dimensions")
         logits = self.classifier(final)
+        projected = self.representation_projection(neural)
         return TGHardClassifierOutput(
             logits=logits,
             final_representation=final,
             neural_representation=neural,
+            projected_neural_representation=projected,
             theory_representation=theory,
             encoded_windows=encoded,
             time_mask=time_mask,

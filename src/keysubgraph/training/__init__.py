@@ -28,6 +28,14 @@ from .tg_soft_teacher_trainer import (
     run_tg_soft_teacher_epoch,
     train_tg_soft_teacher,
 )
+from .tg_hard_student_trainer import (
+    TGHardStudentTrainingConfig,
+    build_tg_hard_student_optimizer,
+    initialize_student_graph_encoder,
+    run_tg_hard_student_epoch,
+    set_student_graph_encoder_trainable,
+    train_tg_hard_student,
+)
 
 __all__.extend(
     [
@@ -38,5 +46,11 @@ __all__.extend(
         "train_tg_soft_teacher",
         "load_tg_hard_student_checkpoint",
         "save_tg_hard_student_checkpoint",
+        "TGHardStudentTrainingConfig",
+        "build_tg_hard_student_optimizer",
+        "initialize_student_graph_encoder",
+        "run_tg_hard_student_epoch",
+        "set_student_graph_encoder_trainable",
+        "train_tg_hard_student",
     ]
 )
