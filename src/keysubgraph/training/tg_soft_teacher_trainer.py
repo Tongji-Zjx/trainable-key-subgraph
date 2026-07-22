@@ -267,28 +267,42 @@ def run_tg_soft_teacher_epoch(
         totals["laplacian_fidelity"] += float(loss.laplacian_fidelity.detach().cpu()) * count
         totals["gw_identity_upper_bound"] += float(loss.gw_identity_upper_bound.detach().cpu()) * count
         totals["laplacian_operator_error"] += float(output.laplacian_operator_norms.mean().detach().cpu()) * count
-        for name, statistics in (
+        named_statistics = (
             ("node", output.node_score_statistics),
             ("edge", output.edge_score_statistics),
-        ):
+        )
+        # Pack all diagnostic scalars into one transfer. Calling .cpu() for
+        # every scalar separately forces many CUDA synchronizations and is
+        # especially costly for batch_size=1.
+        packed = []
+        for _, statistics in named_statistics:
+            dtype = statistics.total.dtype
+            packed.extend((
+                statistics.total,
+                statistics.squared_total,
+                statistics.minimum,
+                statistics.maximum,
+                statistics.above_half_count.to(dtype=dtype),
+                statistics.entropy_total,
+            ))
+        packed_values = torch.stack(packed).detach().cpu().tolist()
+        for statistics_index, (name, statistics) in enumerate(named_statistics):
             accumulator = score_accumulators[name]
             accumulator["count"] += int(statistics.count)
-            accumulator["total"] += float(statistics.total.detach().cpu())
-            accumulator["squared_total"] += float(
-                statistics.squared_total.detach().cpu()
+            offset = 6 * statistics_index
+            total, squared_total, minimum, maximum, above_half, entropy = (
+                packed_values[offset : offset + 6]
             )
+            accumulator["total"] += float(total)
+            accumulator["squared_total"] += float(squared_total)
             accumulator["minimum"] = min(
-                accumulator["minimum"], float(statistics.minimum.detach().cpu())
+                accumulator["minimum"], float(minimum)
             )
             accumulator["maximum"] = max(
-                accumulator["maximum"], float(statistics.maximum.detach().cpu())
+                accumulator["maximum"], float(maximum)
             )
-            accumulator["above_half_count"] += float(
-                statistics.above_half_count.detach().cpu()
-            )
-            accumulator["entropy_total"] += float(
-                statistics.entropy_total.detach().cpu()
-            )
+            accumulator["above_half_count"] += float(above_half)
+            accumulator["entropy_total"] += float(entropy)
     if sample_count == 0:
         raise ValueError("TG soft-teacher epoch processed no samples")
     metrics = {name: value / sample_count for name, value in totals.items()}

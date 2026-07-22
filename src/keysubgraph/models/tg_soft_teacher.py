@@ -212,7 +212,8 @@ class TGSoftTeacher(nn.Module):
         nonempty = [value.reshape(-1) for value in values if value.numel() > 0]
         if not nonempty:
             raise ValueError("score statistics require at least one valid value")
-        flattened = torch.cat(nonempty, dim=0)
+        # Diagnostics must not retain the full score-selection autograd graph.
+        flattened = torch.cat([value.detach() for value in nonempty], dim=0)
         epsilon = torch.finfo(flattened.dtype).eps
         bounded = flattened.clamp(epsilon, 1.0 - epsilon)
         entropy = -(
