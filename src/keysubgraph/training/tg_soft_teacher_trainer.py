@@ -3,6 +3,7 @@
 from __future__ import absolute_import, division, print_function
 
 import json
+import math
 import os
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -141,7 +142,9 @@ def train_tg_soft_teacher(
         record = {"epoch": epoch, "train": train_metrics, "validation": validation_metrics}
         history.append(record)
         value = _selection_value(validation_metrics, training_config.selection_metric)
-        improved = value > best_value
+        # A one-batch smoke validation may contain one class, making AUROC
+        # unavailable. The first epoch must still create a usable checkpoint.
+        improved = best_epoch == 0 or value > best_value
         if improved:
             best_value = value
             best_epoch = epoch
@@ -166,13 +169,20 @@ def train_tg_soft_teacher(
             save_tg_soft_teacher_checkpoint(output_dir / "best_checkpoint.pt", **checkpoint_kwargs)
         _atomic_json(history_path, history)
         print(
-            "epoch {}/{} train_loss={:.6f} validation_loss={:.6f} validation_balanced_accuracy={:.6f} validation_auc={}".format(
+            "epoch {}/{} train_loss={:.6f} validation_loss={:.6f} "
+            "validation_balanced_accuracy={:.6f} validation_auc={} "
+            "train_node_score={:.4f}+/-{:.4f} "
+            "train_edge_score={:.4f}+/-{:.4f}".format(
                 epoch,
                 training_config.epochs,
                 train_metrics["loss"],
                 validation_metrics["loss"],
                 validation_metrics["balanced_accuracy"],
                 validation_metrics["roc_auc"],
+                train_metrics["node_score_mean"],
+                train_metrics["node_score_std"],
+                train_metrics["edge_score_mean"],
+                train_metrics["edge_score_std"],
             ),
             flush=True,
         )
@@ -215,6 +225,18 @@ def run_tg_soft_teacher_epoch(
     all_labels = []
     all_predictions = []
     all_probabilities = []
+    score_accumulators = {
+        "node": {
+            "count": 0, "total": 0.0, "squared_total": 0.0,
+            "minimum": float("inf"), "maximum": float("-inf"),
+            "above_half_count": 0.0, "entropy_total": 0.0,
+        },
+        "edge": {
+            "count": 0, "total": 0.0, "squared_total": 0.0,
+            "minimum": float("inf"), "maximum": float("-inf"),
+            "above_half_count": 0.0, "entropy_total": 0.0,
+        },
+    }
     for batch_index, cpu_batch in enumerate(data_loader):
         if max_batches is not None and batch_index >= max_batches:
             break
@@ -245,6 +267,28 @@ def run_tg_soft_teacher_epoch(
         totals["laplacian_fidelity"] += float(loss.laplacian_fidelity.detach().cpu()) * count
         totals["gw_identity_upper_bound"] += float(loss.gw_identity_upper_bound.detach().cpu()) * count
         totals["laplacian_operator_error"] += float(output.laplacian_operator_norms.mean().detach().cpu()) * count
+        for name, statistics in (
+            ("node", output.node_score_statistics),
+            ("edge", output.edge_score_statistics),
+        ):
+            accumulator = score_accumulators[name]
+            accumulator["count"] += int(statistics.count)
+            accumulator["total"] += float(statistics.total.detach().cpu())
+            accumulator["squared_total"] += float(
+                statistics.squared_total.detach().cpu()
+            )
+            accumulator["minimum"] = min(
+                accumulator["minimum"], float(statistics.minimum.detach().cpu())
+            )
+            accumulator["maximum"] = max(
+                accumulator["maximum"], float(statistics.maximum.detach().cpu())
+            )
+            accumulator["above_half_count"] += float(
+                statistics.above_half_count.detach().cpu()
+            )
+            accumulator["entropy_total"] += float(
+                statistics.entropy_total.detach().cpu()
+            )
     if sample_count == 0:
         raise ValueError("TG soft-teacher epoch processed no samples")
     metrics = {name: value / sample_count for name, value in totals.items()}
@@ -264,6 +308,29 @@ def run_tg_soft_teacher_epoch(
         }
     )
     metrics.update(_classification_metrics(all_labels, all_predictions, all_probabilities))
+    for name, accumulator in score_accumulators.items():
+        score_count = accumulator["count"]
+        if score_count < 1:
+            raise ValueError("TG soft-teacher epoch has no {} scores".format(name))
+        score_mean = accumulator["total"] / float(score_count)
+        score_variance = max(
+            0.0,
+            accumulator["squared_total"] / float(score_count)
+            - score_mean * score_mean,
+        )
+        metrics.update({
+            "{}_score_count".format(name): score_count,
+            "{}_score_mean".format(name): score_mean,
+            "{}_score_std".format(name): math.sqrt(score_variance),
+            "{}_score_min".format(name): accumulator["minimum"],
+            "{}_score_max".format(name): accumulator["maximum"],
+            "{}_score_fraction_ge_0_5".format(name): (
+                accumulator["above_half_count"] / float(score_count)
+            ),
+            "{}_score_entropy".format(name): (
+                accumulator["entropy_total"] / float(score_count)
+            ),
+        })
     return metrics
 
 

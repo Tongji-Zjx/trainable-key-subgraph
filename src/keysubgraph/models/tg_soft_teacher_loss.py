@@ -11,6 +11,28 @@ from torch.nn import functional as F
 from .tg_soft_teacher import TGSoftTeacherOutput
 
 
+TG_SOFT_TEACHER_ABLATIONS = (
+    "classification_only",
+    "classification_budget",
+    "classification_budget_laplacian",
+    "full",
+)
+
+
+def tg_soft_teacher_ablation_weights(name: str):
+    """Return the fixed minimal nested ablation weights."""
+
+    presets = {
+        "classification_only": (0.0, 0.0, 0.0),
+        "classification_budget": (0.10, 0.0, 0.0),
+        "classification_budget_laplacian": (0.10, 0.50, 0.0),
+        "full": (0.10, 0.50, 0.10),
+    }
+    if name not in presets:
+        raise ValueError("unsupported TG soft-teacher ablation")
+    return presets[name]
+
+
 @dataclass(frozen=True)
 class TGSoftTeacherLossConfig:
     classification_weight: float = 1.0
@@ -92,7 +114,19 @@ def compute_tg_soft_teacher_loss(
     labels = labels.to(device=output.logits.device, dtype=torch.long)
     if class_weights is not None:
         class_weights = class_weights.to(device=output.logits.device, dtype=output.logits.dtype)
-    classification = F.cross_entropy(output.logits, labels, weight=class_weights)
+    per_sample_classification = F.cross_entropy(
+        output.logits, labels, reduction="none"
+    )
+    if class_weights is None:
+        classification = per_sample_classification.mean()
+    else:
+        # Dataset-balanced weights have expectation one over the training
+        # cohort. Multiplying before the ordinary batch mean preserves their
+        # effect for list batches of size one; PyTorch's weighted mean would
+        # divide by the sole target weight and cancel it completely.
+        classification = (
+            per_sample_classification * class_weights.index_select(0, labels)
+        ).mean()
     node_budget = (output.node_retention_ratios - config.target_node_ratio).abs().mean()
     edge_budget = (output.edge_retention_ratios - config.target_edge_ratio).abs().mean()
     budget = node_budget + edge_budget
@@ -107,13 +141,18 @@ def compute_tg_soft_teacher_loss(
     gw_weight = _warmup(
         config.gw_identity_max_weight, epoch, config.theory_warmup_epochs
     )
-    total = (
-        config.classification_weight * classification
-        + config.budget_weight * budget
-        + laplacian_weight * laplacian
-        + gw_weight * gw_identity
-        + config.supervised_contrastive_weight * contrastive
-    )
+    # Build only active branches into the autograd objective. Besides making
+    # the ablations exact, this prevents a nominal ``0 * diagnostic`` branch
+    # from participating in backward through expensive spectral operations.
+    total = config.classification_weight * classification
+    if config.budget_weight > 0.0:
+        total = total + config.budget_weight * budget
+    if laplacian_weight > 0.0:
+        total = total + laplacian_weight * laplacian
+    if gw_weight > 0.0:
+        total = total + gw_weight * gw_identity
+    if config.supervised_contrastive_weight > 0.0:
+        total = total + config.supervised_contrastive_weight * contrastive
     return TGSoftTeacherLoss(
         total,
         classification,
@@ -126,4 +165,3 @@ def compute_tg_soft_teacher_loss(
         laplacian_weight,
         gw_weight,
     )
-

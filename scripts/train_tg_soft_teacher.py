@@ -20,12 +20,15 @@ from keysubgraph.data.data_protocol import validate_data_protocol  # noqa: E402
 from keysubgraph.data.data_split import file_sha256  # noqa: E402
 from keysubgraph.data.graph_dataset import GraphSequenceDataset, create_data_loader  # noqa: E402
 from keysubgraph.models import (  # noqa: E402
+    TG_SOFT_TEACHER_ABLATIONS,
     TGSoftTeacher,
     TGSoftTeacherConfig,
     TGSoftTeacherLossConfig,
+    tg_soft_teacher_ablation_weights,
 )
 from keysubgraph.training import (  # noqa: E402
     TGSoftTeacherTrainingConfig,
+    set_reproducible_seed,
     train_tg_soft_teacher,
 )
 
@@ -50,6 +53,12 @@ def parse_args():
     parser.add_argument("--lambda-laplacian", type=float, default=0.50)
     parser.add_argument("--lambda-gw-identity", type=float, default=0.10)
     parser.add_argument("--lambda-supcon", type=float, default=0.0)
+    parser.add_argument(
+        "--ablation",
+        choices=("custom",) + TG_SOFT_TEACHER_ABLATIONS,
+        default="custom",
+        help="fixed nested loss ablation; custom keeps the explicit lambda arguments",
+    )
     parser.add_argument("--theory-warmup-epochs", type=int, default=15)
     parser.add_argument("--laplacian-eta", type=float, default=1.0e-3)
     parser.add_argument("--diffusion-time", type=float, default=1.0)
@@ -98,16 +107,26 @@ def main():
         num_workers=args.num_workers,
         pin_memory=device.type == "cuda",
     )
+    # The trainer receives an already constructed module, so seed before
+    # construction; seeding only inside the trainer is too late for weights.
+    set_reproducible_seed(args.seed)
     model = TGSoftTeacher(
         TGSoftTeacherConfig(
             laplacian_eta=args.laplacian_eta,
             diffusion_time=args.diffusion_time,
         )
     )
+    budget_weight = args.lambda_budget
+    laplacian_weight = args.lambda_laplacian
+    gw_weight = args.lambda_gw_identity
+    if args.ablation != "custom":
+        budget_weight, laplacian_weight, gw_weight = (
+            tg_soft_teacher_ablation_weights(args.ablation)
+        )
     loss_config = TGSoftTeacherLossConfig(
-        budget_weight=args.lambda_budget,
-        laplacian_max_weight=args.lambda_laplacian,
-        gw_identity_max_weight=args.lambda_gw_identity,
+        budget_weight=budget_weight,
+        laplacian_max_weight=laplacian_weight,
+        gw_identity_max_weight=gw_weight,
         supervised_contrastive_weight=args.lambda_supcon,
         target_node_ratio=args.target_node_ratio,
         target_edge_ratio=args.target_edge_ratio,
@@ -153,6 +172,14 @@ def main():
                 torch.cuda.max_memory_allocated(device) / (1024.0 * 1024.0)
                 if device.type == "cuda" else None
             ),
+            "ablation": args.ablation,
+            "loss_weights": {
+                "classification": loss_config.classification_weight,
+                "budget": loss_config.budget_weight,
+                "laplacian": loss_config.laplacian_max_weight,
+                "gw_identity": loss_config.gw_identity_max_weight,
+                "supervised_contrastive": loss_config.supervised_contrastive_weight,
+            },
         }
     )
     print(json.dumps(printable, ensure_ascii=False, indent=2, sort_keys=True))

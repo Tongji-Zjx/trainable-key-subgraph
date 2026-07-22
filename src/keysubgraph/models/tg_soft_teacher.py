@@ -72,6 +72,17 @@ class TGSoftTimepointOutput:
 
 
 @dataclass(frozen=True)
+class TGScoreStatistics:
+    count: int
+    total: torch.Tensor
+    squared_total: torch.Tensor
+    minimum: torch.Tensor
+    maximum: torch.Tensor
+    above_half_count: torch.Tensor
+    entropy_total: torch.Tensor
+
+
+@dataclass(frozen=True)
 class TGSoftTeacherOutput:
     logits: torch.Tensor
     representation: torch.Tensor
@@ -85,6 +96,8 @@ class TGSoftTeacherOutput:
     laplacian_operator_norms: torch.Tensor
     gw_identity_upper_bounds_squared: torch.Tensor
     gw_identity_upper_bounds: torch.Tensor
+    node_score_statistics: TGScoreStatistics
+    edge_score_statistics: TGScoreStatistics
     selections: Optional[Tuple[Tuple[TGSoftTimepointOutput, ...], ...]]
 
 
@@ -194,6 +207,28 @@ class TGSoftTeacher(nn.Module):
             gw_result,
         )
 
+    @staticmethod
+    def _score_statistics(values) -> TGScoreStatistics:
+        nonempty = [value.reshape(-1) for value in values if value.numel() > 0]
+        if not nonempty:
+            raise ValueError("score statistics require at least one valid value")
+        flattened = torch.cat(nonempty, dim=0)
+        epsilon = torch.finfo(flattened.dtype).eps
+        bounded = flattened.clamp(epsilon, 1.0 - epsilon)
+        entropy = -(
+            bounded * bounded.log()
+            + (1.0 - bounded) * (1.0 - bounded).log()
+        )
+        return TGScoreStatistics(
+            count=int(flattened.numel()),
+            total=flattened.sum(),
+            squared_total=flattened.square().sum(),
+            minimum=flattened.min(),
+            maximum=flattened.max(),
+            above_half_count=(flattened >= 0.5).sum(),
+            entropy_total=entropy.sum(),
+        )
+
     def score_timepoint(self, sample, time_index: int):
         """Frozen-export interface shared with the hard candidate generator."""
 
@@ -211,6 +246,7 @@ class TGSoftTeacher(nn.Module):
         node_ratios, edge_ratios, sample_indices = [], [], []
         lap_train, lap_fro, lap_operator = [], [], []
         gw_squared, gw_distance = [], []
+        node_score_values, edge_score_values = [], []
         for sample_index, sample in enumerate(batch):
             window_embeddings = []
             sample_outputs = []
@@ -227,6 +263,12 @@ class TGSoftTeacher(nn.Module):
                 lap_operator.append(lap_result.operator_norm)
                 gw_squared.append(gw_result.squared_upper_bound)
                 gw_distance.append(gw_result.distance_upper_bound)
+                node_score_values.append(output.node_scores)
+                upper_edge_mask = torch.triu(
+                    sample.edge_mask[time_index], diagonal=1
+                )
+                if bool(upper_edge_mask.any()):
+                    edge_score_values.append(output.edge_scores[upper_edge_mask])
                 if return_details:
                     sample_outputs.append(output)
             sequences.append(torch.stack(window_embeddings, dim=0))
@@ -247,5 +289,7 @@ class TGSoftTeacher(nn.Module):
             laplacian_operator_norms=torch.stack(lap_operator),
             gw_identity_upper_bounds_squared=torch.stack(gw_squared),
             gw_identity_upper_bounds=torch.stack(gw_distance),
+            node_score_statistics=self._score_statistics(node_score_values),
+            edge_score_statistics=self._score_statistics(edge_score_values),
             selections=tuple(nested) if return_details else None,
         )

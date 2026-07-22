@@ -15,12 +15,15 @@ from .tg_soft_teacher import (
     TGSoftTeacher,
     TGSoftTeacherConfig,
     TGSoftTeacherOutput,
+    TGScoreStatistics,
     TGSoftTimepointOutput,
 )
 from .tg_soft_teacher_loss import (
     TGSoftTeacherLoss,
     TGSoftTeacherLossConfig,
+    TG_SOFT_TEACHER_ABLATIONS,
     compute_tg_soft_teacher_loss,
+    tg_soft_teacher_ablation_weights,
 )
 from .tg_hard_classifier import (
     TGHardClassifierConfig,
@@ -51,9 +54,11 @@ __all__ = [
     "TGSoftTeacher",
     "TGSoftTeacherConfig",
     "TGSoftTeacherOutput",
+    "TGScoreStatistics",
     "TGSoftTimepointOutput",
     "TGSoftTeacherLoss",
     "TGSoftTeacherLossConfig",
+    "TG_SOFT_TEACHER_ABLATIONS",
     "TGHardClassifierConfig",
     "TGHardClassifierOutput",
     "TGHardSGWClassifier",
@@ -61,4 +66,5 @@ __all__ = [
     "TGHardStudentLossConfig",
     "compute_tg_hard_student_loss",
     "compute_tg_soft_teacher_loss",
+    "tg_soft_teacher_ablation_weights",
 ]

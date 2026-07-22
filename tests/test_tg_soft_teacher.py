@@ -12,6 +12,7 @@ from keysubgraph.models import (
     TGSoftTeacherConfig,
     TGSoftTeacherLossConfig,
     compute_tg_soft_teacher_loss,
+    tg_soft_teacher_ablation_weights,
 )
 from keysubgraph.training.tg_soft_teacher_trainer import (
     TGSoftTeacherTrainingConfig,
@@ -111,6 +112,68 @@ class TGSoftTeacherTest(unittest.TestCase):
             )
             self.assertGreater(gradient, 0.0)
 
+    def test_batch_size_one_preserves_dataset_class_weight(self):
+        batch = GraphSequenceBatch((_sample("minority", 1, 2),))
+        output = self.model(batch)
+        config = TGSoftTeacherLossConfig(
+            budget_weight=0.0,
+            laplacian_max_weight=0.0,
+            gw_identity_max_weight=0.0,
+            supervised_contrastive_weight=0.0,
+        )
+        unweighted = compute_tg_soft_teacher_loss(
+            output, batch.labels, epoch=1, config=config
+        )
+        weighted = compute_tg_soft_teacher_loss(
+            output,
+            batch.labels,
+            epoch=1,
+            config=config,
+            class_weights=torch.tensor([1.0, 3.0]),
+        )
+        self.assertTrue(
+            torch.allclose(weighted.classification, 3.0 * unweighted.classification)
+        )
+
+    def test_score_distribution_matches_unpadded_nodes_and_real_edges(self):
+        output = self.model(self.batch, return_details=True)
+        node_values = torch.cat(
+            [item.node_scores for sample in output.selections for item in sample]
+        )
+        edge_values = []
+        for sample, selections in zip(self.batch.samples, output.selections):
+            for time_index, item in enumerate(selections):
+                upper = torch.triu(sample.edge_mask[time_index], diagonal=1)
+                edge_values.append(item.edge_scores[upper])
+        edge_values = torch.cat(edge_values)
+        for values, statistics in (
+            (node_values, output.node_score_statistics),
+            (edge_values, output.edge_score_statistics),
+        ):
+            self.assertEqual(statistics.count, values.numel())
+            self.assertTrue(torch.allclose(statistics.total, values.sum()))
+            self.assertTrue(torch.allclose(statistics.squared_total, values.square().sum()))
+            self.assertTrue(torch.allclose(statistics.minimum, values.min()))
+            self.assertTrue(torch.allclose(statistics.maximum, values.max()))
+
+    def test_minimal_ablation_presets_are_nested(self):
+        self.assertEqual(
+            tg_soft_teacher_ablation_weights("classification_only"),
+            (0.0, 0.0, 0.0),
+        )
+        self.assertEqual(
+            tg_soft_teacher_ablation_weights("classification_budget"),
+            (0.10, 0.0, 0.0),
+        )
+        self.assertEqual(
+            tg_soft_teacher_ablation_weights("classification_budget_laplacian"),
+            (0.10, 0.50, 0.0),
+        )
+        self.assertEqual(
+            tg_soft_teacher_ablation_weights("full"),
+            (0.10, 0.50, 0.10),
+        )
+
     def test_epoch_runner_updates_parameters_and_reports_named_fidelity(self):
         before = self.model.node_scorer.network[0].weight.detach().clone()
         optimizer = torch.optim.Adam(self.model.parameters(), lr=1.0e-3)
@@ -124,6 +187,10 @@ class TGSoftTeacherTest(unittest.TestCase):
         )
         self.assertEqual(metrics["sample_count"], 2)
         self.assertIn("gw_identity_upper_bound", metrics)
+        self.assertIn("node_score_std", metrics)
+        self.assertIn("edge_score_entropy", metrics)
+        self.assertGreater(metrics["node_score_count"], 0)
+        self.assertGreater(metrics["edge_score_count"], 0)
         self.assertIsNotNone(metrics["mean_gradient_norm"])
         self.assertFalse(torch.allclose(before, self.model.node_scorer.network[0].weight))
 

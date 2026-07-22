@@ -32,6 +32,7 @@ from keysubgraph.models import (  # noqa: E402
 from keysubgraph.training import (  # noqa: E402
     TGHardStudentTrainingConfig,
     load_tg_soft_teacher_checkpoint,
+    set_reproducible_seed,
     train_tg_hard_student,
 )
 
@@ -109,6 +110,7 @@ def main():
     validation_loader = create_tg_hard_student_loader(
         datasets["validation"], args.batch_size, args.seed, args.num_workers, shuffle=False
     )
+    set_reproducible_seed(args.seed)
     teacher_payload = _load_payload(args.teacher_checkpoint)
     teacher = TGSoftTeacher(TGSoftTeacherConfig(**teacher_payload["model_config"]))
     load_tg_soft_teacher_checkpoint(
