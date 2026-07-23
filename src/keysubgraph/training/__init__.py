@@ -36,6 +36,12 @@ from .tg_hard_student_trainer import (
     set_student_graph_encoder_trainable,
     train_tg_hard_student,
 )
+from .full_graph_classifier_trainer import (
+    FullGraphTrainingConfig,
+    load_full_graph_classifier_checkpoint,
+    run_full_graph_classifier_epoch,
+    train_full_graph_classifier,
+)
 
 __all__.extend(
     [
@@ -52,5 +58,9 @@ __all__.extend(
         "run_tg_hard_student_epoch",
         "set_student_graph_encoder_trainable",
         "train_tg_hard_student",
+        "FullGraphTrainingConfig",
+        "load_full_graph_classifier_checkpoint",
+        "run_full_graph_classifier_epoch",
+        "train_full_graph_classifier",
     ]
 )

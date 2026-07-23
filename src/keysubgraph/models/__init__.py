@@ -35,6 +35,18 @@ from .tg_hard_student_loss import (
     TGHardStudentLossConfig,
     compute_tg_hard_student_loss,
 )
+from .full_graph_classifier import (
+    FULL_GRAPH_ENCODERS,
+    FullGraphClassifierConfig,
+    FullGraphClassifierOutput,
+    FullGraphSequenceClassifier,
+    PackedBiGRUEncoder,
+    PrototypeCodebook,
+    SignedEdgeGatedGraphEncoder,
+    SignedGatedBiGRUPrototypeEncoder,
+    SignedGNNTCNFullGraphEncoder,
+    SymmetricSignedEdgeGatedLayer,
+)
 
 __all__ = [
     "BatchModelOutput",
@@ -67,4 +79,14 @@ __all__ = [
     "compute_tg_hard_student_loss",
     "compute_tg_soft_teacher_loss",
     "tg_soft_teacher_ablation_weights",
+    "FULL_GRAPH_ENCODERS",
+    "FullGraphClassifierConfig",
+    "FullGraphClassifierOutput",
+    "FullGraphSequenceClassifier",
+    "PackedBiGRUEncoder",
+    "PrototypeCodebook",
+    "SignedEdgeGatedGraphEncoder",
+    "SignedGatedBiGRUPrototypeEncoder",
+    "SignedGNNTCNFullGraphEncoder",
+    "SymmetricSignedEdgeGatedLayer",
 ]
