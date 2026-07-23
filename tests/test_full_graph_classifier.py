@@ -80,7 +80,14 @@ class FullGraphClassifierTest(unittest.TestCase):
 
     def test_proto_encoder_outputs_normalized_usage_and_all_modules_receive_gradients(self):
         model = FullGraphSequenceClassifier(_config("sgg_bigru_proto"))
+        normalized_windows = []
+        handle = model.encoder.graph_pooling_normalization.register_forward_hook(
+            lambda module, inputs, output: normalized_windows.append(
+                output.detach()
+            )
+        )
         output = model(self.batch)
+        handle.remove()
         self.assertEqual(tuple(output.logits.shape), (2, 2))
         self.assertEqual(tuple(output.prototype_attention.shape), (2, 16))
         self.assertTrue(
@@ -90,6 +97,12 @@ class FullGraphClassifierTest(unittest.TestCase):
                 atol=1.0e-6,
             )
         )
+        self.assertTrue(normalized_windows)
+        for window in normalized_windows:
+            self.assertAlmostEqual(float(window.mean()), 0.0, places=5)
+            self.assertAlmostEqual(
+                float(window.var(unbiased=False)), 1.0, delta=5.0e-4
+            )
         torch.nn.functional.cross_entropy(output.logits, self.batch.labels).backward()
         modules = (
             model.encoder.graph_encoder,

@@ -113,7 +113,15 @@ def _collapse_flags(layer_summaries):
             reasons.append("mean_feature_variance<1e-6")
         if active is not None and active < 0.10:
             reasons.append("active_feature_fraction<0.10")
-        if cosine is not None and cosine > 0.995:
+        # Pairwise cosine is uninformative for a one-dimensional positive
+        # scalar (for example a gate or class-1 probability): it is
+        # identically one regardless of scalar variance.
+        if (
+            values.get("feature_dim") is not None
+            and values["feature_dim"] > 1
+            and cosine is not None
+            and cosine > 0.995
+        ):
             reasons.append("mean_pairwise_cosine>0.995")
         if reasons:
             flags.append({"layer": name, "heuristic_reasons": reasons})

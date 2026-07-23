@@ -40,6 +40,7 @@ class FullGraphTrainingConfig:
     seed: int = 42
     max_train_batches: Optional[int] = None
     max_validation_batches: Optional[int] = None
+    memorization_mode: bool = False
 
     def __post_init__(self) -> None:
         if self.epochs < 1:
@@ -57,6 +58,11 @@ class FullGraphTrainingConfig:
         for value in (self.max_train_batches, self.max_validation_batches):
             if value is not None and value < 1:
                 raise ValueError("batch limits must be positive")
+        if self.memorization_mode:
+            if self.weight_decay != 0.0:
+                raise ValueError("memorization mode requires zero weight decay")
+            if self.early_stopping_patience != 0:
+                raise ValueError("memorization mode disables early stopping")
 
 
 def _atomic_json(path: Path, payload: Any) -> None:
@@ -90,6 +96,10 @@ def _classification_metrics(
 ) -> Dict[str, Any]:
     unique = set(labels)
     accuracy = float(accuracy_score(labels, predictions))
+    probability_mean = sum(probabilities) / float(len(probabilities))
+    probability_variance = sum(
+        (value - probability_mean) ** 2 for value in probabilities
+    ) / float(len(probabilities))
     return {
         "sample_count": len(labels),
         "class_counts": {
@@ -111,6 +121,15 @@ def _classification_metrics(
         "confusion_matrix": confusion_matrix(
             labels, predictions, labels=[0, 1]
         ).astype(int).tolist(),
+        "positive_probability": {
+            "minimum": min(probabilities),
+            "maximum": max(probabilities),
+            "mean": probability_mean,
+            "standard_deviation": math.sqrt(probability_variance),
+        },
+        "predicted_positive_ratio": (
+            sum(predictions) / float(len(predictions))
+        ),
     }
 
 
@@ -316,6 +335,28 @@ def train_full_graph_classifier(
     history_path = output_dir / "history.json"
     if history_path.exists():
         raise FileExistsError("full-graph training output already exists")
+    if training_config.memorization_mode:
+        if model.config.encoder_type != "signed_gnn_tcn":
+            raise ValueError(
+                "memorization mode is restricted to the controlled baseline"
+            )
+        dropout_values = (
+            model.config.baseline_dropout,
+            model.config.gated_gnn_dropout,
+            model.config.classifier_dropout,
+        )
+        if any(value != 0.0 for value in dropout_values):
+            raise ValueError("memorization mode requires all dropout to be zero")
+        train_dataset = getattr(train_loader, "dataset", None)
+        replay_dataset = getattr(validation_loader, "dataset", None)
+        if (
+            train_dataset is not None
+            and replay_dataset is not None
+            and train_dataset is not replay_dataset
+        ):
+            raise ValueError(
+                "memorization mode must replay the identical training dataset"
+            )
     set_reproducible_seed(training_config.seed)
     model.to(device)
     class_weights = class_weights_from_labels(train_labels)
@@ -347,7 +388,7 @@ def train_full_graph_classifier(
             gradient_clip_norm=training_config.gradient_clip_norm,
             max_batches=training_config.max_train_batches,
         )
-        validation_metrics = run_full_graph_classifier_epoch(
+        evaluation_metrics = run_full_graph_classifier_epoch(
             model,
             validation_loader,
             device,
@@ -356,16 +397,21 @@ def train_full_graph_classifier(
             gradient_clip_norm=training_config.gradient_clip_norm,
             max_batches=training_config.max_validation_batches,
         )
-        scheduler.step(validation_metrics["unweighted_log_loss"])
+        scheduler.step(evaluation_metrics["unweighted_log_loss"])
         learning_rate = float(optimizer.param_groups[0]["lr"])
+        evaluation_key = (
+            "memorization_train_replay"
+            if training_config.memorization_mode
+            else "validation"
+        )
         record = {
             "epoch": epoch,
             "learning_rate": learning_rate,
             "train": train_metrics,
-            "validation": validation_metrics,
+            evaluation_key: evaluation_metrics,
         }
         history.append(record)
-        candidate_key = _selection_key(validation_metrics)
+        candidate_key = _selection_key(evaluation_metrics)
         improved = best_epoch == 0 or candidate_key > best_key
         if improved:
             best_epoch = epoch
@@ -393,16 +439,23 @@ def train_full_graph_classifier(
         _atomic_json(history_path, history)
         print(
             "epoch {}/{} train_loss={:.6f} train_ba={:.6f} train_auc={} "
-            "validation_loss={:.6f} validation_ba={:.6f} validation_auc={} "
-            "lr={:.8f}".format(
+            "{}_loss={:.6f} {}_ba={:.6f} {}_auc={} "
+            "{}_probability_std={:.8f} lr={:.8f}".format(
                 epoch,
                 training_config.epochs,
                 train_metrics["unweighted_log_loss"],
                 train_metrics["balanced_accuracy"],
                 train_metrics["roc_auc"],
-                validation_metrics["unweighted_log_loss"],
-                validation_metrics["balanced_accuracy"],
-                validation_metrics["roc_auc"],
+                evaluation_key,
+                evaluation_metrics["unweighted_log_loss"],
+                evaluation_key,
+                evaluation_metrics["balanced_accuracy"],
+                evaluation_key,
+                evaluation_metrics["roc_auc"],
+                evaluation_key,
+                evaluation_metrics["positive_probability"][
+                    "standard_deviation"
+                ],
                 learning_rate,
             ),
             flush=True,
@@ -428,7 +481,7 @@ def train_full_graph_classifier(
         optimizer=None,
         max_batches=training_config.max_train_batches,
     )
-    best_validation = run_full_graph_classifier_epoch(
+    best_evaluation = run_full_graph_classifier_epoch(
         model,
         validation_loader,
         device,
@@ -436,15 +489,26 @@ def train_full_graph_classifier(
         optimizer=None,
         max_batches=training_config.max_validation_batches,
     )
+    evaluation_key = (
+        "memorization_train_replay"
+        if training_config.memorization_mode
+        else "validation"
+    )
     evaluation = {
+        "diagnostic_only": bool(training_config.memorization_mode),
+        "run_mode": (
+            "full_training_set_memorization"
+            if training_config.memorization_mode
+            else "controlled_validation"
+        ),
         "best_epoch": best_epoch,
         "selection": {
-            "primary": "validation_roc_auc",
-            "tie_breaker": "validation_unweighted_log_loss",
+            "primary": "{}_roc_auc".format(evaluation_key),
+            "tie_breaker": "{}_unweighted_log_loss".format(evaluation_key),
             "value": [best_key[0], -best_key[1]],
         },
         "train": best_train,
-        "validation": best_validation,
+        evaluation_key: best_evaluation,
     }
     _atomic_json(output_dir / "best_evaluation.json", evaluation)
     return {
@@ -455,4 +519,6 @@ def train_full_graph_classifier(
         "best_epoch": best_epoch,
         "epochs_completed": len(history),
         "elapsed_seconds": time.perf_counter() - started,
+        "diagnostic_only": bool(training_config.memorization_mode),
+        "run_mode": evaluation["run_mode"],
     }

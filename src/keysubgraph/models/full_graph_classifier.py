@@ -379,6 +379,12 @@ class SignedGatedBiGRUPrototypeEncoder(nn.Module):
             dropout=config.gated_gnn_dropout,
             epsilon=config.epsilon,
         )
+        # The verified Scheme-A design normalizes every pooled window before
+        # it enters the recurrent encoder.  Keep this separate from the
+        # generic pooling module so the controlled baseline remains unchanged.
+        self.graph_pooling_normalization = nn.LayerNorm(
+            config.graph_embedding_dim
+        )
         self.temporal_encoder = PackedBiGRUEncoder(
             config.graph_embedding_dim,
             config.bigru_hidden_per_direction,
@@ -405,7 +411,8 @@ class SignedGatedBiGRUPrototypeEncoder(nn.Module):
                     adjacency,
                     features.edge_mask,
                 )
-                windows.append(self.graph_pooling(hidden))
+                pooled = self.graph_pooling(hidden)
+                windows.append(self.graph_pooling_normalization(pooled))
             sequences.append(torch.stack(windows, dim=0))
         sequence_representation, lengths = self.temporal_encoder(tuple(sequences))
         representation, attention = self.prototype_codebook(sequence_representation)

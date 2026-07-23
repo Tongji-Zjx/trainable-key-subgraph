@@ -114,6 +114,90 @@ class FullGraphTrainingTest(unittest.TestCase):
                 evaluation["selection"]["primary"], "validation_roc_auc"
             )
 
+    def test_baseline_memorization_mode_is_explicit_and_replays_train(self):
+        model = FullGraphSequenceClassifier(
+            FullGraphClassifierConfig(
+                encoder_type="signed_gnn_tcn",
+                signed_gnn_layers=1,
+                classifier_hidden_dims=(8,),
+                baseline_dropout=0.0,
+                gated_gnn_dropout=0.0,
+                classifier_dropout=0.0,
+            )
+        )
+        loader = _Loader(self.batch)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            protocol = root / "protocol.json"
+            protocol.write_text("{}", encoding="utf-8")
+            result = train_full_graph_classifier(
+                model,
+                loader,
+                loader,
+                [0, 1],
+                torch.device("cpu"),
+                FullGraphTrainingConfig(
+                    epochs=1,
+                    weight_decay=0.0,
+                    early_stopping_patience=0,
+                    scheduler_patience=2,
+                    seed=82,
+                    memorization_mode=True,
+                ),
+                root / "run",
+                protocol,
+                "test-sha",
+            )
+            self.assertTrue(result["diagnostic_only"])
+            history = json.loads(result["history"].read_text(encoding="utf-8"))
+            self.assertIn("memorization_train_replay", history[0])
+            self.assertNotIn("validation", history[0])
+            replay = history[0]["memorization_train_replay"]
+            self.assertIn("positive_probability", replay)
+            evaluation = json.loads(
+                result["best_evaluation"].read_text(encoding="utf-8")
+            )
+            self.assertTrue(evaluation["diagnostic_only"])
+            self.assertEqual(
+                evaluation["selection"]["primary"],
+                "memorization_train_replay_roc_auc",
+            )
+
+    def test_memorization_mode_rejects_regularized_or_scheme_a_models(self):
+        with self.assertRaisesRegex(ValueError, "zero weight decay"):
+            FullGraphTrainingConfig(memorization_mode=True)
+        scheme_a = FullGraphSequenceClassifier(
+            FullGraphClassifierConfig(
+                encoder_type="sgg_bigru_proto",
+                signed_gnn_layers=1,
+                classifier_hidden_dims=(8,),
+                baseline_dropout=0.0,
+                gated_gnn_dropout=0.0,
+                classifier_dropout=0.0,
+            )
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            protocol = root / "protocol.json"
+            protocol.write_text("{}", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "controlled baseline"):
+                train_full_graph_classifier(
+                    scheme_a,
+                    _Loader(self.batch),
+                    _Loader(self.batch),
+                    [0, 1],
+                    torch.device("cpu"),
+                    FullGraphTrainingConfig(
+                        epochs=1,
+                        weight_decay=0.0,
+                        early_stopping_patience=0,
+                        memorization_mode=True,
+                    ),
+                    root / "run",
+                    protocol,
+                    "test-sha",
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

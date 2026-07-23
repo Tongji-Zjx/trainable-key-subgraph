@@ -58,6 +58,14 @@ def parse_args():
     parser.add_argument("--baseline-dropout", type=float, default=0.2)
     parser.add_argument("--gated-gnn-dropout", type=float, default=0.15)
     parser.add_argument("--classifier-dropout", type=float, default=0.2)
+    parser.add_argument(
+        "--memorization-mode",
+        action="store_true",
+        help=(
+            "diagnostic only: train and select the signed-GNN+TCN baseline "
+            "on the complete training partition with regularization disabled"
+        ),
+    )
     parser.add_argument("--smoke", action="store_true")
     return parser.parse_args()
 
@@ -69,6 +77,12 @@ def main():
         raise ValueError("full-graph comparison requires the strict_theory protocol")
     if protocol.get("experiment_mode") == "all_samples_exploratory":
         raise ValueError("all-sample exploratory data cannot estimate validation performance")
+    if args.memorization_mode and args.encoder_type != "signed_gnn_tcn":
+        raise ValueError(
+            "memorization mode is restricted to encoder-type signed_gnn_tcn"
+        )
+    if args.memorization_mode and args.smoke:
+        raise ValueError("memorization mode must scan the complete training set")
     paths = protocol["paths"]
     dataset_arguments = (
         PROJECT_ROOT / paths["dataset_root"],
@@ -80,10 +94,14 @@ def main():
         "train",
         protocol["edge_presence_threshold"]
     )
-    validation_dataset = GraphSequenceDataset(
-        *dataset_arguments,
-        "validation",
-        protocol["edge_presence_threshold"]
+    validation_dataset = (
+        train_dataset
+        if args.memorization_mode
+        else GraphSequenceDataset(
+            *dataset_arguments,
+            "validation",
+            protocol["edge_presence_threshold"]
+        )
     )
     device = torch.device(
         "cuda"
@@ -104,29 +122,76 @@ def main():
         args.batch_size,
         seed=args.seed,
         num_workers=args.num_workers,
+        shuffle=False,
         pin_memory=device.type == "cuda",
     )
+    effective_weight_decay = 0.0 if args.memorization_mode else args.weight_decay
+    effective_early_stopping = (
+        0 if args.memorization_mode else args.early_stopping_patience
+    )
+    effective_scheduler_patience = (
+        args.epochs + 1
+        if args.memorization_mode
+        else args.scheduler_patience
+    )
+    effective_baseline_dropout = (
+        0.0 if args.memorization_mode else args.baseline_dropout
+    )
+    effective_gated_dropout = (
+        0.0 if args.memorization_mode else args.gated_gnn_dropout
+    )
+    effective_classifier_dropout = (
+        0.0 if args.memorization_mode else args.classifier_dropout
+    )
+    if args.memorization_mode:
+        class_counts = {
+            str(label): sum(
+                int(item.label) == label for item in train_dataset.assignments
+            )
+            for label in (0, 1)
+        }
+        print(
+            json.dumps(
+                {
+                    "diagnostic_only": True,
+                    "run_mode": "full_training_set_memorization",
+                    "training_sample_count": len(train_dataset),
+                    "class_counts": class_counts,
+                    "evaluation_dataset": "train_replay_without_shuffle",
+                    "dropout": 0.0,
+                    "weight_decay": 0.0,
+                    "early_stopping": False,
+                    "learning_rate_scheduler": "fixed",
+                    "class_weighting": True,
+                },
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            ),
+            flush=True,
+        )
     set_reproducible_seed(args.seed)
     model = FullGraphSequenceClassifier(
         FullGraphClassifierConfig(
             encoder_type=args.encoder_type,
-            baseline_dropout=args.baseline_dropout,
-            gated_gnn_dropout=args.gated_gnn_dropout,
-            classifier_dropout=args.classifier_dropout,
+            baseline_dropout=effective_baseline_dropout,
+            gated_gnn_dropout=effective_gated_dropout,
+            classifier_dropout=effective_classifier_dropout,
         )
     )
     training_config = FullGraphTrainingConfig(
         epochs=1 if args.smoke else args.epochs,
         learning_rate=args.learning_rate,
-        weight_decay=args.weight_decay,
+        weight_decay=effective_weight_decay,
         gradient_clip_norm=args.gradient_clip,
-        early_stopping_patience=args.early_stopping_patience,
+        early_stopping_patience=effective_early_stopping,
         scheduler_factor=args.scheduler_factor,
-        scheduler_patience=args.scheduler_patience,
+        scheduler_patience=effective_scheduler_patience,
         minimum_learning_rate=args.minimum_learning_rate,
         seed=args.seed,
         max_train_batches=1 if args.smoke else None,
         max_validation_batches=1 if args.smoke else None,
+        memorization_mode=args.memorization_mode,
     )
     if device.type == "cuda":
         torch.cuda.reset_peak_memory_stats(device)
@@ -160,6 +225,7 @@ def main():
                 else None
             ),
             "debug_smoke": bool(args.smoke),
+            "diagnostic_only": bool(args.memorization_mode),
         }
     )
     print(json.dumps(printable, ensure_ascii=False, indent=2, sort_keys=True))

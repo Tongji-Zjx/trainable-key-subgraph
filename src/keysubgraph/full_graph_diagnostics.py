@@ -338,7 +338,17 @@ class FullGraphRepresentationMonitor(object):
         else:
             raise TypeError("unsupported full-graph encoder for diagnostics")
 
-        self._register_tensor(encoder.graph_pooling, "window_embedding")
+        if isinstance(encoder, SignedGatedBiGRUPrototypeEncoder):
+            self._register_tensor(
+                encoder.graph_pooling,
+                "window_embedding_pre_normalization",
+            )
+            self._register_tensor(
+                encoder.graph_pooling_normalization,
+                "window_embedding",
+            )
+        else:
+            self._register_tensor(encoder.graph_pooling, "window_embedding")
         self._register_tensor(
             encoder.temporal_encoder,
             "temporal_sequence_representation",
@@ -354,6 +364,15 @@ class FullGraphRepresentationMonitor(object):
                 )
 
     def add_model_output(self, output: FullGraphClassifierOutput) -> None:
+        # MaskedTCNEncoder.forward_list calls its forward method directly, so
+        # a module-level forward hook is not invoked on the controlled
+        # baseline. Its encoder output is exactly the temporal sequence
+        # representation; record the explicit alias here for a complete,
+        # comparable layer table.
+        if isinstance(self.model.encoder, SignedGNNTCNFullGraphEncoder):
+            self._accumulator("temporal_sequence_representation").add(
+                output.representation
+            )
         self._accumulator("final_representation").add(output.representation)
         self._accumulator("logits").add(output.logits)
         probabilities = torch.softmax(output.logits.detach(), dim=-1)[:, 1:]
