@@ -1,0 +1,45 @@
+experiment:
+  name: exact_stse_coordinate_ablation
+  protocol: configs/data_protocol_exact_stse_coords.json
+  variants:
+    - exact_stse
+    - exact_stse_no_coord
+  seeds: [42, 43, 44]
+
+exact_stse:
+  community_vocab_size: 117
+  community_embedding_dim: 16
+  hidden_dim: 64
+  ffn_dim: 128
+  subject_pooling: window_mean_reproduction_assumption
+  epsilon: 1.0e-8
+
+classifier:
+  hidden_dims: [64, 32]
+  dropout: 0.20
+  output_dim: 2
+
+training:
+  epochs: 80
+  batch_size: 4
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  gradient_clip_norm: 1.0
+  early_stopping_patience: 15
+  scheduler:
+    factor: 0.5
+    patience: 5
+    minimum_learning_rate: 1.0e-5
+  checkpoint_selection:
+    primary: validation_balanced_accuracy
+    tie_breaker: validation_roc_auc
+
+overfit_acceptance:
+  sample_count: 16
+  class_count_each: 8
+  epochs: 200
+  dropout: 0.0
+  weight_decay: 0.0
+  early_stopping: false
+  minimum_accuracy: 0.95
+  minimum_roc_auc: 0.99

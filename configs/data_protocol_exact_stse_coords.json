@@ -1,0 +1,35 @@
+{
+  "batching": "list_based_variable_length_no_padding_no_truncation",
+  "community_policy": "raw local community ids may enter nn.Embedding only inside the isolated Exact-STSE paper-reproduction baseline",
+  "coordinate_policy": "all indexed samples have finite non-zero 116x3 coordinates; Coord and NoCoord variants must use this identical cohort",
+  "edge_presence_rule": "abs(A_ij) > edge_presence_threshold",
+  "edge_presence_threshold": 0.0,
+  "experiment_mode": "partitioned_coordinate_ablation",
+  "immutable": true,
+  "label_source": "sample_index.csv and splits.csv only; .pt labels are ignored",
+  "model_selection_policy": "validation balanced accuracy with validation AUROC as tie-breaker",
+  "paths": {
+    "dataset_root": "data/adhd_5_0.5",
+    "sample_index_csv": "outputs/index/sample_index.csv",
+    "splits_csv": "outputs/splits/splits.csv",
+    "splits_json": "outputs/splits/splits.json"
+  },
+  "protocol_name": "exact_stse_coordinate_ablation",
+  "sample_count": 307,
+  "schema_version": 1,
+  "sha256": {
+    "sample_index_csv": "2393ccfe6838b90b13c4b67ba21aad3c5d6c91f823faeb2b7fea3244d94281a5",
+    "splits_csv": "35de3a8b23b14f1ef90acb7b2316efc8cb527d091d287446eb6c11655eb6b8ca",
+    "splits_json": "3eef3a206c2c2fae1b555d43d16f0a102a95a5dbe5153ad1e6560d7390efee4e"
+  },
+  "signed_edge_policy": "positive and negative nonzero edges are both valid",
+  "source_global_threshold_policy": ".pt global_threshold is retained as metadata only",
+  "split_policy": "reuse the frozen 307-sample splits; never re-split during training",
+  "split_ratios": {
+    "test": 0.15,
+    "train": 0.7,
+    "validation": 0.15
+  },
+  "split_seed": 42,
+  "group_key": "site::subject_id (sample_key fallback when subject_id is empty)"
+}

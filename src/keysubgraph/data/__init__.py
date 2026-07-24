@@ -27,6 +27,13 @@ from .graph_dataset import (
     create_data_loader,
     list_batch_collate,
 )
+from .exact_stse_dataset import (
+    ExactSTSEBatch,
+    ExactSTSEDataset,
+    ExactSTSESample,
+    create_exact_stse_loader,
+    exact_stse_collate,
+)
 
 __all__ = [
     "IndexBuildConfig",
@@ -50,4 +57,9 @@ __all__ = [
     "write_index_artifacts",
     "write_split_artifacts",
     "write_full_cohort_artifacts",
+    "ExactSTSEBatch",
+    "ExactSTSEDataset",
+    "ExactSTSESample",
+    "create_exact_stse_loader",
+    "exact_stse_collate",
 ]

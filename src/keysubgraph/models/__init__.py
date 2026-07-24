@@ -47,6 +47,13 @@ from .full_graph_classifier import (
     SignedGNNTCNFullGraphEncoder,
     SymmetricSignedEdgeGatedLayer,
 )
+from .exact_stse import (
+    ExactSTSEClassifier,
+    ExactSTSEConfig,
+    ExactSTSEFeatureBuilder,
+    ExactSTSEOutput,
+    ExactSTSEWindowEncoder,
+)
 
 __all__ = [
     "BatchModelOutput",
@@ -89,4 +96,9 @@ __all__ = [
     "SignedGatedBiGRUPrototypeEncoder",
     "SignedGNNTCNFullGraphEncoder",
     "SymmetricSignedEdgeGatedLayer",
+    "ExactSTSEClassifier",
+    "ExactSTSEConfig",
+    "ExactSTSEFeatureBuilder",
+    "ExactSTSEOutput",
+    "ExactSTSEWindowEncoder",
 ]

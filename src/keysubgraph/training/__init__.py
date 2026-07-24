@@ -50,6 +50,13 @@ from .hard_stse_trainer import (
     run_hard_stse_epoch,
     train_hard_stse,
 )
+from .exact_stse_trainer import (
+    ExactSTSETrainingConfig,
+    exact_stse_config_from_dict,
+    load_exact_stse_checkpoint,
+    run_exact_stse_epoch,
+    train_exact_stse,
+)
 
 __all__.extend(
     [
@@ -76,5 +83,10 @@ __all__.extend(
         "load_hard_stse_checkpoint",
         "run_hard_stse_epoch",
         "train_hard_stse",
+        "ExactSTSETrainingConfig",
+        "exact_stse_config_from_dict",
+        "load_exact_stse_checkpoint",
+        "run_exact_stse_epoch",
+        "train_exact_stse",
     ]
 )
