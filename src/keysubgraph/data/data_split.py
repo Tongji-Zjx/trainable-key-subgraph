@@ -460,7 +460,10 @@ def _atomic_write_csv(path: Path, assignments: Sequence[SplitAssignment]) -> Non
 def _atomic_write_json(path: Path, payload: Dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
-    with temporary.open("w", encoding="utf-8") as handle:
+    # Pin JSON line endings to LF so frozen artifact hashes are identical on
+    # Windows and Linux.  The default text newline translation would otherwise
+    # produce CRLF locally and LF on the training server.
+    with temporary.open("w", encoding="utf-8", newline="\n") as handle:
         json.dump(payload, handle, ensure_ascii=False, indent=2, sort_keys=True)
         handle.write("\n")
     os.replace(str(temporary), str(path))

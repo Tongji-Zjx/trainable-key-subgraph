@@ -112,6 +112,7 @@ class DataSplitTest(unittest.TestCase):
 
         with paths["json"].open("r", encoding="utf-8") as handle:
             payload = json.load(handle)
+        self.assertNotIn(b"\r\n", paths["json"].read_bytes())
         self.assertEqual(len(payload["assignments"]), len(assignments))
         self.assertEqual(payload["seed"], 42)
         self.assertTrue(payload["group_aware"])
