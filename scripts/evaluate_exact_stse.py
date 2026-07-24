@@ -85,6 +85,7 @@ def main():
         PROJECT_ROOT / paths["splits_csv"],
         args.split,
         protocol["edge_presence_threshold"],
+        require_coordinates=model.config.use_coordinates,
     )
     loader = create_exact_stse_loader(
         dataset,

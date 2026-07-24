@@ -71,11 +71,28 @@ def _device(value):
     return torch.device(value)
 
 
+def _validate_protocol_contract(protocol, variant):
+    protocol_name = protocol.get("protocol_name")
+    if variant == "exact_stse":
+        if protocol_name != "exact_stse_coordinate_ablation":
+            raise ValueError(
+                "coordinate Exact-STSE requires its frozen 307-sample protocol"
+            )
+        return True
+    if protocol_name not in (
+        "exact_stse_coordinate_ablation",
+        "exact_stse_no_coord_full_cohort",
+    ):
+        raise ValueError(
+            "NoCoord requires an explicit Exact-STSE reproduction protocol"
+        )
+    return False
+
+
 def main():
     args = parse_args()
     protocol = validate_data_protocol(args.protocol, PROJECT_ROOT)
-    if protocol.get("protocol_name") != "exact_stse_coordinate_ablation":
-        raise ValueError("Exact-STSE requires its frozen coordinate protocol")
+    use_coordinates = _validate_protocol_contract(protocol, args.variant)
     paths = protocol["paths"]
     dataset_args = (
         PROJECT_ROOT / paths["dataset_root"],
@@ -85,12 +102,14 @@ def main():
     train_dataset = ExactSTSEDataset(
         *dataset_args,
         "train",
-        protocol["edge_presence_threshold"]
+        protocol["edge_presence_threshold"],
+        require_coordinates=use_coordinates,
     )
     validation_dataset = ExactSTSEDataset(
         *dataset_args,
         "validation",
-        protocol["edge_presence_threshold"]
+        protocol["edge_presence_threshold"],
+        require_coordinates=use_coordinates,
     )
     device = _device(args.device)
     train_loader = create_exact_stse_loader(
@@ -111,7 +130,7 @@ def main():
     set_reproducible_seed(args.seed)
     model = ExactSTSEClassifier(
         ExactSTSEConfig(
-            use_coordinates=args.variant == "exact_stse",
+            use_coordinates=use_coordinates,
         )
     )
     model.reset_parameters_with_seed(args.seed)
@@ -164,6 +183,11 @@ def main():
                 else None
             ),
             "debug_smoke": bool(args.smoke),
+            "protocol_name": protocol["protocol_name"],
+            "cohort_sample_count": int(protocol["sample_count"]),
+            "train_sample_count": len(train_dataset),
+            "validation_sample_count": len(validation_dataset),
+            "coordinates_loaded": bool(use_coordinates),
         }
     )
     summary_path = args.output_dir.resolve() / "run_summary.json"

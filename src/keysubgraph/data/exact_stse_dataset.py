@@ -61,6 +61,26 @@ def _coordinate_sequence(
     return tuple(result)
 
 
+def _coordinates_for_mode(
+    payload: Any,
+    node_counts: Sequence[int],
+    require_coordinates: bool,
+) -> Tuple[torch.Tensor, ...]:
+    """Load real coordinates or create inert placeholders for NoCoord."""
+
+    if require_coordinates:
+        if "coords" not in payload:
+            raise ValueError("sample is missing coords")
+        return _coordinate_sequence(payload["coords"], node_counts)
+    # Deliberately do not inspect payload["coords"]. NoCoord shares the sample
+    # interface with Coord, but its model input remains the original 18-D
+    # coordinate-free feature vector.
+    return tuple(
+        torch.zeros((int(node_count), 3), dtype=torch.float32)
+        for node_count in node_counts
+    )
+
+
 @dataclass(frozen=True)
 class ExactSTSESample:
     graph: GraphSequenceSample
@@ -137,7 +157,25 @@ def exact_stse_collate(
 
 
 class ExactSTSEDataset(GraphSequenceDataset):
-    """Load graphs and valid coordinates once without changing core samples."""
+    """Load isolated Exact-STSE samples with an explicit coordinate contract."""
+
+    def __init__(
+        self,
+        dataset_root: Path,
+        sample_index_csv: Path,
+        splits_csv: Path,
+        split: str,
+        edge_presence_threshold: float = 0.0,
+        require_coordinates: bool = True,
+    ) -> None:
+        super().__init__(
+            dataset_root=dataset_root,
+            sample_index_csv=sample_index_csv,
+            splits_csv=splits_csv,
+            split=split,
+            edge_presence_threshold=edge_presence_threshold,
+        )
+        self.require_coordinates = bool(require_coordinates)
 
     def __getitem__(self, index: int) -> ExactSTSESample:
         assignment = self.assignments[index]
@@ -164,16 +202,14 @@ class ExactSTSEDataset(GraphSequenceDataset):
             raise ValueError(
                 "{} payload is not a dict".format(assignment.sample_key)
             )
-        if "coords" not in payload:
-            raise ValueError(
-                "{} is missing coords".format(assignment.sample_key)
-            )
         try:
             graph = _adapt_payload(
                 payload, assignment, self.edge_presence_threshold
             )
-            coordinates = _coordinate_sequence(
-                payload["coords"], graph.node_counts
+            coordinates = _coordinates_for_mode(
+                payload,
+                graph.node_counts,
+                self.require_coordinates,
             )
         except (TypeError, ValueError) as error:
             raise ValueError("{}: {}".format(assignment.sample_key, error))

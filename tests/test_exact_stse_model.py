@@ -8,6 +8,7 @@ from keysubgraph.data.exact_stse_dataset import (
     ExactSTSEBatch,
     ExactSTSESample,
     _coordinate_sequence,
+    _coordinates_for_mode,
 )
 from keysubgraph.data.graph_dataset import GraphSequenceSample
 from keysubgraph.models.exact_stse import (
@@ -91,6 +92,20 @@ class ExactSTSEModelTest(unittest.TestCase):
         self.assertEqual(len(sequence), 2)
         with self.assertRaisesRegex(ValueError, "all zero"):
             _coordinate_sequence(torch.zeros(3, 3), (3,))
+
+    def test_no_coordinate_loading_ignores_missing_or_invalid_coordinates(self):
+        missing = _coordinates_for_mode({}, (3, 2), False)
+        invalid = _coordinates_for_mode(
+            {"coords": "this must never be inspected"}, (3, 2), False
+        )
+        self.assertEqual(
+            [tuple(item.shape) for item in missing], [(3, 3), (2, 3)]
+        )
+        for left, right in zip(missing, invalid):
+            self.assertTrue(torch.equal(left, right))
+            self.assertEqual(float(left.abs().sum()), 0.0)
+        with self.assertRaisesRegex(ValueError, "missing coords"):
+            _coordinates_for_mode({}, (3,), True)
 
     def test_degree_delta_and_signed_neighbor_coordinate_formulas(self):
         current = torch.tensor(

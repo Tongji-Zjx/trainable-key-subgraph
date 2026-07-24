@@ -1,4 +1,4 @@
-"""Audit the frozen 307-sample cohort used by both Exact-STSE variants."""
+"""Audit one frozen Exact-STSE coordinate or NoCoord cohort."""
 
 from __future__ import absolute_import, division, print_function
 
@@ -24,6 +24,11 @@ from keysubgraph.data.exact_stse_dataset import ExactSTSEDataset  # noqa: E402
 
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--variant",
+        choices=("exact_stse", "exact_stse_no_coord"),
+        default="exact_stse",
+    )
     parser.add_argument(
         "--protocol",
         type=Path,
@@ -58,6 +63,11 @@ def _summary(values):
 def main():
     args = parse_args()
     protocol = validate_data_protocol(args.protocol, PROJECT_ROOT)
+    use_coordinates = args.variant == "exact_stse"
+    if use_coordinates and int(protocol["sample_count"]) != 307:
+        raise ValueError(
+            "coordinate Exact-STSE audit requires the 307-sample cohort"
+        )
     paths = protocol["paths"]
     common = (
         PROJECT_ROOT / paths["dataset_root"],
@@ -74,7 +84,10 @@ def main():
     failures = []
     for split in ("train", "validation", "test"):
         dataset = ExactSTSEDataset(
-            *common, split, protocol["edge_presence_threshold"]
+            *common,
+            split,
+            protocol["edge_presence_threshold"],
+            require_coordinates=use_coordinates,
         )
         split_counts[split] = len(dataset)
         labels = Counter()
@@ -90,11 +103,12 @@ def main():
                     sample.graph.node_counts,
                 ):
                     node_counts.append(int(count))
-                    coordinate_hashes[
-                        hashlib.sha256(
-                            coordinates.contiguous().numpy().tobytes()
-                        ).hexdigest()
-                    ] += 1
+                    if use_coordinates:
+                        coordinate_hashes[
+                            hashlib.sha256(
+                                coordinates.contiguous().numpy().tobytes()
+                            ).hexdigest()
+                        ] += 1
                     maximum_community_id = max(
                         maximum_community_id,
                         int(communities.max().item()),
@@ -116,14 +130,20 @@ def main():
             and sum(split_counts.values()) == int(protocol["sample_count"])
         ),
         "protocol": str(args.protocol.resolve()),
+        "variant": args.variant,
+        "source_coordinates_loaded": use_coordinates,
         "sample_count": len(sample_keys),
         "unique_sample_count": len(set(sample_keys)),
         "split_counts": split_counts,
         "class_counts": class_counts,
         "timepoints_per_sample": _summary(timepoint_counts),
         "nodes_per_timepoint": _summary(node_counts),
-        "coordinate_array_hash_count": len(coordinate_hashes),
-        "coordinate_array_hash_usage": dict(coordinate_hashes),
+        "coordinate_array_hash_count": (
+            len(coordinate_hashes) if use_coordinates else None
+        ),
+        "coordinate_array_hash_usage": (
+            dict(coordinate_hashes) if use_coordinates else None
+        ),
         "maximum_community_id": maximum_community_id,
         "community_vocab_size_required": maximum_community_id + 2,
         "model_input_dimensions": {

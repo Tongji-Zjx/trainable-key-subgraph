@@ -1,0 +1,35 @@
+{
+  "batching": "list_based_variable_length_no_padding_no_truncation",
+  "community_policy": "raw local community ids may enter nn.Embedding only inside the isolated Exact-STSE-NoCoord reproduction",
+  "coordinate_policy": "coordinates are ignored and never loaded into model features",
+  "edge_presence_rule": "abs(A_ij) > edge_presence_threshold",
+  "edge_presence_threshold": 0.0,
+  "experiment_mode": "partitioned_no_coordinate_full_cohort",
+  "group_key": "site::subject_id (sample_key fallback when subject_id is empty)",
+  "immutable": true,
+  "label_source": "sample_index.csv and splits.csv only; .pt labels are ignored",
+  "model_selection_policy": "validation balanced accuracy with validation AUROC as tie-breaker",
+  "paths": {
+    "dataset_root": "data/adhd_5_0.5",
+    "sample_index_csv": "outputs/index_no_coords/sample_index.csv",
+    "splits_csv": "outputs/exact_stse_no_coord_full_splits/splits.csv",
+    "splits_json": "outputs/exact_stse_no_coord_full_splits/splits.json"
+  },
+  "protocol_name": "exact_stse_no_coord_full_cohort",
+  "sample_count": 938,
+  "schema_version": 1,
+  "sha256": {
+    "sample_index_csv": "04c73db1d958a2ea3fd28fa6eb1a62ba2b10d1a1cec83a3b22233edcddcf856a",
+    "splits_csv": "ee239289d558a1a8818c545a3fd917fa9ca3d8bc767251b5e26a949967eac94c",
+    "splits_json": "cdd657338c47f66199b321831641421fb2a6bafbfc15254a6464b6911c539df8"
+  },
+  "signed_edge_policy": "positive and negative nonzero edges are both valid",
+  "source_global_threshold_policy": ".pt global_threshold is retained as metadata only",
+  "split_policy": "reuse this dedicated frozen 938-sample split; never re-split during training",
+  "split_ratios": {
+    "test": 0.15,
+    "train": 0.7,
+    "validation": 0.15
+  },
+  "split_seed": 2026
+}

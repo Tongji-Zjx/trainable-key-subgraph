@@ -83,6 +83,7 @@ def main():
         PROJECT_ROOT / paths["splits_csv"],
         "train",
         protocol["edge_presence_threshold"],
+        require_coordinates=args.variant == "exact_stse",
     )
     by_label = {0: [], 1: []}
     for index, assignment in enumerate(source.assignments):
