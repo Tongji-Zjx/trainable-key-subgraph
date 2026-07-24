@@ -54,6 +54,34 @@ from .exact_stse import (
     ExactSTSEOutput,
     ExactSTSEWindowEncoder,
 )
+from .dual_stse_hard_sgw_types import (
+    DUAL_EXPERIMENT_VARIANTS,
+    DUAL_TRAINING_STAGES,
+    DualSTSEHardSGWConfig,
+    DualSTSEHardSGWOutput,
+)
+from .dual_stse_channel import (
+    DualSTSEChannelOutput,
+    ExistingNoCoordSTSEChannel,
+)
+from .dual_hard_sgw_selector import (
+    DualHardSelectionOutput,
+    DualHardSGWSelector,
+)
+from .dual_sgw_proxy import DualSGWProxy, DualSGWProxyOutput
+from .dual_exact_sgw import (
+    DualExactSGWBranch,
+    DualExactSGWOutput,
+    DualSGWFeatureRecord,
+    load_dual_sgw_feature_record,
+    save_dual_sgw_feature_record,
+)
+from .dual_stse_hard_sgw import DualSTSEHardSGWClassifier
+from .dual_stse_hard_sgw_loss import (
+    DualSTSEHardSGWCriterion,
+    DualSTSEHardSGWLoss,
+    DualSTSEHardSGWLossConfig,
+)
 
 __all__ = [
     "BatchModelOutput",
@@ -101,4 +129,23 @@ __all__ = [
     "ExactSTSEFeatureBuilder",
     "ExactSTSEOutput",
     "ExactSTSEWindowEncoder",
+    "DUAL_EXPERIMENT_VARIANTS",
+    "DUAL_TRAINING_STAGES",
+    "DualSTSEHardSGWConfig",
+    "DualSTSEHardSGWOutput",
+    "DualSTSEChannelOutput",
+    "ExistingNoCoordSTSEChannel",
+    "DualHardSelectionOutput",
+    "DualHardSGWSelector",
+    "DualSGWProxy",
+    "DualSGWProxyOutput",
+    "DualExactSGWBranch",
+    "DualExactSGWOutput",
+    "DualSGWFeatureRecord",
+    "load_dual_sgw_feature_record",
+    "save_dual_sgw_feature_record",
+    "DualSTSEHardSGWClassifier",
+    "DualSTSEHardSGWCriterion",
+    "DualSTSEHardSGWLoss",
+    "DualSTSEHardSGWLossConfig",
 ]

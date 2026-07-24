@@ -1,0 +1,91 @@
+schema_version: 1
+
+experiment:
+  name: dual_stse_hard_sgw
+  protocol: configs/data_protocol_exact_stse_no_coord_full.json
+  split_seed: 2026
+  pilot_seeds: [42]
+  confirmation_seeds: [42, 43, 44]
+  comparisons: [D0, D1, D2, D3, D4]
+
+data:
+  batching: list_based_variable_length
+  use_coordinates: false
+  edge_presence_threshold_source: protocol
+  node_alignment_key: node_names
+  label_source: frozen_split_artifacts
+
+full_stse:
+  implementation: reuse_exact_stse_no_coord
+  architecture_frozen: true
+  input_dim: 18
+  output_dim: 64
+  use_learned_temporal_encoder: false
+
+selector:
+  node_feature_dim: 15
+  edge_base_feature_dim: 6
+  node_hidden_dim: 64
+  edge_hidden_dim: 32
+  dropout: 0.10
+  selection_mode: learned
+  target_node_ratio: 0.50
+  target_edge_ratio: 0.30
+  node_minimum: 2
+  edge_minimum: 1
+  community_coverage: candidate_nodes
+  remove_isolated_nodes: true
+
+sgw:
+  exact_features_detached: true
+  exact_features_cached_after_selector_freeze: true
+  proxy_trains_selector: true
+  laplacian_eta: 1.0e-3
+  diffusion_time: 1.0
+  time_quantity: speed
+  spectral_quantiles: 16
+  core_dim: 18
+  variation_dim: 16
+  output_dim: 34
+  node_measure: uniform
+  train_only_standardizer: true
+  use_learned_temporal_encoder: false
+
+fusion:
+  stse_projection_dim: 64
+  sgw_projection_dim: 64
+  concatenated_dim: 128
+  hidden_dim: 64
+  dropout: 0.20
+
+loss:
+  fusion_ce_weight: 1.0
+  stse_aux_ce_weight: 0.30
+  sgw_aux_ce_weight: 0.50
+  selector_proxy_ce_weight: 0.50
+  node_budget_weight: 0.05
+  edge_budget_weight: 0.05
+  laplacian_weight: 0.05
+  gw_proxy_weight: 0.02
+
+training:
+  stages: [selector_proxy, sgw_classifier, fusion]
+  max_epochs: 80
+  batch_size: 4
+  weight_decay: 1.0e-4
+  gradient_clip_norm: 1.0
+  early_stopping_patience: 15
+  learning_rates:
+    stse: 1.0e-4
+    selector: 1.0e-3
+    sgw_classifier: 1.0e-3
+    fusion: 1.0e-3
+  scheduler:
+    factor: 0.5
+    patience: 5
+    minimum_learning_rate: 1.0e-5
+  checkpoint_selection:
+    primary: validation_roc_auc
+    threshold_fit_split: validation
+    test_threshold_source: frozen_validation_threshold
+

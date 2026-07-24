@@ -286,6 +286,7 @@ def select_hard_stse_window(
         edge_probabilities=edge_probabilities,
         hard_node_mask=hard_node_mask,
         hard_edge_mask=hard_edge_mask,
+        candidate_node_mask=selected_nodes,
         straight_through_node_mask=straight_node,
         straight_through_edge_mask=straight_edge,
         requested_node_count=requested_nodes,

@@ -169,6 +169,7 @@ class HardSelectionOutput:
     edge_probabilities: torch.Tensor
     hard_node_mask: torch.Tensor
     hard_edge_mask: torch.Tensor
+    candidate_node_mask: torch.Tensor
     straight_through_node_mask: torch.Tensor
     straight_through_edge_mask: torch.Tensor
     requested_node_count: int

@@ -57,6 +57,12 @@ from .exact_stse_trainer import (
     run_exact_stse_epoch,
     train_exact_stse,
 )
+from .dual_stse_hard_sgw_trainer import (
+    DualTrainingConfig,
+    load_dual_checkpoint,
+    run_dual_epoch,
+    train_dual_stage,
+)
 
 __all__.extend(
     [
@@ -88,5 +94,9 @@ __all__.extend(
         "load_exact_stse_checkpoint",
         "run_exact_stse_epoch",
         "train_exact_stse",
+        "DualTrainingConfig",
+        "load_dual_checkpoint",
+        "run_dual_epoch",
+        "train_dual_stage",
     ]
 )
