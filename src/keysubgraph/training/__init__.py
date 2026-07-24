@@ -42,6 +42,14 @@ from .full_graph_classifier_trainer import (
     run_full_graph_classifier_epoch,
     train_full_graph_classifier,
 )
+from .hard_stse_trainer import (
+    HardSTSETrainingConfig,
+    fit_hard_stse_standardizers,
+    hard_stse_config_from_dict,
+    load_hard_stse_checkpoint,
+    run_hard_stse_epoch,
+    train_hard_stse,
+)
 
 __all__.extend(
     [
@@ -62,5 +70,11 @@ __all__.extend(
         "load_full_graph_classifier_checkpoint",
         "run_full_graph_classifier_epoch",
         "train_full_graph_classifier",
+        "HardSTSETrainingConfig",
+        "fit_hard_stse_standardizers",
+        "hard_stse_config_from_dict",
+        "load_hard_stse_checkpoint",
+        "run_hard_stse_epoch",
+        "train_hard_stse",
     ]
 )

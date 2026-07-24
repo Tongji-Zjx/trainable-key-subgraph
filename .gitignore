@@ -4,6 +4,7 @@
 /outputs/
 /logs/
 /runs/
+/.local_validation/
 
 # Local Conda environment and caches
 /.conda/
