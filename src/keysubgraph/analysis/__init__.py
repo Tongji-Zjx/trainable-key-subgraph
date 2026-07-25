@@ -13,6 +13,10 @@ from .dual_proxy_exact_alignment import (
     analyze_proxy_exact_alignment,
     write_proxy_exact_alignment_artifacts,
 )
+from .dual_transferred_head import (
+    build_transferred_head_evaluation,
+    write_transferred_head_artifacts,
+)
 
 __all__ = [
     "METRIC_NAMES",
@@ -27,4 +31,6 @@ __all__ = [
     "FEATURE_BLOCKS",
     "analyze_proxy_exact_alignment",
     "write_proxy_exact_alignment_artifacts",
+    "build_transferred_head_evaluation",
+    "write_transferred_head_artifacts",
 ]
