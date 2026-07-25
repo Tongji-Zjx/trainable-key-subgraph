@@ -82,6 +82,11 @@ from .dual_stse_hard_sgw_loss import (
     DualSTSEHardSGWLoss,
     DualSTSEHardSGWLossConfig,
 )
+from .dual_sgw_feature_classifier import (
+    DUAL_SGW_FEATURE_CLASSIFIERS,
+    DualSGWFeatureClassifier,
+    DualSGWFeatureClassifierConfig,
+)
 
 __all__ = [
     "BatchModelOutput",
@@ -148,4 +153,7 @@ __all__ = [
     "DualSTSEHardSGWCriterion",
     "DualSTSEHardSGWLoss",
     "DualSTSEHardSGWLossConfig",
+    "DUAL_SGW_FEATURE_CLASSIFIERS",
+    "DualSGWFeatureClassifier",
+    "DualSGWFeatureClassifierConfig",
 ]

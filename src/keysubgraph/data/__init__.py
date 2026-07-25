@@ -45,6 +45,10 @@ from .dual_sgw_manifest import (
     read_dual_sgw_manifest,
     write_dual_sgw_manifest,
 )
+from .dual_sgw_feature_dataset import (
+    DualSGWFeatureDataset,
+    create_dual_sgw_feature_loader,
+)
 
 __all__ = [
     "IndexBuildConfig",
@@ -80,4 +84,6 @@ __all__ = [
     "dual_feature_filename",
     "read_dual_sgw_manifest",
     "write_dual_sgw_manifest",
+    "DualSGWFeatureDataset",
+    "create_dual_sgw_feature_loader",
 ]

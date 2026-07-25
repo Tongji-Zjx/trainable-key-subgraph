@@ -63,6 +63,18 @@ from .dual_stse_hard_sgw_trainer import (
     run_dual_epoch,
     train_dual_stage,
 )
+from .dual_sgw_feature_trainer import (
+    DualSGWFeatureTrainingConfig,
+    binary_metrics,
+    fit_binary_threshold,
+    load_dual_sgw_feature_checkpoint,
+    run_dual_sgw_feature_epoch,
+    train_dual_sgw_feature_classifier,
+)
+from .dual_sgw_feature_ensemble import (
+    average_evaluation_probabilities,
+    build_dual_sgw_probability_ensemble,
+)
 
 __all__.extend(
     [
@@ -98,5 +110,13 @@ __all__.extend(
         "load_dual_checkpoint",
         "run_dual_epoch",
         "train_dual_stage",
+        "DualSGWFeatureTrainingConfig",
+        "binary_metrics",
+        "fit_binary_threshold",
+        "load_dual_sgw_feature_checkpoint",
+        "run_dual_sgw_feature_epoch",
+        "train_dual_sgw_feature_classifier",
+        "average_evaluation_probabilities",
+        "build_dual_sgw_probability_ensemble",
     ]
 )
