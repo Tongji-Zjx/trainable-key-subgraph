@@ -21,6 +21,10 @@ from .dual_frozen_logit_ensemble import (
     build_frozen_equal_logit_ensemble,
     write_frozen_equal_logit_ensemble_artifacts,
 )
+from .dual_classification_bottleneck import (
+    analyze_dual_classification_bottleneck,
+    write_dual_classification_bottleneck_artifacts,
+)
 from .dual_transferred_head import (
     build_transferred_head_evaluation,
     write_transferred_head_artifacts,
@@ -43,6 +47,8 @@ __all__ = [
     "write_proxy_input_exact_head_artifacts",
     "build_frozen_equal_logit_ensemble",
     "write_frozen_equal_logit_ensemble_artifacts",
+    "analyze_dual_classification_bottleneck",
+    "write_dual_classification_bottleneck_artifacts",
     "build_transferred_head_evaluation",
     "write_transferred_head_artifacts",
 ]
