@@ -25,7 +25,9 @@ from keysubgraph.data.dual_temporal_scaler import (
 )
 
 
-def _record(key, split, values, mask):
+def _record(
+    key, split, values, mask, exact_manifest="exact_manifest"
+):
     values = torch.tensor(values, dtype=torch.float32)
     mask = torch.tensor(mask, dtype=torch.bool)
     return DualTemporalVariationRecord(
@@ -40,7 +42,7 @@ def _record(key, split, values, mask):
         selector_checkpoint_sha256="selector",
         exact_head_checkpoint_sha256="head",
         sgw_scaler_sha256="sgw",
-        exact_manifest_sha256="exact_manifest",
+        exact_manifest_sha256=exact_manifest,
         selection_mode="learned",
         selection_seed=42,
     )
@@ -158,6 +160,59 @@ class DualTemporalDataTest(unittest.TestCase):
             batch.transition_values[0].sort(dim=0).values,
         )
         self.assertTrue(torch.equal(first.time_mask, batch.time_mask))
+
+    def test_validation_may_bind_a_different_exact_manifest(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            train_records = (
+                _record(
+                    "train0",
+                    "train",
+                    [[1.0] * 16],
+                    [True],
+                    exact_manifest="exact_train",
+                ),
+                _record(
+                    "train1",
+                    "train",
+                    [[2.0] * 16],
+                    [True],
+                    exact_manifest="exact_train",
+                ),
+            )
+            train_rows = []
+            for record in train_records:
+                path = root / (record.sample_key + ".pt")
+                save_dual_temporal_record(record, path)
+                train_rows.append((record, path))
+            train_manifest = root / "train_manifest.json"
+            write_dual_temporal_manifest(train_rows, train_manifest)
+            scaler = fit_dual_temporal_standardizer(
+                train_records, file_sha256(train_manifest)
+            )
+            scaler_path = root / "scaler.json"
+            save_dual_temporal_standardizer(scaler, scaler_path)
+            validation_record = _record(
+                "validation0",
+                "validation",
+                [[1.5] * 16],
+                [True],
+                exact_manifest="exact_validation",
+            )
+            validation_path = root / "validation0.pt"
+            save_dual_temporal_record(
+                validation_record, validation_path
+            )
+            validation_manifest = root / "validation_manifest.json"
+            write_dual_temporal_manifest(
+                [(validation_record, validation_path)],
+                validation_manifest,
+            )
+            dataset = DualTemporalDataset(
+                validation_manifest, scaler_path
+            )
+            self.assertEqual(dataset.split, "validation")
+            self.assertEqual(len(dataset), 1)
 
 
 if __name__ == "__main__":

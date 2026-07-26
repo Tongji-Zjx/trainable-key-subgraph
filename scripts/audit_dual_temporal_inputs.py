@@ -114,7 +114,6 @@ def main():
         "selector_checkpoint_sha256",
         "exact_head_checkpoint_sha256",
         "sgw_scaler_sha256",
-        "exact_manifest_sha256",
         "selection_mode",
         "selection_seed",
     )

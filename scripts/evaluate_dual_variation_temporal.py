@@ -103,7 +103,6 @@ def main():
         "selector_checkpoint_sha256",
         "exact_head_checkpoint_sha256",
         "sgw_scaler_sha256",
-        "exact_manifest_sha256",
         "selection_mode",
         "selection_seed",
     ):
@@ -111,6 +110,16 @@ def main():
     for key, value in expected.items():
         if payload["provenance"].get(key) != value:
             raise ValueError("evaluation provenance mismatch: {}".format(key))
+    if (
+        dataset.split == "validation"
+        and payload["provenance"].get(
+            "validation_exact_manifest_sha256"
+        )
+        != dataset.manifest["exact_manifest_sha256"]
+    ):
+        raise ValueError(
+            "evaluation validation Exact manifest mismatch"
+        )
     loader = create_dual_temporal_loader(
         dataset,
         args.batch_size,
@@ -156,6 +165,9 @@ def main():
         "checkpoint_sha256": file_sha256(args.checkpoint),
         "manifest_sha256": file_sha256(args.manifest),
         "temporal_scaler_sha256": file_sha256(args.temporal_scaler),
+        "exact_manifest_sha256": dataset.manifest[
+            "exact_manifest_sha256"
+        ],
     }
     _atomic_json(args.output, output)
     print(json.dumps(output["metrics"], ensure_ascii=False, indent=2, sort_keys=True))

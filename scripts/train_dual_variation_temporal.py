@@ -74,7 +74,6 @@ def main():
         "selector_checkpoint_sha256",
         "exact_head_checkpoint_sha256",
         "sgw_scaler_sha256",
-        "exact_manifest_sha256",
         "selection_mode",
         "selection_seed",
     )
@@ -128,6 +127,12 @@ def main():
             key: train_dataset.manifest[key]
             for key in provenance_keys
         },
+        "train_exact_manifest_sha256": (
+            train_dataset.manifest["exact_manifest_sha256"]
+        ),
+        "validation_exact_manifest_sha256": (
+            validation_dataset.manifest["exact_manifest_sha256"]
+        ),
     }
     result = train_dual_temporal_classifier(
         model=model,

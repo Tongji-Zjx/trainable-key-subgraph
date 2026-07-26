@@ -66,10 +66,6 @@ class DualTemporalDataset(Dataset):
                 self.manifest["sgw_scaler_sha256"],
             ),
             (
-                self.scaler.exact_manifest_sha256,
-                self.manifest["exact_manifest_sha256"],
-            ),
-            (
                 self.scaler.selection_mode,
                 self.manifest["selection_mode"],
             ),
@@ -80,11 +76,19 @@ class DualTemporalDataset(Dataset):
         )
         if any(left != right for left, right in checks):
             raise ValueError("temporal dataset/scaler provenance mismatch")
-        if self.manifest["split"] == "train" and (
-            self.scaler.train_manifest_sha256
-            != file_sha256(self.manifest_path)
-        ):
-            raise ValueError("temporal train scaler manifest mismatch")
+        if self.manifest["split"] == "train":
+            if (
+                self.scaler.train_manifest_sha256
+                != file_sha256(self.manifest_path)
+            ):
+                raise ValueError("temporal train scaler manifest mismatch")
+            if (
+                self.scaler.exact_manifest_sha256
+                != self.manifest["exact_manifest_sha256"]
+            ):
+                raise ValueError(
+                    "temporal train scaler exact-manifest mismatch"
+                )
         self.samples = []
         for record in records:
             compact = record.transition_values[
