@@ -16,6 +16,7 @@ if str(SRC_ROOT) not in sys.path:
 from keysubgraph.data.dual_temporal_manifest import (  # noqa: E402
     read_dual_temporal_manifest,
 )
+from keysubgraph.data.data_split import file_sha256  # noqa: E402
 from keysubgraph.data.dual_temporal_scaler import (  # noqa: E402
     fit_dual_temporal_standardizer,
     save_dual_temporal_standardizer,
@@ -36,7 +37,7 @@ def main():
     if manifest["split"] != "train":
         raise ValueError("temporal scaler must be fitted on train")
     scaler = fit_dual_temporal_standardizer(
-        records, args.train_manifest
+        records, file_sha256(args.train_manifest)
     )
     path = save_dual_temporal_standardizer(
         scaler, args.output, overwrite=args.overwrite
