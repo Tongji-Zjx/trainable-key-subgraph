@@ -25,6 +25,12 @@ from .dual_classification_bottleneck import (
     analyze_dual_classification_bottleneck,
     write_dual_classification_bottleneck_artifacts,
 )
+from .dual_frozen_feature_masking import (
+    FEATURE_MASK_CONDITIONS,
+    apply_frozen_feature_mask,
+    build_frozen_feature_mask_evaluation,
+    write_frozen_feature_mask_artifacts,
+)
 from .dual_transferred_head import (
     build_transferred_head_evaluation,
     write_transferred_head_artifacts,
@@ -49,6 +55,10 @@ __all__ = [
     "write_frozen_equal_logit_ensemble_artifacts",
     "analyze_dual_classification_bottleneck",
     "write_dual_classification_bottleneck_artifacts",
+    "FEATURE_MASK_CONDITIONS",
+    "apply_frozen_feature_mask",
+    "build_frozen_feature_mask_evaluation",
+    "write_frozen_feature_mask_artifacts",
     "build_transferred_head_evaluation",
     "write_transferred_head_artifacts",
 ]
