@@ -19,6 +19,11 @@ from .data_split import (
     read_sample_index,
     read_split_assignments,
 )
+from .sample_index import (
+    NODE_NAME_POLICIES,
+    NODE_NAME_POLICY_STRICT,
+    _node_name_sequence,
+)
 
 
 @dataclass(frozen=True)
@@ -134,24 +139,17 @@ def _tensor_sequence(value: Any, field_name: str, item_dim: int) -> List[torch.T
     raise ValueError("{} is not a valid tensor sequence".format(field_name))
 
 
-def _name_sequence(value: Any, node_counts: Sequence[int]) -> List[Tuple[str, ...]]:
-    if isinstance(value, (list, tuple)) and value and all(
-        isinstance(item, str) for item in value
-    ):
-        if len(set(node_counts)) != 1 or len(value) != node_counts[0]:
-            raise ValueError("shared node_names do not align with node counts")
-        names = tuple(value)
-        return [names for _ in node_counts]
-    if isinstance(value, (list, tuple)) and len(value) == len(node_counts):
-        result = []
-        for item in value:
-            if not isinstance(item, (list, tuple)) or not all(
-                isinstance(name, str) for name in item
-            ):
-                raise ValueError("time-aligned node_names must contain strings")
-            result.append(tuple(item))
-        return result
-    raise ValueError("node_names are neither shared nor time-aligned")
+def _name_sequence(
+    value: Any,
+    node_counts: Sequence[int],
+    node_name_policy: str = NODE_NAME_POLICY_STRICT,
+) -> List[Tuple[str, ...]]:
+    names, _ = _node_name_sequence(
+        value,
+        node_counts,
+        node_name_policy,
+    )
+    return [tuple(item) for item in names]
 
 
 def _optional_float(value: Any) -> Optional[float]:
@@ -166,15 +164,17 @@ def _adapt_payload(
     payload: Dict[str, Any],
     assignment: SplitAssignment,
     edge_presence_threshold: float,
+    node_name_policy: str = NODE_NAME_POLICY_STRICT,
 ) -> GraphSequenceSample:
     required = {
         "adjacency",
-        "node_names",
         "community_sequence",
         "window_starts",
         "global_threshold",
         "t_r",
     }
+    if node_name_policy == NODE_NAME_POLICY_STRICT:
+        required.add("node_names")
     missing = sorted(required - set(payload))
     if missing:
         raise ValueError("missing .pt fields: {}".format(", ".join(missing)))
@@ -223,7 +223,11 @@ def _adapt_payload(
             raise ValueError("community labels must be non-negative")
         adapted_communities.append(values)
 
-    node_names = _name_sequence(payload["node_names"], node_counts)
+    node_names = _name_sequence(
+        payload.get("node_names"),
+        node_counts,
+        node_name_policy,
+    )
     for time_index, (names, node_count) in enumerate(zip(node_names, node_counts)):
         if len(names) != node_count or len(set(names)) != len(names):
             raise ValueError("time {} node names are invalid".format(time_index))
@@ -269,14 +273,18 @@ class GraphSequenceDataset(Dataset):
         splits_csv: Path,
         split: str,
         edge_presence_threshold: float = 0.0,
+        node_name_policy: str = NODE_NAME_POLICY_STRICT,
     ) -> None:
         if split not in DATA_PARTITIONS:
             raise ValueError("split must be one of {}".format(DATA_PARTITIONS))
         if edge_presence_threshold < 0.0:
             raise ValueError("edge_presence_threshold must be non-negative")
+        if node_name_policy not in NODE_NAME_POLICIES:
+            raise ValueError("unsupported node_name_policy")
         self.dataset_root = Path(dataset_root).resolve()
         self.split = split
         self.edge_presence_threshold = float(edge_presence_threshold)
+        self.node_name_policy = node_name_policy
 
         index_samples = read_sample_index(sample_index_csv)
         assignments = read_split_assignments(splits_csv)
@@ -335,7 +343,12 @@ class GraphSequenceDataset(Dataset):
         if not isinstance(payload, dict):
             raise ValueError("{} payload is not a dict".format(assignment.sample_key))
         try:
-            return _adapt_payload(payload, assignment, self.edge_presence_threshold)
+            return _adapt_payload(
+                payload,
+                assignment,
+                self.edge_presence_threshold,
+                self.node_name_policy,
+            )
         except (TypeError, ValueError) as error:
             raise ValueError("{}: {}".format(assignment.sample_key, error))
 

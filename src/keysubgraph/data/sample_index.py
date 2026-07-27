@@ -20,11 +20,17 @@ import torch
 
 REQUIRED_FIELDS = (
     "adjacency",
-    "node_names",
     "community_sequence",
     "window_starts",
     "global_threshold",
     "t_r",
+)
+
+NODE_NAME_POLICY_STRICT = "strict"
+NODE_NAME_POLICY_ROW_INDEX_FALLBACK = "row_index_fallback"
+NODE_NAME_POLICIES = (
+    NODE_NAME_POLICY_STRICT,
+    NODE_NAME_POLICY_ROW_INDEX_FALLBACK,
 )
 
 
@@ -37,11 +43,18 @@ class IndexBuildConfig:
     edge_presence_threshold: float = 0.0
     symmetry_tolerance: float = 1e-6
     diagonal_tolerance: float = 1e-8
+    node_name_policy: str = NODE_NAME_POLICY_STRICT
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "dataset_root", Path(self.dataset_root).resolve())
         if self.edge_presence_threshold < 0.0:
             raise ValueError("edge_presence_threshold must be non-negative")
+        if self.node_name_policy not in NODE_NAME_POLICIES:
+            raise ValueError(
+                "node_name_policy must be one of {}".format(
+                    NODE_NAME_POLICIES
+                )
+            )
 
 
 @dataclass(frozen=True)
@@ -63,6 +76,7 @@ class SampleRecord:
     community_valid: bool
     adjacency_valid: bool
     node_names_valid: bool
+    node_names_fallback: bool
     window_starts_valid: bool
     has_positive_edges: bool
     has_negative_edges: bool
@@ -155,20 +169,47 @@ def _coordinate_sequence(
     raise ValueError("coords must be a tensor or time-aligned tensor sequence")
 
 
-def _node_name_sequence(value: Any, node_counts: Sequence[int]) -> List[List[str]]:
+def row_index_node_names(node_counts: Sequence[int]) -> List[List[str]]:
+    """Return deterministic row identifiers for temporal node alignment."""
+
+    return [
+        ["node_{}".format(index) for index in range(int(node_count))]
+        for node_count in node_counts
+    ]
+
+
+def _node_name_sequence(
+    value: Any,
+    node_counts: Sequence[int],
+    node_name_policy: str = NODE_NAME_POLICY_STRICT,
+) -> Tuple[List[List[str]], bool]:
+    if node_name_policy not in NODE_NAME_POLICIES:
+        raise ValueError("unsupported node_name_policy")
     if isinstance(value, (list, tuple)) and value and all(
         isinstance(item, str) for item in value
     ):
         names = list(value)
-        if len(set(node_counts)) != 1 or len(names) != node_counts[0]:
-            raise ValueError("shared node_names do not align with node counts")
-        return [names for _ in node_counts]
+        if (
+            len(set(node_counts)) == 1
+            and len(names) == node_counts[0]
+            and len(set(names)) == len(names)
+        ):
+            return [names for _ in node_counts], False
 
     if isinstance(value, (list, tuple)) and len(value) == len(node_counts):
-        sequences = [list(item) for item in value]
-        if not all(all(isinstance(name, str) for name in names) for names in sequences):
-            raise ValueError("node_names entries must be strings")
-        return sequences
+        try:
+            sequences = [list(item) for item in value]
+        except TypeError:
+            sequences = []
+        if sequences and all(
+            len(names) == int(node_count)
+            and all(isinstance(name, str) for name in names)
+            and len(set(names)) == len(names)
+            for names, node_count in zip(sequences, node_counts)
+        ):
+            return sequences, False
+    if node_name_policy == NODE_NAME_POLICY_ROW_INDEX_FALLBACK:
+        return row_index_node_names(node_counts), True
     raise ValueError("node_names must be shared or time-aligned string sequences")
 
 
@@ -220,6 +261,7 @@ def _excluded_record(
         community_valid=False,
         adjacency_valid=False,
         node_names_valid=False,
+        node_names_fallback=False,
         window_starts_valid=False,
         has_positive_edges=False,
         has_negative_edges=False,
@@ -257,7 +299,10 @@ def inspect_sample(path: Path, config: IndexBuildConfig) -> SampleRecord:
     if not isinstance(payload, dict):
         return _excluded_record(path, config, ["payload_not_dict"], label=label)
 
-    missing = [field for field in REQUIRED_FIELDS if field not in payload]
+    required_fields = list(REQUIRED_FIELDS)
+    if config.node_name_policy == NODE_NAME_POLICY_STRICT:
+        required_fields.append("node_names")
+    missing = [field for field in required_fields if field not in payload]
     if missing:
         return _excluded_record(
             path,
@@ -368,13 +413,18 @@ def inspect_sample(path: Path, config: IndexBuildConfig) -> SampleRecord:
             spatial_dim = None
 
     try:
-        name_sequences = _node_name_sequence(payload["node_names"], node_counts)
+        name_sequences, node_names_fallback = _node_name_sequence(
+            payload.get("node_names"),
+            node_counts,
+            config.node_name_policy,
+        )
         node_names_valid = all(
             len(names) == node_count and len(set(names)) == len(names)
             for names, node_count in zip(name_sequences, node_counts)
         )
     except (TypeError, ValueError) as error:
         node_names_valid = False
+        node_names_fallback = False
         reasons.append("invalid_node_names:" + str(error))
     if not node_names_valid:
         reasons.append("invalid_node_names")
@@ -410,6 +460,7 @@ def inspect_sample(path: Path, config: IndexBuildConfig) -> SampleRecord:
         community_valid=community_valid,
         adjacency_valid=adjacency_valid,
         node_names_valid=node_names_valid,
+        node_names_fallback=node_names_fallback,
         window_starts_valid=window_starts_valid,
         has_positive_edges=has_positive_edges,
         has_negative_edges=has_negative_edges,
@@ -476,6 +527,9 @@ def summarize_records(records: Sequence[SampleRecord]) -> Dict[str, Any]:
         "total_samples": len(records),
         "included_samples": len(included),
         "excluded_samples": len(excluded),
+        "node_name_fallback_samples": sum(
+            record.node_names_fallback for record in included
+        ),
         "class_counts": {
             str(label): sum(record.label == label for record in included)
             for label in (0, 1)

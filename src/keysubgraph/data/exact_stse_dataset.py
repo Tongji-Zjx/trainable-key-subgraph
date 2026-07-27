@@ -16,6 +16,7 @@ from .graph_dataset import (
     GraphSequenceSample,
     _adapt_payload,
 )
+from .sample_index import NODE_NAME_POLICY_STRICT
 
 
 def _coordinate_sequence(
@@ -167,6 +168,7 @@ class ExactSTSEDataset(GraphSequenceDataset):
         split: str,
         edge_presence_threshold: float = 0.0,
         require_coordinates: bool = True,
+        node_name_policy: str = NODE_NAME_POLICY_STRICT,
     ) -> None:
         super().__init__(
             dataset_root=dataset_root,
@@ -174,6 +176,7 @@ class ExactSTSEDataset(GraphSequenceDataset):
             splits_csv=splits_csv,
             split=split,
             edge_presence_threshold=edge_presence_threshold,
+            node_name_policy=node_name_policy,
         )
         self.require_coordinates = bool(require_coordinates)
 
@@ -204,7 +207,10 @@ class ExactSTSEDataset(GraphSequenceDataset):
             )
         try:
             graph = _adapt_payload(
-                payload, assignment, self.edge_presence_threshold
+                payload,
+                assignment,
+                self.edge_presence_threshold,
+                self.node_name_policy,
             )
             coordinates = _coordinates_for_mode(
                 payload,

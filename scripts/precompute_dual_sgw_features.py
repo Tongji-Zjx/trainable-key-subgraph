@@ -16,7 +16,10 @@ SRC_ROOT = PROJECT_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
-from keysubgraph.data.data_protocol import validate_data_protocol  # noqa: E402
+from keysubgraph.data.data_protocol import (  # noqa: E402
+    protocol_node_name_policy,
+    validate_data_protocol,
+)
 from keysubgraph.data.data_split import file_sha256  # noqa: E402
 from keysubgraph.data.dual_sgw_manifest import (  # noqa: E402
     dual_feature_filename,
@@ -93,6 +96,7 @@ def main():
         args.split,
         protocol["edge_presence_threshold"],
         require_coordinates=False,
+        node_name_policy=protocol_node_name_policy(protocol),
     )
     loader = create_exact_stse_loader(
         dataset,
@@ -211,4 +215,3 @@ def main():
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

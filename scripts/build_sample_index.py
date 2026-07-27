@@ -15,6 +15,7 @@ if str(SRC_ROOT) not in sys.path:
 
 from keysubgraph.data.sample_index import (  # noqa: E402
     IndexBuildConfig,
+    NODE_NAME_POLICIES,
     build_sample_index,
     summarize_records,
     write_index_artifacts,
@@ -46,6 +47,15 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Do not exclude non-negative but non-contiguous community labels.",
     )
+    parser.add_argument(
+        "--node-name-policy",
+        choices=NODE_NAME_POLICIES,
+        default="strict",
+        help=(
+            "Use strict aligned names, or deterministically generate row "
+            "identifiers when names are missing or invalid."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -55,6 +65,7 @@ def main() -> int:
         dataset_root=args.data_root,
         require_contiguous_communities=not args.allow_noncontiguous_communities,
         edge_presence_threshold=args.edge_presence_threshold,
+        node_name_policy=args.node_name_policy,
     )
     records = build_sample_index(config)
     paths = write_index_artifacts(records, args.output_dir)

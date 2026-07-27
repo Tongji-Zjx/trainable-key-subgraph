@@ -25,6 +25,9 @@ from keysubgraph.data.graph_dataset import (  # noqa: E402
     GraphSequenceDataset,
     create_data_loader,
 )
+from keysubgraph.data.sample_index import (  # noqa: E402
+    NODE_NAME_POLICY_ROW_INDEX_FALLBACK,
+)
 
 
 def _graph(node_count, negative=True):
@@ -218,6 +221,37 @@ class GraphDatasetTest(unittest.TestCase):
         self.assertFalse(hasattr(zero_coordinate_sample, "coordinates"))
         self.assertFalse(hasattr(missing_coordinate_sample, "coordinates"))
 
+    def test_row_index_fallback_replaces_misaligned_names_without_padding(self):
+        first_path = self.dataset_root / self.rows[0]["relative_path"]
+        payload = torch.load(
+            str(first_path), map_location="cpu", weights_only=False
+        )
+        payload["node_names"] = ["Background", "a", "b", "c", "d"]
+        torch.save(payload, str(first_path))
+
+        strict = self._dataset()
+        with self.assertRaisesRegex(ValueError, "node_names"):
+            _ = strict[0]
+
+        fallback = GraphSequenceDataset(
+            self.dataset_root,
+            self.index_path,
+            self.splits_csv,
+            split="train",
+            edge_presence_threshold=0.0,
+            node_name_policy=NODE_NAME_POLICY_ROW_INDEX_FALLBACK,
+        )
+        sample = fallback[0]
+
+        self.assertEqual(sample.node_counts, (3, 2))
+        self.assertEqual(
+            sample.node_names,
+            (
+                ("node_0", "node_1", "node_2"),
+                ("node_0", "node_1"),
+            ),
+        )
+
     def test_list_batch_does_not_pad_or_truncate(self):
         batch = next(iter(create_data_loader(self._dataset(), batch_size=4, seed=7)))
 
@@ -272,6 +306,7 @@ class GraphDatasetTest(unittest.TestCase):
 
         self.assertEqual(payload["sample_count"], 6)
         self.assertEqual(payload["edge_presence_threshold"], 0.0)
+        self.assertEqual(payload["node_name_policy"], "strict")
         self.assertEqual(validate_data_protocol(protocol_path, self.root), payload)
         with self.assertRaises(FileExistsError):
             freeze_data_protocol(
@@ -282,6 +317,29 @@ class GraphDatasetTest(unittest.TestCase):
                 self.splits_json,
                 protocol_path,
             )
+
+    def test_wmrc_protocol_freezes_explicit_row_index_policy(self):
+        protocol_path = self.root / "configs" / "wmrc_protocol.json"
+        payload = freeze_data_protocol(
+            project_root=self.root,
+            dataset_root=self.dataset_root,
+            sample_index_csv=self.index_path,
+            splits_csv=self.splits_csv,
+            splits_json=self.splits_json,
+            output_path=protocol_path,
+            protocol_name="wmrc_no_coord",
+            node_name_policy=NODE_NAME_POLICY_ROW_INDEX_FALLBACK,
+        )
+
+        self.assertEqual(payload["protocol_name"], "wmrc_no_coord")
+        self.assertEqual(
+            payload["node_name_policy"],
+            NODE_NAME_POLICY_ROW_INDEX_FALLBACK,
+        )
+        self.assertEqual(
+            validate_data_protocol(protocol_path, self.root),
+            payload,
+        )
 
 
 if __name__ == "__main__":

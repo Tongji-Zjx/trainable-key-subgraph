@@ -17,6 +17,7 @@ if str(SRC_ROOT) not in sys.path:
 
 from keysubgraph.data.sample_index import (  # noqa: E402
     IndexBuildConfig,
+    NODE_NAME_POLICY_ROW_INDEX_FALLBACK,
     build_sample_index,
     inspect_sample,
     write_index_artifacts,
@@ -167,6 +168,53 @@ class SampleIndexTest(unittest.TestCase):
         self.assertTrue(missing_record.included)
         self.assertFalse(missing_record.coords_valid)
 
+    def test_row_index_fallback_accepts_missing_and_misaligned_names(self):
+        graph = _signed_adjacency(3)
+        communities = [torch.tensor([0, 0, 1])]
+        missing_payload = _payload([graph], communities)
+        missing_payload.pop("node_names")
+        missing_path = self._save(
+            "FALLBACK",
+            0,
+            "FALLBACK_missing_1.pt",
+            missing_payload,
+        )
+        misaligned_payload = _payload(
+            [graph],
+            communities,
+            node_names=["Background", "a", "b", "c"],
+        )
+        misaligned_path = self._save(
+            "FALLBACK",
+            1,
+            "FALLBACK_misaligned_1.pt",
+            misaligned_payload,
+        )
+
+        strict_missing = inspect_sample(
+            missing_path, IndexBuildConfig(self.root)
+        )
+        strict_misaligned = inspect_sample(
+            misaligned_path, IndexBuildConfig(self.root)
+        )
+        fallback_config = IndexBuildConfig(
+            self.root,
+            node_name_policy=NODE_NAME_POLICY_ROW_INDEX_FALLBACK,
+        )
+        fallback_missing = inspect_sample(missing_path, fallback_config)
+        fallback_misaligned = inspect_sample(
+            misaligned_path, fallback_config
+        )
+
+        self.assertFalse(strict_missing.included)
+        self.assertFalse(strict_misaligned.included)
+        self.assertTrue(fallback_missing.included)
+        self.assertTrue(fallback_misaligned.included)
+        self.assertTrue(fallback_missing.node_names_valid)
+        self.assertTrue(fallback_misaligned.node_names_valid)
+        self.assertTrue(fallback_missing.node_names_fallback)
+        self.assertTrue(fallback_misaligned.node_names_fallback)
+
     def test_artifacts_are_deterministic_and_partition_inventory(self):
         valid_payload = _payload(
             [_signed_adjacency(3)],
@@ -191,6 +239,7 @@ class SampleIndexTest(unittest.TestCase):
         self.assertEqual(summary["total_samples"], 2)
         self.assertEqual(summary["included_samples"], 1)
         self.assertEqual(summary["excluded_samples"], 1)
+        self.assertEqual(summary["node_name_fallback_samples"], 0)
 
         with paths["inventory"].open("r", encoding="utf-8", newline="") as handle:
             inventory = list(csv.DictReader(handle))

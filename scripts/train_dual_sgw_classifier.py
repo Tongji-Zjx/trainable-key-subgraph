@@ -15,7 +15,10 @@ SRC_ROOT = PROJECT_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
-from keysubgraph.data.data_protocol import validate_data_protocol  # noqa: E402
+from keysubgraph.data.data_protocol import (  # noqa: E402
+    protocol_node_name_policy,
+    validate_data_protocol,
+)
 from keysubgraph.data.data_split import file_sha256  # noqa: E402
 from keysubgraph.data.dual_sgw_manifest import (  # noqa: E402
     read_dual_sgw_manifest,
@@ -102,12 +105,14 @@ def main():
         "train",
         protocol["edge_presence_threshold"],
         require_coordinates=False,
+        node_name_policy=protocol_node_name_policy(protocol),
     )
     validation_dataset = ExactSTSEDataset(
         *common,
         "validation",
         protocol["edge_presence_threshold"],
         require_coordinates=False,
+        node_name_policy=protocol_node_name_policy(protocol),
     )
     if {item.sample_key for item in train_dataset.assignments} != set(
         train_lookup

@@ -14,9 +14,11 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from keysubgraph.data.data_protocol import (  # noqa: E402
+    PARTITIONED_PROTOCOL_NAMES,
     freeze_data_protocol,
     validate_data_protocol,
 )
+from keysubgraph.data.sample_index import NODE_NAME_POLICIES  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
@@ -29,8 +31,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--edge-presence-threshold", type=float, default=0.0)
     parser.add_argument(
         "--protocol-name",
-        choices=("strict_theory", "all_samples_exploratory"),
+        choices=PARTITIONED_PROTOCOL_NAMES + ("all_samples_exploratory",),
         default="strict_theory",
+    )
+    parser.add_argument(
+        "--node-name-policy",
+        choices=NODE_NAME_POLICIES,
+        default="strict",
     )
     parser.add_argument("--overwrite", action="store_true")
     return parser.parse_args()
@@ -51,6 +58,7 @@ def main() -> int:
             output_path=args.output,
             edge_presence_threshold=args.edge_presence_threshold,
             protocol_name=args.protocol_name,
+            node_name_policy=args.node_name_policy,
             overwrite=args.overwrite,
         )
     print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))

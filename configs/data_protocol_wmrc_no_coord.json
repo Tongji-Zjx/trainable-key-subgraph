@@ -1,0 +1,35 @@
+{
+  "batching": "list_based_variable_length_no_padding_no_truncation",
+  "community_policy": "community ids are local grouping labels and must never be passed to nn.Embedding",
+  "edge_presence_rule": "abs(A_ij) > edge_presence_threshold",
+  "edge_presence_threshold": 0.0,
+  "experiment_mode": "partitioned_evaluation",
+  "group_key": "site::subject_id (sample_key fallback when subject_id is empty)",
+  "immutable": true,
+  "label_source": "sample_index.csv and splits.csv only; .pt labels are ignored",
+  "model_selection_policy": "validation-only model selection",
+  "node_name_policy": "row_index_fallback",
+  "paths": {
+    "dataset_root": "data/wmrc_5_0.5",
+    "sample_index_csv": "outputs/wmrc/index/sample_index.csv",
+    "splits_csv": "outputs/wmrc/splits/splits.csv",
+    "splits_json": "outputs/wmrc/splits/splits.json"
+  },
+  "protocol_name": "wmrc_no_coord",
+  "sample_count": 546,
+  "schema_version": 1,
+  "sha256": {
+    "sample_index_csv": "8dccb458b746a589dff583f04166dc0f7e50524639842bd00c6f143ef0a3e52d",
+    "splits_csv": "47f15cc2bd2867741eff9a21a3ad7cd80a2e33c10089f17983f40198a71d2f1b",
+    "splits_json": "8caa15606b1a5a3f0f1f6da426dbeb934fd1b4b9092572b670fcbbd7cc5de7ed"
+  },
+  "signed_edge_policy": "positive and negative nonzero edges are both valid",
+  "source_global_threshold_policy": ".pt global_threshold is retained as metadata only",
+  "split_policy": "reuse splits.csv; training code must not randomly re-split",
+  "split_ratios": {
+    "test": 0.15,
+    "train": 0.7,
+    "validation": 0.15
+  },
+  "split_seed": 2026
+}

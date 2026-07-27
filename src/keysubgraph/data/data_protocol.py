@@ -9,6 +9,10 @@ from typing import Any, Dict
 
 from .data_split import file_sha256, read_sample_index, read_split_assignments
 from .full_cohort import FULL_COHORT_MODE
+from .sample_index import NODE_NAME_POLICIES, NODE_NAME_POLICY_STRICT
+
+
+PARTITIONED_PROTOCOL_NAMES = ("strict_theory", "wmrc_no_coord")
 
 
 def protocol_partitions(protocol: Dict[str, Any]):
@@ -19,6 +23,15 @@ def protocol_partitions(protocol: Dict[str, Any]):
         "validation",
         "test",
     )
+
+
+def protocol_node_name_policy(protocol: Dict[str, Any]) -> str:
+    """Return the explicit policy, preserving strict legacy behavior."""
+
+    policy = protocol.get("node_name_policy", NODE_NAME_POLICY_STRICT)
+    if policy not in NODE_NAME_POLICIES:
+        raise ValueError("protocol contains an unsupported node_name_policy")
+    return policy
 
 
 def _portable_path(path: Path, project_root: Path) -> str:
@@ -47,6 +60,7 @@ def freeze_data_protocol(
     output_path: Path,
     edge_presence_threshold: float = 0.0,
     protocol_name: str = "strict_theory",
+    node_name_policy: str = NODE_NAME_POLICY_STRICT,
     overwrite: bool = False,
 ) -> Dict[str, Any]:
     """Validate data artifacts and write their reproducible contract."""
@@ -67,8 +81,13 @@ def freeze_data_protocol(
         )
     if edge_presence_threshold < 0.0:
         raise ValueError("edge_presence_threshold must be non-negative")
-    if protocol_name not in ("strict_theory", "all_samples_exploratory"):
+    supported_protocol_names = PARTITIONED_PROTOCOL_NAMES + (
+        "all_samples_exploratory",
+    )
+    if protocol_name not in supported_protocol_names:
         raise ValueError("unsupported protocol_name")
+    if node_name_policy not in NODE_NAME_POLICIES:
+        raise ValueError("unsupported node_name_policy")
 
     samples = read_sample_index(sample_index_csv)
     assignments = read_split_assignments(splits_csv)
@@ -96,8 +115,10 @@ def freeze_data_protocol(
             raise ValueError("all-sample protocol must declare ratios={'all': 1.0}")
     elif any(assignment.split == "all" for assignment in assignments):
         raise ValueError("'all' assignments require all_samples_exploratory mode")
-    elif protocol_name != "strict_theory":
-        raise ValueError("partitioned evaluation requires strict_theory protocol")
+    elif protocol_name not in PARTITIONED_PROTOCOL_NAMES:
+        raise ValueError(
+            "partitioned evaluation requires a partitioned protocol"
+        )
 
     missing_files = [
         sample.relative_path
@@ -143,6 +164,7 @@ def freeze_data_protocol(
         "community_policy": (
             "community ids are local grouping labels and must never be passed to nn.Embedding"
         ),
+        "node_name_policy": node_name_policy,
         "split_seed": int(split_payload["seed"]),
         "split_ratios": split_payload["ratios"],
         "group_key": split_payload["group_key"],
@@ -160,6 +182,7 @@ def validate_data_protocol(protocol_path: Path, project_root: Path) -> Dict[str,
         payload = json.load(handle)
     if payload.get("schema_version") != 1 or not payload.get("immutable"):
         raise ValueError("unsupported or mutable data protocol")
+    protocol_node_name_policy(payload)
     for name in ("sample_index_csv", "splits_csv", "splits_json"):
         artifact = project_root / payload["paths"][name]
         if not artifact.is_file():

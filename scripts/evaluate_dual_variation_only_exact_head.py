@@ -24,7 +24,10 @@ from keysubgraph.analysis.dual_variation_only_exact_head import (  # noqa: E402
     build_variation_only_exact_head_evaluation,
     write_variation_only_exact_head_artifacts,
 )
-from keysubgraph.data.data_protocol import validate_data_protocol  # noqa: E402
+from keysubgraph.data.data_protocol import (  # noqa: E402
+    protocol_node_name_policy,
+    validate_data_protocol,
+)
 from keysubgraph.data.data_split import file_sha256  # noqa: E402
 from keysubgraph.data.dual_sgw_manifest import (  # noqa: E402
     read_dual_sgw_manifest,
@@ -74,6 +77,7 @@ def _dataset(protocol, split):
         split,
         protocol["edge_presence_threshold"],
         require_coordinates=False,
+        node_name_policy=protocol_node_name_policy(protocol),
     )
 
 

@@ -15,7 +15,11 @@ SRC_ROOT = PROJECT_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
-from keysubgraph.data.data_protocol import validate_data_protocol  # noqa: E402
+from keysubgraph.data.data_protocol import (  # noqa: E402
+    protocol_node_name_policy,
+    protocol_partitions,
+    validate_data_protocol,
+)
 from keysubgraph.data.data_split import file_sha256  # noqa: E402
 from keysubgraph.data.exact_stse_dataset import (  # noqa: E402
     ExactSTSEDataset,
@@ -59,9 +63,16 @@ def parse_args():
 def main():
     args = parse_args()
     protocol = validate_data_protocol(args.protocol, PROJECT_ROOT)
-    if protocol.get("protocol_name") != "exact_stse_no_coord_full_cohort":
-        raise ValueError("dual selector requires the frozen 938-sample protocol")
+    if tuple(protocol_partitions(protocol)) != (
+        "train",
+        "validation",
+        "test",
+    ):
+        raise ValueError(
+            "dual selector requires a frozen partitioned protocol"
+        )
     paths = protocol["paths"]
+    node_name_policy = protocol_node_name_policy(protocol)
     common = (
         PROJECT_ROOT / paths["dataset_root"],
         PROJECT_ROOT / paths["sample_index_csv"],
@@ -72,12 +83,14 @@ def main():
         "train",
         protocol["edge_presence_threshold"],
         require_coordinates=False,
+        node_name_policy=node_name_policy,
     )
     validation_dataset = ExactSTSEDataset(
         *common,
         "validation",
         protocol["edge_presence_threshold"],
         require_coordinates=False,
+        node_name_policy=node_name_policy,
     )
     device = torch.device(
         "cuda"
@@ -143,4 +156,3 @@ def main():
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

@@ -118,6 +118,7 @@ def prepare_fold_protocol(
         sample_index_csv=source_index, splits_csv=split_csv, splits_json=split_json,
         output_path=protocol_json,
         edge_presence_threshold=float(source_protocol["edge_presence_threshold"]),
+        node_name_policy=source_protocol.get("node_name_policy", "strict"),
         overwrite=overwrite,
     )
     protocol["crossfit"] = {
