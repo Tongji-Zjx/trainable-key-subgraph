@@ -40,15 +40,46 @@ from .dual_sgw_scaler import (
     load_dual_sgw_standardizer,
     save_dual_sgw_standardizer,
 )
-from .dual_sgw_manifest import (
-    dual_feature_filename,
-    read_dual_sgw_manifest,
-    write_dual_sgw_manifest,
-)
-from .dual_sgw_feature_dataset import (
-    DualSGWFeatureDataset,
-    create_dual_sgw_feature_loader,
-)
+
+
+_LAZY_DUAL_SGW_EXPORTS = {
+    "dual_feature_filename": (
+        ".dual_sgw_manifest",
+        "dual_feature_filename",
+    ),
+    "read_dual_sgw_manifest": (
+        ".dual_sgw_manifest",
+        "read_dual_sgw_manifest",
+    ),
+    "write_dual_sgw_manifest": (
+        ".dual_sgw_manifest",
+        "write_dual_sgw_manifest",
+    ),
+    "DualSGWFeatureDataset": (
+        ".dual_sgw_feature_dataset",
+        "DualSGWFeatureDataset",
+    ),
+    "create_dual_sgw_feature_loader": (
+        ".dual_sgw_feature_dataset",
+        "create_dual_sgw_feature_loader",
+    ),
+}
+
+
+def __getattr__(name):
+    """Load D3 feature-artifact helpers without creating an import cycle."""
+
+    target = _LAZY_DUAL_SGW_EXPORTS.get(name)
+    if target is None:
+        raise AttributeError(
+            "module {!r} has no attribute {!r}".format(__name__, name)
+        )
+    module_name, attribute_name = target
+    from importlib import import_module
+
+    value = getattr(import_module(module_name, __name__), attribute_name)
+    globals()[name] = value
+    return value
 
 __all__ = [
     "IndexBuildConfig",
