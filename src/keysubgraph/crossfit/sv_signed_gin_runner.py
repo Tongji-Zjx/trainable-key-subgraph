@@ -11,6 +11,7 @@ SV_CROSSFIT_VARIANTS = (
     "sv_static_variation",
     "signed_gin_variation",
     "signed_gin_static_variation",
+    "signed_gin_multibranch_late_fusion",
 )
 
 
@@ -173,6 +174,20 @@ def build_sv_crossfit_fold_commands(
                 run / "best_evaluation.json",
             )
         )
+        if variant == "signed_gin_multibranch_late_fusion":
+            train_command = commands[-1][1]
+            train_command.extend(
+                [
+                    "--message-mode",
+                    "signed_normalized",
+                    "--pooling",
+                    "mean_std",
+                    "--gin-residual",
+                    "--gin-jumping-knowledge",
+                    "--auxiliary-loss-weight",
+                    "0.25",
+                ]
+            )
         commands.append(
             (
                 "evaluate_{}".format(variant),

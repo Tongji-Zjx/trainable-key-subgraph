@@ -64,6 +64,25 @@ class SVSignedGINTest(unittest.TestCase):
             torch.allclose(stronger[0], torch.tensor((4.0, 6.0)))
         )
 
+    def test_normalized_signed_aggregation_preserves_sign(self):
+        layer = SignedGINLayer(
+            1,
+            dropout=0.0,
+            learnable_epsilon=False,
+            message_mode="signed_normalized",
+        )
+        states = torch.tensor(((1.0,), (3.0,)))
+        positive = torch.tensor(((0.0, 2.0), (2.0, 0.0)))
+        negative = -positive
+        positive_output = layer.signed_aggregate(states, positive)
+        negative_output = layer.signed_aggregate(states, negative)
+        self.assertTrue(
+            torch.allclose(positive_output[0], torch.tensor((4.0,)))
+        )
+        self.assertTrue(
+            torch.allclose(negative_output[0], torch.tensor((-2.0,)))
+        )
+
     def test_attention_and_node_permutation_invariance(self):
         torch.manual_seed(719)
         config = SVSignedGINConfig(dropout=0.0)
@@ -83,7 +102,7 @@ class SVSignedGINTest(unittest.TestCase):
             self.assertAlmostEqual(float(weights.sum()), 1.0, places=6)
             self.assertTrue(bool((weights >= 0.0).all()))
 
-    def test_all_three_variants_have_expected_dimensions(self):
+    def test_all_variants_have_expected_dimensions(self):
         batch = SVSignedGINBatch(
             (_sample("a", 0), _sample("b", 1))
         )
@@ -94,7 +113,11 @@ class SVSignedGINTest(unittest.TestCase):
             output = model(batch)
             expected = (
                 48
-                if variant == "signed_gin_static_variation"
+                if variant
+                in (
+                    "signed_gin_static_variation",
+                    "signed_gin_multibranch_late_fusion",
+                )
                 else 32
             )
             self.assertEqual(tuple(output.logits.shape), (2, 2))
@@ -104,6 +127,53 @@ class SVSignedGINTest(unittest.TestCase):
             self.assertEqual(
                 output.diagnostics["preserves_signed_edges"], True
             )
+
+    def test_multibranch_fusion_is_nonnegative_and_supervises_all_branches(self):
+        torch.manual_seed(731)
+        model = SVSignedGINClassifier(
+            SVSignedGINConfig(
+                variant="signed_gin_multibranch_late_fusion",
+                dropout=0.0,
+                message_mode="signed_normalized",
+                pooling="mean_std",
+                gin_residual=True,
+                gin_jumping_knowledge=True,
+            )
+        )
+        batch = SVSignedGINBatch(
+            (_sample("a", 0), _sample("b", 1))
+        )
+        output = model(batch)
+        self.assertEqual(
+            set(output.branch_logits),
+            {"gin", "static_spectral", "variation"},
+        )
+        self.assertTrue(bool((output.fusion_weights >= 0.0).all()))
+        self.assertAlmostEqual(
+            float(output.fusion_weights.sum()), 1.0, places=6
+        )
+        loss = torch.nn.functional.cross_entropy(
+            output.logits, batch.labels
+        )
+        loss = loss + 0.25 * torch.stack(
+            [
+                torch.nn.functional.cross_entropy(
+                    logits, batch.labels
+                )
+                for logits in output.branch_logits.values()
+            ]
+        ).mean()
+        loss.backward()
+        for name, branch in model.branch_classifiers.items():
+            gradient = sum(
+                float(parameter.grad.abs().sum())
+                for parameter in branch.parameters()
+                if parameter.grad is not None
+            )
+            self.assertGreater(gradient, 0.0, name)
+        self.assertGreater(
+            float(model.fusion_log_weights.grad.abs().sum()), 0.0
+        )
 
     def test_classification_gradient_reaches_signed_gin_and_attention(self):
         torch.manual_seed(727)

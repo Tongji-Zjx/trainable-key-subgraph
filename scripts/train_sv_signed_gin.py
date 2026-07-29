@@ -74,6 +74,13 @@ def parse_args():
         choices=SV_SIGNED_GIN_POOLING_MODES,
         default="attention",
     )
+    parser.add_argument("--gin-residual", action="store_true")
+    parser.add_argument(
+        "--gin-jumping-knowledge", action="store_true"
+    )
+    parser.add_argument(
+        "--auxiliary-loss-weight", type=float, default=0.0
+    )
     parser.add_argument("--smoke", action="store_true")
     parser.add_argument("--overfit-samples", type=int)
     parser.add_argument("--disable-early-stopping", action="store_true")
@@ -152,6 +159,8 @@ def main():
             dropout=args.dropout,
             message_mode=args.message_mode,
             pooling=args.pooling,
+            gin_residual=args.gin_residual,
+            gin_jumping_knowledge=args.gin_jumping_knowledge,
         )
     )
     epochs = 1 if args.smoke else args.epochs
@@ -175,6 +184,7 @@ def main():
         ),
         early_stopping_patience=patience,
         selection_metric=selection_metric,
+        auxiliary_loss_weight=args.auxiliary_loss_weight,
         seed=args.seed,
         max_train_batches=2 if args.smoke else None,
         max_validation_batches=2 if args.smoke else None,
@@ -211,6 +221,7 @@ def main():
             ),
             "smoke": bool(args.smoke),
             "overfit_samples": args.overfit_samples,
+            "auxiliary_loss_weight": args.auxiliary_loss_weight,
         }
     )
     print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))

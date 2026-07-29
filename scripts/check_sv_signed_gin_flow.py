@@ -1,4 +1,4 @@
-"""Run a dependency-light local forward/loss/backward check for SG0--SG2."""
+"""Run a dependency-light forward/loss/backward check for all SV variants."""
 
 from __future__ import absolute_import, division, print_function
 
@@ -73,8 +73,22 @@ def main():
     results = {}
     for variant in SV_SIGNED_GIN_VARIANTS:
         torch.manual_seed(42)
+        improved = (
+            variant == "signed_gin_multibranch_late_fusion"
+        )
         model = SVSignedGINClassifier(
-            SVSignedGINConfig(variant=variant, dropout=0.0)
+            SVSignedGINConfig(
+                variant=variant,
+                dropout=0.0,
+                message_mode=(
+                    "signed_normalized"
+                    if improved
+                    else "signed_weighted"
+                ),
+                pooling="mean_std" if improved else "attention",
+                gin_residual=improved,
+                gin_jumping_knowledge=improved,
+            )
         ).to(device)
         output = model(batch)
         loss = balanced_classification_loss(

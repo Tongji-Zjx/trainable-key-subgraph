@@ -19,13 +19,20 @@ SV_SIGNED_GIN_VARIANTS = (
     "sv_static_variation",
     "signed_gin_variation",
     "signed_gin_static_variation",
+    "signed_gin_multibranch_late_fusion",
 )
 SV_SIGNED_GIN_MESSAGE_MODES = (
     "signed_weighted",
+    "signed_normalized",
     "unsigned_weighted",
     "unsigned_binary",
 )
-SV_SIGNED_GIN_POOLING_MODES = ("attention", "mean", "max")
+SV_SIGNED_GIN_POOLING_MODES = (
+    "attention",
+    "mean",
+    "max",
+    "mean_std",
+)
 
 
 @dataclass(frozen=True)
@@ -43,6 +50,8 @@ class SVSignedGINConfig:
     learnable_epsilon: bool = True
     message_mode: str = "signed_weighted"
     pooling: str = "attention"
+    gin_residual: bool = False
+    gin_jumping_knowledge: bool = False
 
     def __post_init__(self) -> None:
         if self.variant not in SV_SIGNED_GIN_VARIANTS:
@@ -77,6 +86,22 @@ class SVSignedGINConfig:
     @property
     def uses_static(self) -> bool:
         return self.variant != "signed_gin_variation"
+
+    @property
+    def uses_late_fusion(self) -> bool:
+        return self.variant == "signed_gin_multibranch_late_fusion"
+
+    @property
+    def gin_output_dim(self) -> int:
+        return self.gin_hidden_dim * (
+            2 if self.pooling == "mean_std" else 1
+        )
+
+    @property
+    def static_input_dim(self) -> int:
+        return (
+            16 if self.uses_late_fusion else self.static_feature_dim
+        )
 
     @property
     def fusion_input_dim(self) -> int:
@@ -159,6 +184,8 @@ class SVSignedGINOutput:
     gin_projection: Optional[torch.Tensor]
     encoder_outputs: Tuple[SVSignedGINEncoderOutput, ...]
     diagnostics: Dict[str, Any]
+    branch_logits: Optional[Dict[str, torch.Tensor]] = None
+    fusion_weights: Optional[torch.Tensor] = None
 
 
 class SignedGINLayer(nn.Module):
@@ -206,6 +233,17 @@ class SignedGINLayer(nn.Module):
             message = positive.matmul(node_states) - (
                 negative_magnitude.matmul(node_states)
             )
+        elif self.message_mode == "signed_normalized":
+            absolute_degree = adjacency.abs().sum(dim=-1).clamp_min(
+                1.0e-8
+            )
+            inverse_sqrt = absolute_degree.rsqrt()
+            normalized = (
+                inverse_sqrt[:, None]
+                * adjacency
+                * inverse_sqrt[None, :]
+            )
+            message = normalized.matmul(node_states)
         elif self.message_mode == "unsigned_weighted":
             message = adjacency.abs().matmul(node_states)
         else:
@@ -247,6 +285,29 @@ class SignedGINKeySubgraphEncoder(nn.Module):
                 for _ in range(self.config.gin_layers)
             ]
         )
+        self.residual_norms = (
+            nn.ModuleList(
+                [
+                    nn.LayerNorm(self.config.gin_hidden_dim)
+                    for _ in range(self.config.gin_layers)
+                ]
+            )
+            if self.config.gin_residual
+            else None
+        )
+        self.jumping_projection = (
+            nn.Sequential(
+                nn.Linear(
+                    self.config.gin_hidden_dim
+                    * (self.config.gin_layers + 1),
+                    self.config.gin_hidden_dim,
+                ),
+                nn.GELU(),
+                nn.LayerNorm(self.config.gin_hidden_dim),
+            )
+            if self.config.gin_jumping_knowledge
+            else None
+        )
         self.attention = nn.Sequential(
             nn.Linear(
                 self.config.gin_hidden_dim,
@@ -273,8 +334,19 @@ class SignedGINKeySubgraphEncoder(nn.Module):
         ):
             raise ValueError("Signed GIN window adjacency is misaligned")
         states = self.node_projection(node_features)
-        for layer in self.layers:
-            states = layer(states, adjacency)
+        history = [states]
+        for layer_index, layer in enumerate(self.layers):
+            updated = layer(states, adjacency)
+            states = (
+                self.residual_norms[layer_index](states + updated)
+                if self.config.gin_residual
+                else updated
+            )
+            history.append(states)
+        if self.jumping_projection is not None:
+            states = self.jumping_projection(
+                torch.cat(history, dim=-1)
+            )
         if self.config.pooling == "attention":
             scores = self.attention(states).squeeze(-1)
             weights = torch.softmax(scores, dim=0)
@@ -284,6 +356,15 @@ class SignedGINKeySubgraphEncoder(nn.Module):
                 (states.shape[0],), 1.0 / float(states.shape[0])
             )
             embedding = states.mean(dim=0)
+        elif self.config.pooling == "mean_std":
+            weights = states.new_full(
+                (states.shape[0],), 1.0 / float(states.shape[0])
+            )
+            mean = states.mean(dim=0)
+            variance = (states - mean).square().mean(dim=0)
+            embedding = torch.cat(
+                (mean, torch.sqrt(variance + 1.0e-8)), dim=-1
+            )
         else:
             maximum = states.max(dim=0)
             embedding = maximum.values
@@ -339,7 +420,7 @@ class SVSignedGINClassifier(nn.Module):
         )
         self.gin_projection = (
             _projection(
-                self.config.gin_hidden_dim,
+                self.config.gin_output_dim,
                 self.config.channel_projection_dim,
             )
             if self.config.uses_gin
@@ -347,7 +428,7 @@ class SVSignedGINClassifier(nn.Module):
         )
         self.static_projection = (
             _projection(
-                self.config.static_feature_dim,
+                self.config.static_input_dim,
                 self.config.channel_projection_dim,
             )
             if self.config.uses_static
@@ -357,15 +438,37 @@ class SVSignedGINClassifier(nn.Module):
             self.config.variation_dim,
             self.config.channel_projection_dim,
         )
-        self.classifier = nn.Sequential(
-            nn.Linear(
-                self.config.fusion_input_dim,
-                self.config.fusion_hidden_dim,
-            ),
-            nn.GELU(),
-            nn.Dropout(self.config.dropout),
-            nn.Linear(self.config.fusion_hidden_dim, 2),
-        )
+        if self.config.uses_late_fusion:
+            self.branch_classifiers = nn.ModuleDict(
+                {
+                    name: nn.Sequential(
+                        nn.Linear(
+                            self.config.channel_projection_dim,
+                            self.config.fusion_hidden_dim,
+                        ),
+                        nn.GELU(),
+                        nn.Dropout(self.config.dropout),
+                        nn.Linear(self.config.fusion_hidden_dim, 2),
+                    )
+                    for name in ("gin", "static_spectral", "variation")
+                }
+            )
+            self.fusion_log_weights = nn.Parameter(
+                torch.zeros(3, dtype=torch.float32)
+            )
+            self.classifier = None
+        else:
+            self.branch_classifiers = None
+            self.register_parameter("fusion_log_weights", None)
+            self.classifier = nn.Sequential(
+                nn.Linear(
+                    self.config.fusion_input_dim,
+                    self.config.fusion_hidden_dim,
+                ),
+                nn.GELU(),
+                nn.Dropout(self.config.dropout),
+                nn.Linear(self.config.fusion_hidden_dim, 2),
+            )
 
     def config_dict(self) -> Dict[str, Any]:
         return asdict(self.config)
@@ -401,12 +504,46 @@ class SVSignedGINClassifier(nn.Module):
 
         static_projected = None
         if self.config.uses_static:
-            static_projected = self.static_projection(static)
+            static_input = (
+                static[:, :16]
+                if self.config.uses_late_fusion
+                else static
+            )
+            static_projected = self.static_projection(static_input)
             channels.append(static_projected)
         variation_projected = self.variation_projection(variation)
         channels.append(variation_projected)
         final = torch.cat(channels, dim=-1)
-        logits = self.classifier(final)
+        branch_logits = None
+        fusion_weights = None
+        if self.config.uses_late_fusion:
+            branch_logits = {
+                "gin": self.branch_classifiers["gin"](
+                    gin_projected
+                ),
+                "static_spectral": self.branch_classifiers[
+                    "static_spectral"
+                ](static_projected),
+                "variation": self.branch_classifiers["variation"](
+                    variation_projected
+                ),
+            }
+            fusion_weights = torch.softmax(
+                self.fusion_log_weights, dim=0
+            )
+            stacked_logits = torch.stack(
+                [
+                    branch_logits["gin"],
+                    branch_logits["static_spectral"],
+                    branch_logits["variation"],
+                ],
+                dim=0,
+            )
+            logits = (
+                stacked_logits * fusion_weights[:, None, None]
+            ).sum(dim=0)
+        else:
+            logits = self.classifier(final)
         if tuple(logits.shape) != (len(batch), 2):
             raise RuntimeError("SV Signed-GIN logits must have shape [B,2]")
         return SVSignedGINOutput(
@@ -423,9 +560,21 @@ class SVSignedGINClassifier(nn.Module):
                 "uses_site_input": False,
                 "uses_raw_community_embedding": False,
                 "preserves_signed_edges": (
-                    self.config.message_mode == "signed_weighted"
+                    self.config.message_mode
+                    in ("signed_weighted", "signed_normalized")
                 ),
                 "message_mode": self.config.message_mode,
                 "pooling": self.config.pooling,
+                "gin_residual": self.config.gin_residual,
+                "gin_jumping_knowledge": (
+                    self.config.gin_jumping_knowledge
+                ),
+                "fusion_mode": (
+                    "nonnegative_logit"
+                    if self.config.uses_late_fusion
+                    else "feature_concatenation"
+                ),
             },
+            branch_logits=branch_logits,
+            fusion_weights=fusion_weights,
         )

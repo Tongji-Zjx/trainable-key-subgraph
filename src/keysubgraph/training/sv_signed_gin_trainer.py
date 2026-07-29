@@ -39,6 +39,7 @@ class SVSignedGINTrainingConfig:
     scheduler_patience: int = 5
     minimum_learning_rate: float = 1.0e-5
     selection_metric: str = "composite_auc"
+    auxiliary_loss_weight: float = 0.0
     seed: int = 42
     max_train_batches: Optional[int] = None
     max_validation_batches: Optional[int] = None
@@ -56,6 +57,8 @@ class SVSignedGINTrainingConfig:
             raise ValueError("SV scheduler factor must lie in (0,1)")
         if self.minimum_learning_rate <= 0.0:
             raise ValueError("SV minimum learning rate must be positive")
+        if self.auxiliary_loss_weight < 0.0:
+            raise ValueError("SV auxiliary loss weight cannot be negative")
         if self.selection_metric not in ("roc_auc", "composite_auc"):
             raise ValueError("unsupported SV selection metric")
 
@@ -159,6 +162,7 @@ def run_sv_signed_gin_epoch(
     max_batches: Optional[int] = None,
     threshold: float = 0.5,
     include_predictions: bool = False,
+    auxiliary_loss_weight: float = 0.0,
 ) -> Dict[str, Any]:
     training = optimizer is not None
     model.train(training)
@@ -168,7 +172,11 @@ def run_sv_signed_gin_epoch(
     probabilities_all: List[float] = []
     keys_all: List[str] = []
     sites_all: List[str] = []
+    branch_probabilities: Dict[str, List[float]] = {}
+    fusion_weight_values: List[List[float]] = []
     loss_total = 0.0
+    main_loss_total = 0.0
+    auxiliary_loss_total = 0.0
     sample_total = 0
     gradient_norms: List[float] = []
     started = time.perf_counter()
@@ -186,8 +194,25 @@ def run_sv_signed_gin_epoch(
         labels = batch.labels.to(device)
         with torch.set_grad_enabled(training):
             output = model(batch)
-            loss = balanced_classification_loss(
+            main_loss = balanced_classification_loss(
                 output.logits, labels, class_weights.to(device)
+            )
+            auxiliary_loss = output.logits.new_zeros(())
+            if output.branch_logits:
+                auxiliary_values = [
+                    balanced_classification_loss(
+                        branch,
+                        labels,
+                        class_weights.to(device),
+                    )
+                    for branch in output.branch_logits.values()
+                ]
+                auxiliary_loss = torch.stack(
+                    auxiliary_values
+                ).mean()
+            loss = (
+                main_loss
+                + float(auxiliary_loss_weight) * auxiliary_loss
             )
             if training:
                 count = int(labels.numel())
@@ -215,9 +240,28 @@ def run_sv_signed_gin_epoch(
                     optimizer.zero_grad(set_to_none=True)
                     accumulated_sample_count = 0
         probabilities = torch.softmax(output.logits, dim=-1)[:, 1]
+        if output.branch_logits:
+            for name, branch_logits in output.branch_logits.items():
+                branch_probabilities.setdefault(name, []).extend(
+                    float(value)
+                    for value in torch.softmax(
+                        branch_logits, dim=-1
+                    )[:, 1].detach().cpu().tolist()
+                )
+        if output.fusion_weights is not None:
+            fusion_weight_values.append(
+                [
+                    float(value)
+                    for value in output.fusion_weights.detach().cpu().tolist()
+                ]
+            )
         count = int(labels.numel())
         sample_total += count
         loss_total += float(loss.detach().cpu()) * count
+        main_loss_total += float(main_loss.detach().cpu()) * count
+        auxiliary_loss_total += (
+            float(auxiliary_loss.detach().cpu()) * count
+        )
         batch_labels = [
             int(value) for value in labels.detach().cpu().tolist()
         ]
@@ -244,6 +288,10 @@ def run_sv_signed_gin_epoch(
     metrics.update(
         {
             "loss": loss_total / float(sample_total),
+            "main_loss": main_loss_total / float(sample_total),
+            "auxiliary_loss": (
+                auxiliary_loss_total / float(sample_total)
+            ),
             "site_stratified_roc_auc": stratified,
             "composite_auc": (
                 0.5 * (float(metrics["roc_auc"]) + float(stratified))
@@ -259,18 +307,44 @@ def run_sv_signed_gin_epoch(
             ),
         }
     )
+    if branch_probabilities:
+        branch_metrics = {}
+        for name, values in sorted(branch_probabilities.items()):
+            current = binary_metrics(labels_all, values, threshold)
+            current["site_stratified_roc_auc"] = (
+                site_stratified_roc_auc(labels_all, values, sites_all)
+                if sites_by_key
+                else None
+            )
+            branch_metrics[name] = current
+        metrics["branch_metrics"] = branch_metrics
+    if fusion_weight_values:
+        names = ("gin", "static_spectral", "variation")
+        metrics["fusion_weights"] = {
+            name: sum(values[index] for values in fusion_weight_values)
+            / float(len(fusion_weight_values))
+            for index, name in enumerate(names)
+        }
     if include_predictions:
-        metrics["predictions"] = [
-            {
+        predictions = []
+        for index, (key, site, label, probability) in enumerate(
+            zip(keys_all, sites_all, labels_all, probabilities_all)
+        ):
+            item = {
                 "sample_key": key,
                 "site": site,
                 "label": label,
                 "positive_probability": probability,
             }
-            for key, site, label, probability in zip(
-                keys_all, sites_all, labels_all, probabilities_all
-            )
-        ]
+            if branch_probabilities:
+                item["branch_positive_probabilities"] = {
+                    name: values[index]
+                    for name, values in sorted(
+                        branch_probabilities.items()
+                    )
+                }
+            predictions.append(item)
+        metrics["predictions"] = predictions
     return metrics
 
 
@@ -330,7 +404,13 @@ def load_sv_signed_gin_checkpoint(
         SV_SIGNED_GIN_CHECKPOINT_SCHEMA_VERSION
     ) or payload.get("model_name") != SV_SIGNED_GIN_MODEL_NAME:
         raise ValueError("not an SV Signed-GIN checkpoint")
-    if payload.get("model_config") != model.config_dict():
+    checkpoint_config = payload.get("model_config")
+    if not isinstance(checkpoint_config, dict):
+        raise ValueError("SV Signed-GIN checkpoint has no model config")
+    normalized_config = model.config.__class__(
+        **checkpoint_config
+    )
+    if asdict(normalized_config) != model.config_dict():
         raise ValueError("SV Signed-GIN model configuration mismatch")
     if expected_provenance is not None and payload.get(
         "provenance"
@@ -386,6 +466,7 @@ def train_sv_signed_gin_classifier(
                 config.gradient_accumulation_steps
             ),
             max_batches=config.max_train_batches,
+            auxiliary_loss_weight=config.auxiliary_loss_weight,
         )
         validation = run_sv_signed_gin_epoch(
             model,
@@ -393,6 +474,7 @@ def train_sv_signed_gin_classifier(
             device,
             class_weights,
             max_batches=config.max_validation_batches,
+            auxiliary_loss_weight=config.auxiliary_loss_weight,
         )
         selection_value = _selection_value(
             validation, config.selection_metric
@@ -433,10 +515,34 @@ def train_sv_signed_gin_classifier(
                 output_dir / "best_checkpoint.pt", payload
             )
         _atomic_json(history_path, history)
+        branch_text = ""
+        if validation.get("branch_metrics"):
+            branch_text = " branch_auc={}".format(
+                ",".join(
+                    "{}:{:.4f}".format(
+                        name,
+                        float(values["roc_auc"]),
+                    )
+                    for name, values in sorted(
+                        validation["branch_metrics"].items()
+                    )
+                    if values["roc_auc"] is not None
+                )
+            )
+        fusion_text = ""
+        if validation.get("fusion_weights"):
+            fusion_text = " fusion={}".format(
+                ",".join(
+                    "{}:{:.3f}".format(name, value)
+                    for name, value in sorted(
+                        validation["fusion_weights"].items()
+                    )
+                )
+            )
         print(
             "epoch {}/{} variant={} train_loss={:.6f} train_auc={} "
             "validation_loss={:.6f} validation_auc={} "
-            "validation_site_auc={} selection={:.6f} lr={:.8f}".format(
+            "validation_site_auc={} selection={:.6f} lr={:.8f}{}{}".format(
                 epoch,
                 config.epochs,
                 model.config.variant,
@@ -447,6 +553,8 @@ def train_sv_signed_gin_classifier(
                 validation["site_stratified_roc_auc"],
                 selection_value,
                 optimizer.param_groups[0]["lr"],
+                branch_text,
+                fusion_text,
             ),
             flush=True,
         )
@@ -469,6 +577,7 @@ def train_sv_signed_gin_classifier(
         class_weights,
         max_batches=config.max_validation_batches,
         include_predictions=True,
+        auxiliary_loss_weight=config.auxiliary_loss_weight,
     )
     labels = [
         int(item["label"]) for item in validation["predictions"]
@@ -505,6 +614,8 @@ def train_sv_signed_gin_classifier(
             for name, threshold in thresholds.items()
         },
         "predictions": validation["predictions"],
+        "branch_metrics": validation.get("branch_metrics"),
+        "fusion_weights": validation.get("fusion_weights"),
     }
     _atomic_json(output_dir / "best_evaluation.json", evaluation)
     return {

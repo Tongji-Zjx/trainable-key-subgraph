@@ -63,6 +63,38 @@ class SVSignedGINCrossfitRunnerTest(unittest.TestCase):
             self.assertIn("--threshold-strategy", evaluation[1])
             self.assertIn("balanced_accuracy", evaluation[1])
 
+    def test_late_fusion_plan_enables_all_frozen_improvements(self):
+        variant = "signed_gin_multibranch_late_fusion"
+        with tempfile.TemporaryDirectory() as directory:
+            plan = build_sv_crossfit_fold_commands(
+                PROJECT_ROOT,
+                Path(directory),
+                0,
+                variants=(variant,),
+                device="cpu",
+                seed=42,
+                selector_epochs=1,
+                model_epochs=1,
+                num_workers=0,
+            )
+        train_command = next(
+            command
+            for name, command, _ in plan
+            if name == "train_{}".format(variant)
+        )
+        expected = (
+            "--message-mode",
+            "signed_normalized",
+            "--pooling",
+            "mean_std",
+            "--gin-residual",
+            "--gin-jumping-knowledge",
+            "--auxiliary-loss-weight",
+            "0.25",
+        )
+        for value in expected:
+            self.assertIn(value, train_command)
+
 
 class SVSignedGINCrossfitSummaryTest(unittest.TestCase):
     def _fixture(self, root):
