@@ -195,6 +195,8 @@ class SVSignedGINTrainingTest(unittest.TestCase):
             )
             legacy["model_config"].pop("gin_residual")
             legacy["model_config"].pop("gin_jumping_knowledge")
+            legacy["model_config"].pop("gin_compact_readout")
+            legacy["model_config"].pop("gin_batch_normalization")
             torch.save(legacy, str(legacy_path))
             legacy_checkpoint = load_sv_signed_gin_checkpoint(
                 legacy_path,
@@ -251,6 +253,8 @@ class SVSignedGINTrainingTest(unittest.TestCase):
                     pooling="mean_std",
                     gin_residual=True,
                     gin_jumping_knowledge=True,
+                    gin_compact_readout=True,
+                    gin_batch_normalization=True,
                 )
             )
             output = root / "training"

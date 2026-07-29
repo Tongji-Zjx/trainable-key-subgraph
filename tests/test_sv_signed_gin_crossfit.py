@@ -89,6 +89,8 @@ class SVSignedGINCrossfitRunnerTest(unittest.TestCase):
             "mean_std",
             "--gin-residual",
             "--gin-jumping-knowledge",
+            "--gin-compact-readout",
+            "--gin-batch-normalization",
             "--auxiliary-loss-weight",
             "0.25",
         )

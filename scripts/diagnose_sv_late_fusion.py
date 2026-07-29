@@ -67,6 +67,7 @@ def _trusted_load(path, device):
 def _collect(model, loader, device):
     values = {
         "gin_representation": [],
+        "gin_normalized_representation": [],
         "gin_projection": [],
         "static_projection": [],
         "variation_projection": [],

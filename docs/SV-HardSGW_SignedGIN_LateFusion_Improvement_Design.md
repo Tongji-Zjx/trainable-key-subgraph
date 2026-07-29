@@ -55,6 +55,10 @@ static structural 在两个数据集上没有提供稳定增益。
 - 每层使用残差连接；
 - 使用 Jumping Knowledge 融合初始层和各消息传递层；
 - 节点池化改为 `mean + std`，避免近似均匀 attention 只产生均值；
+- 将节点读出压缩到 32 维，再以跨时间窗口的 `mean + std`
+  形成 64 维紧凑 GIN 表示，去除高维冗余；
+- 仅用训练批次运行统计对 GIN 表示及其投影做 BatchNorm；
+  validation/test 只使用冻结的 running statistics；
 - GIN 分支拥有独立辅助分类头。
 
 ### 2.4 后期融合
@@ -140,6 +144,9 @@ train replay AUROC >= 0.90
 2. 改进版 final AUROC 不低于最佳独立分支超过 0.01；
 3. validation GIN representation 归一化有效秩不低于 0.10；
 4. GIN projection 平均样本间余弦相似度低于 0.995。
+
+其中第 3 项检查的是 BatchNorm 之前的 64 维紧凑编码器表示，
+不能用批归一化后的数值替代，以免掩盖编码器本身的低秩化。
 
 ### 闸门D：3-fold OOF
 

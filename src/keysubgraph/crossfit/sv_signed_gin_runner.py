@@ -184,6 +184,8 @@ def build_sv_crossfit_fold_commands(
                     "mean_std",
                     "--gin-residual",
                     "--gin-jumping-knowledge",
+                    "--gin-compact-readout",
+                    "--gin-batch-normalization",
                     "--auxiliary-loss-weight",
                     "0.25",
                 ]

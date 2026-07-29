@@ -138,6 +138,8 @@ class SVSignedGINTest(unittest.TestCase):
                 pooling="mean_std",
                 gin_residual=True,
                 gin_jumping_knowledge=True,
+                gin_compact_readout=True,
+                gin_batch_normalization=True,
             )
         )
         batch = SVSignedGINBatch(
@@ -174,6 +176,25 @@ class SVSignedGINTest(unittest.TestCase):
         self.assertGreater(
             float(model.fusion_log_weights.grad.abs().sum()), 0.0
         )
+
+    def test_compact_batch_normalized_gin_supports_singleton_batch(self):
+        model = SVSignedGINClassifier(
+            SVSignedGINConfig(
+                variant="signed_gin_multibranch_late_fusion",
+                dropout=0.0,
+                message_mode="signed_normalized",
+                pooling="mean_std",
+                gin_residual=True,
+                gin_jumping_knowledge=True,
+                gin_compact_readout=True,
+                gin_batch_normalization=True,
+            )
+        )
+        model.train()
+        output = model(SVSignedGINBatch((_sample("only", 1),)))
+        self.assertEqual(tuple(output.gin_representation.shape), (1, 64))
+        self.assertEqual(tuple(output.gin_projection.shape), (1, 16))
+        output.logits.sum().backward()
 
     def test_classification_gradient_reaches_signed_gin_and_attention(self):
         torch.manual_seed(727)

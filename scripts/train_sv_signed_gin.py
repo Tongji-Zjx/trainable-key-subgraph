@@ -79,6 +79,12 @@ def parse_args():
         "--gin-jumping-knowledge", action="store_true"
     )
     parser.add_argument(
+        "--gin-compact-readout", action="store_true"
+    )
+    parser.add_argument(
+        "--gin-batch-normalization", action="store_true"
+    )
+    parser.add_argument(
         "--auxiliary-loss-weight", type=float, default=0.0
     )
     parser.add_argument("--smoke", action="store_true")
@@ -161,6 +167,8 @@ def main():
             pooling=args.pooling,
             gin_residual=args.gin_residual,
             gin_jumping_knowledge=args.gin_jumping_knowledge,
+            gin_compact_readout=args.gin_compact_readout,
+            gin_batch_normalization=args.gin_batch_normalization,
         )
     )
     epochs = 1 if args.smoke else args.epochs

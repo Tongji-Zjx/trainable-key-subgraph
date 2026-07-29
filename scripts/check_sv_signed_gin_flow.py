@@ -88,6 +88,8 @@ def main():
                 pooling="mean_std" if improved else "attention",
                 gin_residual=improved,
                 gin_jumping_knowledge=improved,
+                gin_compact_readout=improved,
+                gin_batch_normalization=improved,
             )
         ).to(device)
         output = model(batch)

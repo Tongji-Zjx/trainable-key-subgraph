@@ -7,6 +7,7 @@ from typing import Any, Dict, Optional, Tuple
 
 import torch
 from torch import nn
+from torch.nn import functional as F
 
 from keysubgraph.features.sv_hard_graph_features import (
     SV_NODE_FEATURE_DIM,
@@ -52,6 +53,8 @@ class SVSignedGINConfig:
     pooling: str = "attention"
     gin_residual: bool = False
     gin_jumping_knowledge: bool = False
+    gin_compact_readout: bool = False
+    gin_batch_normalization: bool = False
 
     def __post_init__(self) -> None:
         if self.variant not in SV_SIGNED_GIN_VARIANTS:
@@ -93,6 +96,16 @@ class SVSignedGINConfig:
 
     @property
     def gin_output_dim(self) -> int:
+        if self.gin_compact_readout:
+            return 4 * self.channel_projection_dim
+        return self.gin_hidden_dim * (
+            2 if self.pooling == "mean_std" else 1
+        )
+
+    @property
+    def gin_window_output_dim(self) -> int:
+        if self.gin_compact_readout:
+            return 2 * self.channel_projection_dim
         return self.gin_hidden_dim * (
             2 if self.pooling == "mean_std" else 1
         )
@@ -186,6 +199,7 @@ class SVSignedGINOutput:
     diagnostics: Dict[str, Any]
     branch_logits: Optional[Dict[str, torch.Tensor]] = None
     fusion_weights: Optional[torch.Tensor] = None
+    gin_normalized_representation: Optional[torch.Tensor] = None
 
 
 class SignedGINLayer(nn.Module):
@@ -316,6 +330,19 @@ class SignedGINKeySubgraphEncoder(nn.Module):
             nn.GELU(),
             nn.Linear(self.config.attention_hidden_dim, 1),
         )
+        self.window_readout_projection = (
+            nn.Sequential(
+                nn.Linear(
+                    self.config.gin_hidden_dim
+                    * (2 if self.config.pooling == "mean_std" else 1),
+                    self.config.gin_window_output_dim,
+                ),
+                nn.GELU(),
+                nn.LayerNorm(self.config.gin_window_output_dim),
+            )
+            if self.config.gin_compact_readout
+            else None
+        )
 
     def encode_window(
         self, window: SVSignedGINWindowInput
@@ -373,6 +400,8 @@ class SignedGINKeySubgraphEncoder(nn.Module):
             weights = (
                 states == maximum.values[None, :]
             ).any(dim=-1).to(states.dtype)
+        if self.window_readout_projection is not None:
+            embedding = self.window_readout_projection(embedding)
         return embedding, weights
 
     def forward(
@@ -387,7 +416,14 @@ class SignedGINKeySubgraphEncoder(nn.Module):
             embeddings.append(embedding)
             attention.append(weights)
         stacked = torch.stack(embeddings, dim=0)
-        representation = stacked.mean(dim=0)
+        if self.config.gin_compact_readout:
+            mean = stacked.mean(dim=0)
+            variance = (stacked - mean).square().mean(dim=0)
+            representation = torch.cat(
+                (mean, torch.sqrt(variance + 1.0e-8)), dim=-1
+            )
+        else:
+            representation = stacked.mean(dim=0)
         return SVSignedGINEncoderOutput(
             representation=representation,
             window_embeddings=tuple(embeddings),
@@ -400,6 +436,34 @@ def _projection(input_dim: int, output_dim: int) -> nn.Sequential:
         nn.Linear(input_dim, output_dim),
         nn.GELU(),
         nn.LayerNorm(output_dim),
+    )
+
+
+class SafeBatchNorm1d(nn.BatchNorm1d):
+    """Use frozen running statistics for singleton training batches."""
+
+    def forward(self, value: torch.Tensor) -> torch.Tensor:
+        if self.training and value.shape[0] == 1:
+            return F.batch_norm(
+                value,
+                self.running_mean,
+                self.running_var,
+                self.weight,
+                self.bias,
+                False,
+                self.momentum,
+                self.eps,
+            )
+        return super().forward(value)
+
+
+def _batch_normalized_projection(
+    input_dim: int, output_dim: int
+) -> nn.Sequential:
+    return nn.Sequential(
+        nn.Linear(input_dim, output_dim, bias=False),
+        SafeBatchNorm1d(output_dim),
+        nn.GELU(),
     )
 
 
@@ -418,10 +482,23 @@ class SVSignedGINClassifier(nn.Module):
             if self.config.uses_gin
             else None
         )
+        self.gin_feature_normalization = (
+            SafeBatchNorm1d(self.config.gin_output_dim)
+            if self.config.uses_gin
+            and self.config.gin_batch_normalization
+            else None
+        )
         self.gin_projection = (
-            _projection(
-                self.config.gin_output_dim,
-                self.config.channel_projection_dim,
+            (
+                _batch_normalized_projection(
+                    self.config.gin_output_dim,
+                    self.config.channel_projection_dim,
+                )
+                if self.config.gin_batch_normalization
+                else _projection(
+                    self.config.gin_output_dim,
+                    self.config.channel_projection_dim,
+                )
             )
             if self.config.uses_gin
             else None
@@ -492,13 +569,23 @@ class SVSignedGINClassifier(nn.Module):
         channels = []
         encoder_outputs = ()
         gin_representation = None
+        gin_normalized_representation = None
         gin_projected = None
         if self.config.uses_gin:
             outputs = tuple(self.encoder(sample) for sample in batch)
             gin_representation = torch.stack(
                 [output.representation for output in outputs], dim=0
             )
-            gin_projected = self.gin_projection(gin_representation)
+            gin_normalized_representation = gin_representation
+            if self.gin_feature_normalization is not None:
+                gin_normalized_representation = (
+                    self.gin_feature_normalization(
+                        gin_representation
+                    )
+                )
+            gin_projected = self.gin_projection(
+                gin_normalized_representation
+            )
             channels.append(gin_projected)
             encoder_outputs = outputs
 
@@ -569,6 +656,12 @@ class SVSignedGINClassifier(nn.Module):
                 "gin_jumping_knowledge": (
                     self.config.gin_jumping_knowledge
                 ),
+                "gin_compact_readout": (
+                    self.config.gin_compact_readout
+                ),
+                "gin_batch_normalization": (
+                    self.config.gin_batch_normalization
+                ),
                 "fusion_mode": (
                     "nonnegative_logit"
                     if self.config.uses_late_fusion
@@ -577,4 +670,7 @@ class SVSignedGINClassifier(nn.Module):
             },
             branch_logits=branch_logits,
             fusion_weights=fusion_weights,
+            gin_normalized_representation=(
+                gin_normalized_representation
+            ),
         )
