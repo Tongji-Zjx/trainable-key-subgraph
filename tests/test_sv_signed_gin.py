@@ -107,8 +107,20 @@ class SVSignedGINTest(unittest.TestCase):
             (_sample("a", 0), _sample("b", 1))
         )
         for variant in SV_SIGNED_GIN_VARIANTS:
+            extra = {}
+            if (
+                variant
+                == "signed_gin_static_anchor_residual_attention"
+            ):
+                extra = {
+                    "pooling": "mean_std",
+                    "gin_compact_readout": True,
+                    "gin_residual_attention": True,
+                }
             model = SVSignedGINClassifier(
-                SVSignedGINConfig(variant=variant, dropout=0.0)
+                SVSignedGINConfig(
+                    variant=variant, dropout=0.0, **extra
+                )
             )
             output = model(batch)
             expected = (
@@ -118,6 +130,7 @@ class SVSignedGINTest(unittest.TestCase):
                     "signed_gin_static_variation",
                     "signed_gin_multibranch_late_fusion",
                     "signed_gin_static_anchor_residual",
+                    "signed_gin_static_anchor_residual_attention",
                 )
                 else 32
             )
@@ -287,6 +300,79 @@ class SVSignedGINTest(unittest.TestCase):
             self.assertIsNotNone(
                 model.residual_gate_logits[name].grad
             )
+
+    def test_residual_attention_is_zero_output_and_trainable(self):
+        torch.manual_seed(751)
+        common = dict(
+            gin_hidden_dim=8,
+            attention_hidden_dim=4,
+            channel_projection_dim=4,
+            fusion_hidden_dim=4,
+            dropout=0.0,
+            message_mode="signed_normalized",
+            pooling="mean_std",
+            gin_residual=True,
+            gin_jumping_knowledge=True,
+            gin_compact_readout=True,
+            gin_batch_normalization=True,
+        )
+        v1a = SVSignedGINClassifier(
+            SVSignedGINConfig(
+                variant="signed_gin_static_anchor_residual",
+                **common
+            )
+        )
+        v1b = SVSignedGINClassifier(
+            SVSignedGINConfig(
+                variant=(
+                    "signed_gin_static_anchor_residual_attention"
+                ),
+                gin_residual_attention=True,
+                **common
+            )
+        )
+        v1a.reset_residual_fusion_parameters(42)
+        v1b.reset_residual_fusion_parameters(42)
+        batch = SVSignedGINBatch(
+            (_sample("a", 0), _sample("b", 1))
+        )
+        v1a.eval()
+        v1b.eval()
+        output_a = v1a(batch)
+        output_b = v1b(batch)
+        self.assertTrue(
+            torch.equal(
+                output_a.branch_logits["static_spectral"],
+                output_b.branch_logits["static_spectral"],
+            )
+        )
+        self.assertTrue(
+            torch.equal(
+                output_a.gin_representation,
+                output_b.gin_representation,
+            )
+        )
+        self.assertTrue(torch.equal(output_a.logits, output_b.logits))
+        self.assertLess(
+            float(output_b.residual_gates["attention"]), 0.01
+        )
+
+        v1b.set_training_stage("residual_experts")
+        with torch.no_grad():
+            v1b.encoder.attention_residual_projection[-1].weight.fill_(
+                0.1
+            )
+            v1b.branch_classifiers["gin"][-1].weight.fill_(0.1)
+        loss = torch.nn.functional.cross_entropy(
+            v1b(batch).logits, batch.labels
+        )
+        loss.backward()
+        attention_gradient = sum(
+            float(parameter.grad.abs().sum())
+            for parameter in v1b.encoder.attention.parameters()
+            if parameter.grad is not None
+        )
+        self.assertGreater(attention_gradient, 0.0)
 
     def test_classification_gradient_reaches_signed_gin_and_attention(self):
         torch.manual_seed(727)

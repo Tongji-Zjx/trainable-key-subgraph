@@ -22,6 +22,7 @@ SV_SIGNED_GIN_VARIANTS = (
     "signed_gin_static_variation",
     "signed_gin_multibranch_late_fusion",
     "signed_gin_static_anchor_residual",
+    "signed_gin_static_anchor_residual_attention",
 )
 SV_SIGNED_GIN_MESSAGE_MODES = (
     "signed_weighted",
@@ -56,6 +57,7 @@ class SVSignedGINConfig:
     gin_jumping_knowledge: bool = False
     gin_compact_readout: bool = False
     gin_batch_normalization: bool = False
+    gin_residual_attention: bool = False
     residual_gate_initial_logit: float = -6.0
 
     def __post_init__(self) -> None:
@@ -87,6 +89,24 @@ class SVSignedGINConfig:
             raise ValueError("unsupported SV Signed-GIN message mode")
         if self.pooling not in SV_SIGNED_GIN_POOLING_MODES:
             raise ValueError("unsupported SV Signed-GIN pooling")
+        if self.gin_residual_attention and (
+            self.variant
+            != "signed_gin_static_anchor_residual_attention"
+            or self.pooling != "mean_std"
+            or not self.gin_compact_readout
+        ):
+            raise ValueError(
+                "residual attention requires compact mean-std "
+                "static-anchor residual fusion"
+            )
+        if (
+            self.variant
+            == "signed_gin_static_anchor_residual_attention"
+            and not self.gin_residual_attention
+        ):
+            raise ValueError(
+                "residual-attention variant must enable its attention"
+            )
 
     @property
     def uses_gin(self) -> bool:
@@ -101,11 +121,15 @@ class SVSignedGINConfig:
         return self.variant in (
             "signed_gin_multibranch_late_fusion",
             "signed_gin_static_anchor_residual",
+            "signed_gin_static_anchor_residual_attention",
         )
 
     @property
     def uses_residual_fusion(self) -> bool:
-        return self.variant == "signed_gin_static_anchor_residual"
+        return self.variant in (
+            "signed_gin_static_anchor_residual",
+            "signed_gin_static_anchor_residual_attention",
+        )
 
     @property
     def gin_output_dim(self) -> int:
@@ -357,6 +381,32 @@ class SignedGINKeySubgraphEncoder(nn.Module):
             if self.config.gin_compact_readout
             else None
         )
+        self.attention_residual_projection = None
+        self.attention_residual_gate_logit = None
+        if self.config.gin_residual_attention:
+            self.attention_residual_projection = nn.Sequential(
+                nn.Linear(
+                    self.config.gin_hidden_dim,
+                    self.config.gin_window_output_dim,
+                ),
+                nn.GELU(),
+                nn.Linear(
+                    self.config.gin_window_output_dim,
+                    self.config.gin_window_output_dim,
+                ),
+            )
+            nn.init.zeros_(
+                self.attention_residual_projection[-1].weight
+            )
+            nn.init.zeros_(
+                self.attention_residual_projection[-1].bias
+            )
+            self.attention_residual_gate_logit = nn.Parameter(
+                torch.tensor(
+                    self.config.residual_gate_initial_logit,
+                    dtype=torch.float32,
+                )
+            )
 
     def encode_window(
         self, window: SVSignedGINWindowInput
@@ -388,6 +438,7 @@ class SignedGINKeySubgraphEncoder(nn.Module):
             states = self.jumping_projection(
                 torch.cat(history, dim=-1)
             )
+        attention_embedding = None
         if self.config.pooling == "attention":
             scores = self.attention(states).squeeze(-1)
             weights = torch.softmax(scores, dim=0)
@@ -406,6 +457,12 @@ class SignedGINKeySubgraphEncoder(nn.Module):
             embedding = torch.cat(
                 (mean, torch.sqrt(variance + 1.0e-8)), dim=-1
             )
+            if self.config.gin_residual_attention:
+                scores = self.attention(states).squeeze(-1)
+                weights = torch.softmax(scores, dim=0)
+                attention_embedding = (
+                    states * weights[:, None]
+                ).sum(dim=0)
         else:
             maximum = states.max(dim=0)
             embedding = maximum.values
@@ -416,6 +473,16 @@ class SignedGINKeySubgraphEncoder(nn.Module):
             ).any(dim=-1).to(states.dtype)
         if self.window_readout_projection is not None:
             embedding = self.window_readout_projection(embedding)
+        if self.config.gin_residual_attention:
+            embedding = (
+                embedding
+                + torch.sigmoid(
+                    self.attention_residual_gate_logit
+                )
+                * self.attention_residual_projection(
+                    attention_embedding
+                )
+            )
         return embedding, weights
 
     def forward(
@@ -627,6 +694,53 @@ class SVSignedGINClassifier(nn.Module):
             for parameter in self.residual_gate_logits.parameters():
                 parameter.requires_grad_(True)
 
+    def reset_residual_fusion_parameters(self, seed: int) -> None:
+        """Deterministically initialize paired V1 candidates by component."""
+
+        if not self.config.uses_residual_fusion:
+            raise ValueError(
+                "residual parameter reset requires residual fusion"
+            )
+
+        def reset_module(module):
+            reset = getattr(module, "reset_parameters", None)
+            if callable(reset):
+                reset()
+
+        components = (
+            (self.encoder, 101),
+            (self.gin_feature_normalization, 102),
+            (self.gin_projection, 103),
+            (self.static_projection, 104),
+            (self.variation_projection, 105),
+            (self.branch_classifiers["gin"], 106),
+            (self.branch_classifiers["static_spectral"], 107),
+            (self.branch_classifiers["variation"], 108),
+        )
+        with torch.random.fork_rng(devices=[]):
+            for module, offset in components:
+                if module is None:
+                    continue
+                torch.manual_seed(int(seed) + offset)
+                module.apply(reset_module)
+        with torch.no_grad():
+            self.fusion_log_weights.zero_()
+            for value in self.residual_gate_logits.values():
+                value.fill_(self.config.residual_gate_initial_logit)
+            for name in ("gin", "variation"):
+                output_layer = self.branch_classifiers[name][-1]
+                output_layer.weight.zero_()
+                output_layer.bias.zero_()
+            if self.config.gin_residual_attention:
+                self.encoder.attention_residual_gate_logit.fill_(
+                    self.config.residual_gate_initial_logit
+                )
+                output_layer = (
+                    self.encoder.attention_residual_projection[-1]
+                )
+                output_layer.weight.zero_()
+                output_layer.bias.zero_()
+
     def train(self, mode: bool = True):
         super().train(mode)
         if mode and self.config.uses_residual_fusion:
@@ -670,7 +784,11 @@ class SVSignedGINClassifier(nn.Module):
         gin_representation = None
         gin_normalized_representation = None
         gin_projected = None
-        if self.config.uses_gin:
+        skip_frozen_gin = (
+            self.config.uses_residual_fusion
+            and self._training_stage == "static_anchor"
+        )
+        if self.config.uses_gin and not skip_frozen_gin:
             outputs = tuple(self.encoder(sample) for sample in batch)
             gin_representation = torch.stack(
                 [output.representation for output in outputs], dim=0
@@ -687,6 +805,11 @@ class SVSignedGINClassifier(nn.Module):
             )
             channels.append(gin_projected)
             encoder_outputs = outputs
+        elif self.config.uses_gin:
+            gin_projected = static.new_zeros(
+                (len(batch), self.config.channel_projection_dim)
+            )
+            channels.append(gin_projected)
 
         static_projected = None
         if self.config.uses_static:
@@ -720,6 +843,10 @@ class SVSignedGINClassifier(nn.Module):
                     name: torch.sigmoid(value)
                     for name, value in self.residual_gate_logits.items()
                 }
+                if self.config.gin_residual_attention:
+                    residual_gates["attention"] = torch.sigmoid(
+                        self.encoder.attention_residual_gate_logit
+                    )
                 logits = branch_logits["static_spectral"]
                 if self._training_stage != "static_anchor":
                     logits = (
@@ -775,6 +902,9 @@ class SVSignedGINClassifier(nn.Module):
                 ),
                 "gin_batch_normalization": (
                     self.config.gin_batch_normalization
+                ),
+                "gin_residual_attention": (
+                    self.config.gin_residual_attention
                 ),
                 "fusion_mode": (
                     "static_anchor_zero_output_residual"

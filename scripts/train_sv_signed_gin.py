@@ -86,6 +86,9 @@ def parse_args():
         "--gin-batch-normalization", action="store_true"
     )
     parser.add_argument(
+        "--gin-residual-attention", action="store_true"
+    )
+    parser.add_argument(
         "--auxiliary-loss-weight", type=float, default=0.0
     )
     parser.add_argument(
@@ -173,6 +176,7 @@ def main():
             gin_jumping_knowledge=args.gin_jumping_knowledge,
             gin_compact_readout=args.gin_compact_readout,
             gin_batch_normalization=args.gin_batch_normalization,
+            gin_residual_attention=args.gin_residual_attention,
         )
     )
     epochs = 1 if args.smoke else args.epochs

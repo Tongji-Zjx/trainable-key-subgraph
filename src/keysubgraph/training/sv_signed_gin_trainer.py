@@ -213,7 +213,11 @@ def run_sv_signed_gin_epoch(
             auxiliary_loss = output.logits.new_zeros(())
             if output.branch_logits:
                 auxiliary_names = (
-                    tuple(output.residual_gates)
+                    tuple(
+                        name
+                        for name in output.residual_gates
+                        if name in output.branch_logits
+                    )
                     if output.residual_gates
                     else tuple(output.branch_logits)
                 )
@@ -538,6 +542,7 @@ def _train_static_anchor_residual_classifier(
     """Train V1A without allowing residual experts to damage the anchor."""
 
     set_reproducible_seed(config.seed)
+    model.reset_residual_fusion_parameters(config.seed)
     model.to(device)
     class_weights = class_weights_from_labels(train_labels)
     history: List[Dict[str, Any]] = []
@@ -754,7 +759,8 @@ def _train_static_anchor_residual_classifier(
         print(
             "phase=residual_experts epoch {}/{} train_auc={} "
             "validation_auc={} validation_site_auc={} "
-            "selection={:.6f} gates=gin:{:.6f},variation:{:.6f} "
+            "selection={:.6f} "
+            "gates=gin:{:.6f},variation:{:.6f},attention:{} "
             "lr={:.8f}".format(
                 epoch,
                 config.epochs,
@@ -764,6 +770,11 @@ def _train_static_anchor_residual_classifier(
                 value,
                 float(gates.get("gin", 0.0)),
                 float(gates.get("variation", 0.0)),
+                (
+                    "{:.6f}".format(float(gates["attention"]))
+                    if "attention" in gates
+                    else "N/A"
+                ),
                 optimizer.param_groups[0]["lr"],
             ),
             flush=True,

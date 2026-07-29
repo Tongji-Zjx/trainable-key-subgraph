@@ -13,6 +13,7 @@ SV_CROSSFIT_VARIANTS = (
     "signed_gin_static_variation",
     "signed_gin_multibranch_late_fusion",
     "signed_gin_static_anchor_residual",
+    "signed_gin_static_anchor_residual_attention",
 )
 
 
@@ -178,6 +179,7 @@ def build_sv_crossfit_fold_commands(
         if variant in (
             "signed_gin_multibranch_late_fusion",
             "signed_gin_static_anchor_residual",
+            "signed_gin_static_anchor_residual_attention",
         ):
             train_command = commands[-1][1]
             train_command.extend(
@@ -194,7 +196,10 @@ def build_sv_crossfit_fold_commands(
                     "0.25",
                 ]
             )
-        if variant == "signed_gin_static_anchor_residual":
+        if variant in (
+            "signed_gin_static_anchor_residual",
+            "signed_gin_static_anchor_residual_attention",
+        ):
             train_command.extend(
                 [
                     "--static-anchor-epochs",
@@ -203,6 +208,11 @@ def build_sv_crossfit_fold_commands(
                     "0.01",
                 ]
             )
+        if (
+            variant
+            == "signed_gin_static_anchor_residual_attention"
+        ):
+            train_command.append("--gin-residual-attention")
         commands.append(
             (
                 "evaluate_{}".format(variant),

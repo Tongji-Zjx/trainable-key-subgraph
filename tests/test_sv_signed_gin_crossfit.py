@@ -123,6 +123,45 @@ class SVSignedGINCrossfitRunnerTest(unittest.TestCase):
             "--residual-gate-penalty-weight", train_command
         )
 
+    def test_residual_attention_plan_changes_only_attention_flag(self):
+        variants = (
+            "signed_gin_static_anchor_residual",
+            "signed_gin_static_anchor_residual_attention",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            plan = build_sv_crossfit_fold_commands(
+                PROJECT_ROOT,
+                Path(directory),
+                0,
+                variants=variants,
+                device="cpu",
+                seed=42,
+                selector_epochs=1,
+                model_epochs=1,
+                num_workers=0,
+            )
+        commands = {
+            name: command
+            for name, command, _ in plan
+            if name.startswith("train_")
+        }
+        v1a = commands["train_{}".format(variants[0])]
+        v1b = commands["train_{}".format(variants[1])]
+        self.assertNotIn("--gin-residual-attention", v1a)
+        self.assertIn("--gin-residual-attention", v1b)
+        filtered = [
+            value
+            for value in v1b
+            if value != "--gin-residual-attention"
+        ]
+        # Run directories and variant values are expected to differ.
+        differences = [
+            (left, right)
+            for left, right in zip(v1a, filtered)
+            if left != right
+        ]
+        self.assertEqual(len(differences), 2)
+
 
 class SVSignedGINCrossfitSummaryTest(unittest.TestCase):
     def _fixture(self, root):

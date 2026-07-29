@@ -10,6 +10,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+from scipy.stats import spearmanr
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -38,6 +39,7 @@ from keysubgraph.training.sv_signed_gin_trainer import (  # noqa: E402
 EXPECTED_VARIANTS = (
     "signed_gin_multibranch_late_fusion",
     "signed_gin_static_anchor_residual",
+    "signed_gin_static_anchor_residual_attention",
 )
 
 
@@ -101,6 +103,101 @@ def _collect(model, loader, device):
         name: representation_statistics(value, labels_array)
         for name, value in arrays.items()
     }
+
+
+def _attention_statistics(model, loader, device):
+    normalized_entropy = []
+    maximum_weight = []
+    effective_nodes = []
+    degree_correlations = []
+    model.eval()
+    with torch.no_grad():
+        for batch in loader:
+            moved = batch.to(device)
+            output = model(moved)
+            for sample, encoded in zip(
+                moved.samples, output.encoder_outputs
+            ):
+                for window, weights in zip(
+                    sample.windows, encoded.node_attention
+                ):
+                    total = weights.sum().clamp_min(1.0e-12)
+                    probabilities = weights / total
+                    entropy = -(
+                        probabilities
+                        * probabilities.clamp_min(1.0e-12).log()
+                    ).sum()
+                    node_count = int(probabilities.numel())
+                    normalized = (
+                        float(entropy.detach().cpu())
+                        / float(np.log(node_count))
+                        if node_count > 1
+                        else 0.0
+                    )
+                    normalized_entropy.append(normalized)
+                    maximum_weight.append(
+                        float(probabilities.max().detach().cpu())
+                    )
+                    effective_nodes.append(
+                        float(torch.exp(entropy).detach().cpu())
+                    )
+                    degree = (
+                        window.adjacency.abs().sum(dim=-1)
+                        .detach()
+                        .cpu()
+                        .numpy()
+                    )
+                    attention = (
+                        probabilities.detach().cpu().numpy()
+                    )
+                    correlation = spearmanr(
+                        attention, degree
+                    ).correlation
+                    if np.isfinite(correlation):
+                        degree_correlations.append(float(correlation))
+
+    def summary(values):
+        array = np.asarray(values, dtype=np.float64)
+        if array.size == 0:
+            return None
+        return {
+            "count": int(array.size),
+            "mean": float(array.mean()),
+            "median": float(np.median(array)),
+            "minimum": float(array.min()),
+            "maximum": float(array.max()),
+        }
+
+    return {
+        "normalized_entropy": summary(normalized_entropy),
+        "maximum_node_weight": summary(maximum_weight),
+        "effective_node_count": summary(effective_nodes),
+        "attention_absolute_degree_spearman": summary(
+            degree_correlations
+        ),
+    }
+
+
+def _attention_ablation_metrics(
+    model, loader, device, class_weights
+):
+    if not model.config.gin_residual_attention:
+        return None
+    parameter = model.encoder.attention_residual_gate_logit
+    original = parameter.detach().clone()
+    with torch.no_grad():
+        parameter.fill_(-20.0)
+    try:
+        return run_sv_signed_gin_epoch(
+            model,
+            loader,
+            device,
+            class_weights,
+            include_predictions=False,
+        )
+    finally:
+        with torch.no_grad():
+            parameter.copy_(original)
 
 
 def _atomic_json(path, payload):
@@ -229,7 +326,27 @@ def main():
                 )
             },
             "representations": _collect(model, loader, device),
+            "attention": _attention_statistics(
+                model, loader, device
+            ),
         }
+        attention_ablation = _attention_ablation_metrics(
+            model,
+            loader,
+            device,
+            checkpoint["class_weights"],
+        )
+        if attention_ablation is not None:
+            result["splits"][name]["attention_ablation_metrics"] = {
+                key: attention_ablation.get(key)
+                for key in (
+                    "roc_auc",
+                    "site_stratified_roc_auc",
+                    "balanced_accuracy",
+                    "accuracy",
+                    "f1",
+                )
+            }
     validation_gin = result["splits"]["validation"][
         "representations"
     ]["gin_representation"]
@@ -289,6 +406,24 @@ def main():
             "```json",
             json.dumps(
                 result["splits"]["validation"]["metrics"],
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            ),
+            "```",
+            "",
+            "## Validation Attention",
+            "",
+            "```json",
+            json.dumps(
+                {
+                    "distribution": result["splits"][
+                        "validation"
+                    ]["attention"],
+                    "masked_metrics": result["splits"][
+                        "validation"
+                    ].get("attention_ablation_metrics"),
+                },
                 ensure_ascii=False,
                 indent=2,
                 sort_keys=True,
