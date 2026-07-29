@@ -27,6 +27,9 @@ from keysubgraph.models.sv_signed_gin import (
     SVSignedGINSampleInput,
 )
 from keysubgraph.training.dual_sgw_feature_trainer import binary_metrics
+from keysubgraph.training.sv_signed_gin_trainer import (
+    site_stratified_roc_auc,
+)
 
 
 SV_CHANNEL_MASK_CONDITIONS = (
@@ -333,6 +336,43 @@ def _distribution(values):
         "q10": float(np.quantile(values, 0.10)),
         "q90": float(np.quantile(values, 0.90)),
     }
+
+
+def _per_site_auc_rows(labels, probabilities, sites):
+    labels = list(int(value) for value in labels)
+    probabilities = list(float(value) for value in probabilities)
+    sites = list(str(value) for value in sites)
+    if not (
+        len(labels) == len(probabilities) == len(sites)
+    ):
+        raise ValueError("site-conditioned vectors are misaligned")
+    rows = []
+    for site in sorted(set(sites)):
+        indices = [
+            index for index, value in enumerate(sites) if value == site
+        ]
+        site_labels = [labels[index] for index in indices]
+        site_probabilities = [
+            probabilities[index] for index in indices
+        ]
+        class_counts = {
+            str(label): int(
+                sum(value == label for value in site_labels)
+            )
+            for label in (0, 1)
+        }
+        rows.append(
+            {
+                "site": site,
+                "sample_count": len(indices),
+                "class_0_count": class_counts["0"],
+                "class_1_count": class_counts["1"],
+                "roc_auc": _safe_auc(
+                    site_labels, site_probabilities
+                ),
+            }
+        )
+    return rows
 
 
 def diagnose_sv_sample(
@@ -648,6 +688,7 @@ def frozen_channel_masking(
 ):
     """Mask SG2 channels to train means and run the frozen classifier."""
     labels = validation_collection["labels"]
+    sites = validation_collection["sites"]
     train_representations = train_collection["representations"]
     validation_representations = validation_collection[
         "representations"
@@ -767,12 +808,40 @@ def frozen_channel_masking(
             )[:, 1].detach().cpu().numpy()
             metrics = binary_metrics(labels, probabilities, threshold)
             auc = _safe_auc(labels, probabilities)
+            site_auc = site_stratified_roc_auc(
+                list(int(value) for value in labels),
+                list(float(value) for value in probabilities),
+                list(str(value) for value in sites),
+            )
+            per_site = _per_site_auc_rows(
+                labels, probabilities, sites
+            )
+            eligible_site_aucs = [
+                row["roc_auc"]
+                for row in per_site
+                if row["roc_auc"] is not None
+            ]
             if condition == "all":
                 baseline_auc = auc
             rows.append(
                 {
                     "condition": condition,
                     "roc_auc": auc,
+                    "site_stratified_roc_auc": site_auc,
+                    "global_minus_site_stratified_auc": (
+                        None
+                        if auc is None or site_auc is None
+                        else float(auc - site_auc)
+                    ),
+                    "macro_site_roc_auc": (
+                        float(np.mean(eligible_site_aucs))
+                        if eligible_site_aucs
+                        else None
+                    ),
+                    "eligible_site_count": len(
+                        eligible_site_aucs
+                    ),
+                    "per_site": per_site,
                     "delta_auc_vs_all": (
                         None
                         if auc is None or baseline_auc is None
@@ -922,11 +991,35 @@ def analyze_sv_signed_gin_bottleneck(
                     "threshold": "AUROC loss below 0.01",
                 }
             )
+        if (
+            row["global_minus_site_stratified_auc"] is not None
+            and float(
+                row["global_minus_site_stratified_auc"]
+            )
+            > 0.05
+        ):
+            flags.append(
+                {
+                    "category": "site_sensitive_ranking",
+                    "target": row["condition"],
+                    "evidence": (
+                        "global AUROC exceeds site-stratified AUROC "
+                        "by {:.6f}".format(
+                            float(
+                                row[
+                                    "global_minus_site_stratified_auc"
+                                ]
+                            )
+                        )
+                    ),
+                }
+            )
     for name, layer in layer_results.items():
         statistics = layer["validation"]
         reasons = []
         if (
-            statistics["mean_pairwise_cosine"] is not None
+            int(statistics["dimension"]) > 1
+            and statistics["mean_pairwise_cosine"] is not None
             and float(statistics["mean_pairwise_cosine"]) > 0.995
         ):
             reasons.append("mean_pairwise_cosine>0.995")
@@ -1121,9 +1214,30 @@ def write_sv_signed_gin_bottleneck_artifacts(
         list(selection_controls) if selection_controls else []
     )
     _atomic_json(output_dir / "diagnostic.json", payload)
+    channel_rows = [
+        {
+            key: value
+            for key, value in row.items()
+            if key != "per_site"
+        }
+        for row in payload["channel_masking"]
+    ]
     _write_csv(
         output_dir / "channel_masking.csv",
-        payload["channel_masking"],
+        channel_rows,
+    )
+    site_rows = []
+    for row in payload["channel_masking"]:
+        for site in row.get("per_site", []):
+            site_rows.append(
+                {
+                    "condition": row["condition"],
+                    **site
+                }
+            )
+    _write_csv(
+        output_dir / "channel_masking_by_site.csv",
+        site_rows,
     )
     layer_rows = []
     for name, layer in payload["representations"].items():
@@ -1176,17 +1290,22 @@ def write_sv_signed_gin_bottleneck_artifacts(
         "",
         "## 冻结通道屏蔽",
         "",
-        "| 条件 | Validation AUROC | ΔAUC vs all | BA | Accuracy |",
-        "|---|---:|---:|---:|---:|",
+        "| 条件 | 总体AUROC | Site-stratified AUROC | 总体−站点内 | ΔAUC vs all | BA |",
+        "|---|---:|---:|---:|---:|---:|",
     ]
     for row in payload["channel_masking"]:
         lines.append(
-            "| {} | {} | {} | {} | {} |".format(
+            "| {} | {} | {} | {} | {} | {} |".format(
                 row["condition"],
                 _format_optional(row["roc_auc"]),
+                _format_optional(
+                    row["site_stratified_roc_auc"]
+                ),
+                _format_optional(
+                    row["global_minus_site_stratified_auc"]
+                ),
                 _format_optional(row["delta_auc_vs_all"]),
                 _format_optional(row["balanced_accuracy"]),
-                _format_optional(row["accuracy"]),
             )
         )
     lines.extend(
@@ -1333,5 +1452,8 @@ def write_sv_signed_gin_bottleneck_artifacts(
         "diagnostic": str(output_dir / "diagnostic.json"),
         "summary": str(summary),
         "channel_masking": str(output_dir / "channel_masking.csv"),
+        "channel_masking_by_site": str(
+            output_dir / "channel_masking_by_site.csv"
+        ),
         "layer_statistics": str(output_dir / "layer_statistics.csv"),
     }

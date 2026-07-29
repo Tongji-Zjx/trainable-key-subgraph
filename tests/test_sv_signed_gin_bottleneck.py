@@ -206,6 +206,9 @@ class SVSignedGINBottleneckTest(unittest.TestCase):
         )
         self.assertEqual(len(masks), 11)
         self.assertEqual(masks[0]["condition"], "all")
+        self.assertIn("site_stratified_roc_auc", masks[0])
+        self.assertEqual(masks[0]["eligible_site_count"], 2)
+        self.assertEqual(len(masks[0]["per_site"]), 2)
         result = analyze_sv_signed_gin_bottleneck(
             train,
             validation,
@@ -230,8 +233,12 @@ class SVSignedGINBottleneckTest(unittest.TestCase):
                 )
             )
             summary_exists = Path(paths["summary"]).exists()
+            site_csv_exists = Path(
+                paths["channel_masking_by_site"]
+            ).exists()
         self.assertFalse(payload["test_used"])
         self.assertTrue(summary_exists)
+        self.assertTrue(site_csv_exists)
 
     def test_command_line_entry_point_validates_provenance(self):
         train_records = (
