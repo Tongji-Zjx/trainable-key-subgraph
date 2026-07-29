@@ -44,6 +44,7 @@ def parse_args():
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--epochs", type=int, default=80)
+    parser.add_argument("--static-anchor-epochs", type=int, default=80)
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument(
         "--gradient-accumulation-steps", type=int, default=2
@@ -86,6 +87,9 @@ def parse_args():
     )
     parser.add_argument(
         "--auxiliary-loss-weight", type=float, default=0.0
+    )
+    parser.add_argument(
+        "--residual-gate-penalty-weight", type=float, default=0.01
     )
     parser.add_argument("--smoke", action="store_true")
     parser.add_argument("--overfit-samples", type=int)
@@ -172,6 +176,9 @@ def main():
         )
     )
     epochs = 1 if args.smoke else args.epochs
+    static_anchor_epochs = (
+        1 if args.smoke else args.static_anchor_epochs
+    )
     patience = (
         0
         if args.disable_early_stopping
@@ -184,6 +191,7 @@ def main():
     )
     training_config = SVSignedGINTrainingConfig(
         epochs=epochs,
+        static_anchor_epochs=static_anchor_epochs,
         learning_rate=args.learning_rate,
         weight_decay=args.weight_decay,
         gradient_clip_norm=args.gradient_clip,
@@ -193,6 +201,9 @@ def main():
         early_stopping_patience=patience,
         selection_metric=selection_metric,
         auxiliary_loss_weight=args.auxiliary_loss_weight,
+        residual_gate_penalty_weight=(
+            args.residual_gate_penalty_weight
+        ),
         seed=args.seed,
         max_train_batches=2 if args.smoke else None,
         max_validation_batches=2 if args.smoke else None,
@@ -230,6 +241,9 @@ def main():
             "smoke": bool(args.smoke),
             "overfit_samples": args.overfit_samples,
             "auxiliary_loss_weight": args.auxiliary_loss_weight,
+            "residual_gate_penalty_weight": (
+                args.residual_gate_penalty_weight
+            ),
         }
     )
     print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))

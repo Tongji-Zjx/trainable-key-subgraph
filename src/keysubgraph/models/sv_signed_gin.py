@@ -21,6 +21,7 @@ SV_SIGNED_GIN_VARIANTS = (
     "signed_gin_variation",
     "signed_gin_static_variation",
     "signed_gin_multibranch_late_fusion",
+    "signed_gin_static_anchor_residual",
 )
 SV_SIGNED_GIN_MESSAGE_MODES = (
     "signed_weighted",
@@ -55,6 +56,7 @@ class SVSignedGINConfig:
     gin_jumping_knowledge: bool = False
     gin_compact_readout: bool = False
     gin_batch_normalization: bool = False
+    residual_gate_initial_logit: float = -6.0
 
     def __post_init__(self) -> None:
         if self.variant not in SV_SIGNED_GIN_VARIANTS:
@@ -77,6 +79,10 @@ class SVSignedGINConfig:
             raise ValueError("SV Signed-GIN dimensions must be positive")
         if self.dropout < 0.0 or self.dropout >= 1.0:
             raise ValueError("SV Signed-GIN dropout must lie in [0,1)")
+        if not -20.0 <= self.residual_gate_initial_logit <= 0.0:
+            raise ValueError(
+                "SV residual gate initial logit must lie in [-20,0]"
+            )
         if self.message_mode not in SV_SIGNED_GIN_MESSAGE_MODES:
             raise ValueError("unsupported SV Signed-GIN message mode")
         if self.pooling not in SV_SIGNED_GIN_POOLING_MODES:
@@ -92,7 +98,14 @@ class SVSignedGINConfig:
 
     @property
     def uses_late_fusion(self) -> bool:
-        return self.variant == "signed_gin_multibranch_late_fusion"
+        return self.variant in (
+            "signed_gin_multibranch_late_fusion",
+            "signed_gin_static_anchor_residual",
+        )
+
+    @property
+    def uses_residual_fusion(self) -> bool:
+        return self.variant == "signed_gin_static_anchor_residual"
 
     @property
     def gin_output_dim(self) -> int:
@@ -199,6 +212,7 @@ class SVSignedGINOutput:
     diagnostics: Dict[str, Any]
     branch_logits: Optional[Dict[str, torch.Tensor]] = None
     fusion_weights: Optional[torch.Tensor] = None
+    residual_gates: Optional[Dict[str, torch.Tensor]] = None
     gin_normalized_representation: Optional[torch.Tensor] = None
 
 
@@ -531,12 +545,32 @@ class SVSignedGINClassifier(nn.Module):
                 }
             )
             self.fusion_log_weights = nn.Parameter(
-                torch.zeros(3, dtype=torch.float32)
+                torch.zeros(3, dtype=torch.float32),
+                requires_grad=not self.config.uses_residual_fusion,
             )
+            if self.config.uses_residual_fusion:
+                self.residual_gate_logits = nn.ParameterDict(
+                    {
+                        name: nn.Parameter(
+                            torch.tensor(
+                                self.config.residual_gate_initial_logit,
+                                dtype=torch.float32,
+                            )
+                        )
+                        for name in ("gin", "variation")
+                    }
+                )
+                for name in ("gin", "variation"):
+                    output_layer = self.branch_classifiers[name][-1]
+                    nn.init.zeros_(output_layer.weight)
+                    nn.init.zeros_(output_layer.bias)
+            else:
+                self.residual_gate_logits = None
             self.classifier = None
         else:
             self.branch_classifiers = None
             self.register_parameter("fusion_log_weights", None)
+            self.residual_gate_logits = None
             self.classifier = nn.Sequential(
                 nn.Linear(
                     self.config.fusion_input_dim,
@@ -546,6 +580,71 @@ class SVSignedGINClassifier(nn.Module):
                 nn.Dropout(self.config.dropout),
                 nn.Linear(self.config.fusion_hidden_dim, 2),
             )
+        self._training_stage = (
+            "residual_experts"
+            if self.config.uses_residual_fusion
+            else "joint"
+        )
+
+    @property
+    def training_stage(self) -> str:
+        return self._training_stage
+
+    def set_training_stage(self, stage: str) -> None:
+        """Freeze the V1A anchor or experts for its two training stages."""
+
+        if not self.config.uses_residual_fusion:
+            if stage != "joint":
+                raise ValueError(
+                    "training stages only apply to residual fusion"
+                )
+            self._training_stage = "joint"
+            return
+        if stage not in ("static_anchor", "residual_experts"):
+            raise ValueError("unsupported residual-fusion training stage")
+        self._training_stage = str(stage)
+        for parameter in self.parameters():
+            parameter.requires_grad_(False)
+        if stage == "static_anchor":
+            for module in (
+                self.static_projection,
+                self.branch_classifiers["static_spectral"],
+            ):
+                for parameter in module.parameters():
+                    parameter.requires_grad_(True)
+        else:
+            for module in (
+                self.encoder,
+                self.gin_feature_normalization,
+                self.gin_projection,
+                self.variation_projection,
+                self.branch_classifiers["gin"],
+                self.branch_classifiers["variation"],
+            ):
+                if module is not None:
+                    for parameter in module.parameters():
+                        parameter.requires_grad_(True)
+            for parameter in self.residual_gate_logits.parameters():
+                parameter.requires_grad_(True)
+
+    def train(self, mode: bool = True):
+        super().train(mode)
+        if mode and self.config.uses_residual_fusion:
+            if self._training_stage == "static_anchor":
+                for module in (
+                    self.encoder,
+                    self.gin_feature_normalization,
+                    self.gin_projection,
+                    self.variation_projection,
+                    self.branch_classifiers["gin"],
+                    self.branch_classifiers["variation"],
+                ):
+                    if module is not None:
+                        module.eval()
+            elif self._training_stage == "residual_experts":
+                self.static_projection.eval()
+                self.branch_classifiers["static_spectral"].eval()
+        return self
 
     def config_dict(self) -> Dict[str, Any]:
         return asdict(self.config)
@@ -603,6 +702,7 @@ class SVSignedGINClassifier(nn.Module):
         final = torch.cat(channels, dim=-1)
         branch_logits = None
         fusion_weights = None
+        residual_gates = None
         if self.config.uses_late_fusion:
             branch_logits = {
                 "gin": self.branch_classifiers["gin"](
@@ -615,20 +715,34 @@ class SVSignedGINClassifier(nn.Module):
                     variation_projected
                 ),
             }
-            fusion_weights = torch.softmax(
-                self.fusion_log_weights, dim=0
-            )
-            stacked_logits = torch.stack(
-                [
-                    branch_logits["gin"],
-                    branch_logits["static_spectral"],
-                    branch_logits["variation"],
-                ],
-                dim=0,
-            )
-            logits = (
-                stacked_logits * fusion_weights[:, None, None]
-            ).sum(dim=0)
+            if self.config.uses_residual_fusion:
+                residual_gates = {
+                    name: torch.sigmoid(value)
+                    for name, value in self.residual_gate_logits.items()
+                }
+                logits = branch_logits["static_spectral"]
+                if self._training_stage != "static_anchor":
+                    logits = (
+                        logits
+                        + residual_gates["gin"] * branch_logits["gin"]
+                        + residual_gates["variation"]
+                        * branch_logits["variation"]
+                    )
+            else:
+                fusion_weights = torch.softmax(
+                    self.fusion_log_weights, dim=0
+                )
+                stacked_logits = torch.stack(
+                    [
+                        branch_logits["gin"],
+                        branch_logits["static_spectral"],
+                        branch_logits["variation"],
+                    ],
+                    dim=0,
+                )
+                logits = (
+                    stacked_logits * fusion_weights[:, None, None]
+                ).sum(dim=0)
         else:
             logits = self.classifier(final)
         if tuple(logits.shape) != (len(batch), 2):
@@ -663,13 +777,19 @@ class SVSignedGINClassifier(nn.Module):
                     self.config.gin_batch_normalization
                 ),
                 "fusion_mode": (
-                    "nonnegative_logit"
-                    if self.config.uses_late_fusion
-                    else "feature_concatenation"
+                    "static_anchor_zero_output_residual"
+                    if self.config.uses_residual_fusion
+                    else (
+                        "nonnegative_logit"
+                        if self.config.uses_late_fusion
+                        else "feature_concatenation"
+                    )
                 ),
+                "training_stage": self._training_stage,
             },
             branch_logits=branch_logits,
             fusion_weights=fusion_weights,
+            residual_gates=residual_gates,
             gin_normalized_representation=(
                 gin_normalized_representation
             ),

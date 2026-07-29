@@ -35,7 +35,10 @@ from keysubgraph.training.sv_signed_gin_trainer import (  # noqa: E402
 )
 
 
-EXPECTED_VARIANT = "signed_gin_multibranch_late_fusion"
+EXPECTED_VARIANTS = (
+    "signed_gin_multibranch_late_fusion",
+    "signed_gin_static_anchor_residual",
+)
 
 
 def parse_args():
@@ -159,8 +162,10 @@ def main():
     model = SVSignedGINClassifier(
         SVSignedGINConfig(**raw["model_config"])
     ).to(device)
-    if model.config.variant != EXPECTED_VARIANT:
-        raise ValueError("diagnostic requires the improved late-fusion model")
+    if model.config.variant not in EXPECTED_VARIANTS:
+        raise ValueError(
+            "diagnostic requires a supported safe-fusion model"
+        )
     train = SVSignedGINDataset(args.train_manifest, args.scaler)
     validation = SVSignedGINDataset(
         args.validation_manifest, args.scaler
@@ -220,6 +225,7 @@ def main():
                     "f1",
                     "branch_metrics",
                     "fusion_weights",
+                    "residual_gates",
                 )
             },
             "representations": _collect(model, loader, device),
@@ -241,11 +247,14 @@ def main():
             )
             < 0.995
         ),
-        "fusion_weights_nonnegative": all(
+        "fusion_controls_nonnegative": all(
             float(value) >= 0.0
-            for value in result["splits"]["validation"]["metrics"][
-                "fusion_weights"
-            ].values()
+            for field in ("fusion_weights", "residual_gates")
+            for value in (
+                result["splits"]["validation"]["metrics"].get(
+                    field, {}
+                )
+            ).values()
         ),
     }
     output_dir.mkdir(parents=True, exist_ok=True)

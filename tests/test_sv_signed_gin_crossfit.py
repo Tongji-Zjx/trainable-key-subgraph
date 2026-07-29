@@ -97,6 +97,32 @@ class SVSignedGINCrossfitRunnerTest(unittest.TestCase):
         for value in expected:
             self.assertIn(value, train_command)
 
+    def test_static_anchor_residual_plan_enables_two_stage_training(self):
+        variant = "signed_gin_static_anchor_residual"
+        with tempfile.TemporaryDirectory() as directory:
+            plan = build_sv_crossfit_fold_commands(
+                PROJECT_ROOT,
+                Path(directory),
+                0,
+                variants=(variant,),
+                device="cpu",
+                seed=42,
+                selector_epochs=1,
+                model_epochs=3,
+                num_workers=0,
+            )
+        train_command = next(
+            command
+            for name, command, _ in plan
+            if name == "train_{}".format(variant)
+        )
+        self.assertIn("--static-anchor-epochs", train_command)
+        static_index = train_command.index("--static-anchor-epochs")
+        self.assertEqual(train_command[static_index + 1], "3")
+        self.assertIn(
+            "--residual-gate-penalty-weight", train_command
+        )
+
 
 class SVSignedGINCrossfitSummaryTest(unittest.TestCase):
     def _fixture(self, root):

@@ -117,6 +117,7 @@ class SVSignedGINTest(unittest.TestCase):
                 in (
                     "signed_gin_static_variation",
                     "signed_gin_multibranch_late_fusion",
+                    "signed_gin_static_anchor_residual",
                 )
                 else 32
             )
@@ -195,6 +196,97 @@ class SVSignedGINTest(unittest.TestCase):
         self.assertEqual(tuple(output.gin_representation.shape), (1, 64))
         self.assertEqual(tuple(output.gin_projection.shape), (1, 16))
         output.logits.sum().backward()
+
+    def test_static_anchor_residual_starts_exactly_at_anchor(self):
+        torch.manual_seed(739)
+        model = SVSignedGINClassifier(
+            SVSignedGINConfig(
+                variant="signed_gin_static_anchor_residual",
+                dropout=0.0,
+                message_mode="signed_normalized",
+                pooling="mean_std",
+                gin_residual=True,
+                gin_jumping_knowledge=True,
+                gin_compact_readout=True,
+                gin_batch_normalization=True,
+            )
+        ).eval()
+        batch = SVSignedGINBatch(
+            (_sample("a", 0), _sample("b", 1))
+        )
+        output = model(batch)
+        self.assertTrue(
+            torch.equal(
+                output.logits,
+                output.branch_logits["static_spectral"],
+            )
+        )
+        self.assertTrue(
+            torch.equal(
+                output.branch_logits["gin"],
+                torch.zeros_like(output.branch_logits["gin"]),
+            )
+        )
+        self.assertTrue(
+            torch.equal(
+                output.branch_logits["variation"],
+                torch.zeros_like(output.branch_logits["variation"]),
+            )
+        )
+        self.assertGreaterEqual(float(output.residual_gates["gin"]), 0.0)
+        self.assertLess(float(output.residual_gates["gin"]), 0.01)
+
+    def test_residual_stage_freezes_anchor_and_trains_experts(self):
+        torch.manual_seed(743)
+        model = SVSignedGINClassifier(
+            SVSignedGINConfig(
+                variant="signed_gin_static_anchor_residual",
+                gin_hidden_dim=8,
+                attention_hidden_dim=4,
+                channel_projection_dim=4,
+                fusion_hidden_dim=4,
+                dropout=0.0,
+                message_mode="signed_normalized",
+                pooling="mean_std",
+                gin_residual=True,
+                gin_jumping_knowledge=True,
+                gin_compact_readout=True,
+                gin_batch_normalization=True,
+            )
+        )
+        model.set_training_stage("residual_experts")
+        batch = SVSignedGINBatch(
+            (_sample("a", 0), _sample("b", 1))
+        )
+        output = model(batch)
+        loss = torch.nn.functional.cross_entropy(
+            output.logits, batch.labels
+        )
+        loss = loss + 0.25 * torch.stack(
+            [
+                torch.nn.functional.cross_entropy(
+                    output.branch_logits[name], batch.labels
+                )
+                for name in ("gin", "variation")
+            ]
+        ).mean()
+        loss.backward()
+        self.assertTrue(
+            all(
+                parameter.grad is None
+                for parameter in model.static_projection.parameters()
+            )
+        )
+        for name in ("gin", "variation"):
+            gradient = sum(
+                float(parameter.grad.abs().sum())
+                for parameter in model.branch_classifiers[name].parameters()
+                if parameter.grad is not None
+            )
+            self.assertGreater(gradient, 0.0, name)
+            self.assertIsNotNone(
+                model.residual_gate_logits[name].grad
+            )
 
     def test_classification_gradient_reaches_signed_gin_and_attention(self):
         torch.manual_seed(727)

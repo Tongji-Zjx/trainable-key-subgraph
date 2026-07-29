@@ -12,6 +12,7 @@ SV_CROSSFIT_VARIANTS = (
     "signed_gin_variation",
     "signed_gin_static_variation",
     "signed_gin_multibranch_late_fusion",
+    "signed_gin_static_anchor_residual",
 )
 
 
@@ -174,7 +175,10 @@ def build_sv_crossfit_fold_commands(
                 run / "best_evaluation.json",
             )
         )
-        if variant == "signed_gin_multibranch_late_fusion":
+        if variant in (
+            "signed_gin_multibranch_late_fusion",
+            "signed_gin_static_anchor_residual",
+        ):
             train_command = commands[-1][1]
             train_command.extend(
                 [
@@ -188,6 +192,15 @@ def build_sv_crossfit_fold_commands(
                     "--gin-batch-normalization",
                     "--auxiliary-loss-weight",
                     "0.25",
+                ]
+            )
+        if variant == "signed_gin_static_anchor_residual":
+            train_command.extend(
+                [
+                    "--static-anchor-epochs",
+                    str(model_epochs),
+                    "--residual-gate-penalty-weight",
+                    "0.01",
                 ]
             )
         commands.append(

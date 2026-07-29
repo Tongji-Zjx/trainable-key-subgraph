@@ -350,6 +350,130 @@ class SVSignedGINTrainingTest(unittest.TestCase):
             expected_train_manifest_sha256,
         )
 
+    def test_static_anchor_residual_training_is_two_stage_and_reloadable(self):
+        train_records = (
+            _record("train-0a", 0, "train", -1.0),
+            _record("train-0b", 0, "train", -0.5),
+            _record("train-1a", 1, "train", 0.5),
+            _record("train-1b", 1, "train", 1.0),
+        )
+        validation_records = (
+            _record("validation-0", 0, "validation", -0.75),
+            _record("validation-1", 1, "validation", 0.75),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            train_manifest = _write_manifest(
+                root, "train", train_records
+            )
+            validation_manifest = _write_manifest(
+                root, "validation", validation_records
+            )
+            scaler = fit_sv_signed_gin_standardizers(
+                train_records, file_sha256(train_manifest)
+            )
+            scaler_path = root / "scaler.json"
+            save_sv_signed_gin_standardizers(scaler, scaler_path)
+            train = SVSignedGINDataset(train_manifest, scaler_path)
+            validation = SVSignedGINDataset(
+                validation_manifest, scaler_path
+            )
+            model = SVSignedGINClassifier(
+                SVSignedGINConfig(
+                    variant="signed_gin_static_anchor_residual",
+                    gin_hidden_dim=8,
+                    attention_hidden_dim=4,
+                    channel_projection_dim=4,
+                    fusion_hidden_dim=4,
+                    dropout=0.0,
+                    message_mode="signed_normalized",
+                    pooling="mean_std",
+                    gin_residual=True,
+                    gin_jumping_knowledge=True,
+                    gin_compact_readout=True,
+                    gin_batch_normalization=True,
+                )
+            )
+            provenance = {
+                "protocol_sha256": "protocol",
+                "selector_checkpoint_sha256": "selector",
+                "selection_mode": "learned",
+                "selection_seed": 42,
+                "train_manifest_sha256": file_sha256(train_manifest),
+                "validation_manifest_sha256": file_sha256(
+                    validation_manifest
+                ),
+                "scaler_sha256": file_sha256(scaler_path),
+            }
+            output = root / "training"
+            result = train_sv_signed_gin_classifier(
+                model,
+                create_sv_signed_gin_loader(
+                    train, 2, 42, True
+                ),
+                create_sv_signed_gin_loader(
+                    validation, 2, 42, False
+                ),
+                train.labels,
+                torch.device("cpu"),
+                SVSignedGINTrainingConfig(
+                    epochs=1,
+                    static_anchor_epochs=1,
+                    early_stopping_patience=0,
+                    selection_metric="roc_auc",
+                    auxiliary_loss_weight=0.25,
+                    residual_gate_penalty_weight=0.01,
+                    seed=42,
+                ),
+                output,
+                provenance,
+            )
+            history = json.loads(
+                (output / "history.json").read_text(encoding="utf-8")
+            )
+            evaluation = json.loads(
+                (output / "best_evaluation.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            checkpoint = load_sv_signed_gin_checkpoint(
+                output / "best_checkpoint.pt",
+                model,
+                torch.device("cpu"),
+                provenance,
+            )
+            anchor_payload = torch.load(
+                str(output / "static_anchor_checkpoint.pt"),
+                map_location=torch.device("cpu"),
+            )
+            last_payload = torch.load(
+                str(output / "last_checkpoint.pt"),
+                map_location=torch.device("cpu"),
+            )
+            frozen_static_equal = all(
+                torch.equal(
+                    anchor_payload["model_state_dict"][name],
+                    last_payload["model_state_dict"][name],
+                )
+                for name in anchor_payload["model_state_dict"]
+                if name.startswith("static_projection.")
+                or name.startswith(
+                    "branch_classifiers.static_spectral."
+                )
+            )
+        self.assertEqual(
+            [row["phase"] for row in history],
+            ["static_anchor", "residual_experts"],
+        )
+        self.assertEqual(result["static_anchor_epochs_completed"], 1)
+        self.assertEqual(result["residual_epochs_completed"], 1)
+        self.assertEqual(evaluation["best_phase"], "static_anchor")
+        self.assertEqual(evaluation["best_epoch"], 0)
+        self.assertIn("residual_gates", evaluation)
+        self.assertIn("fusion_regret", evaluation)
+        self.assertIn("static_anchor_best_epoch", checkpoint)
+        self.assertTrue(frozen_static_equal)
+
 
 if __name__ == "__main__":
     unittest.main()
