@@ -356,7 +356,7 @@ def summarize_sv_signed_gin_crossfit(
     _atomic_json(outputs[0], payload)
     _atomic_csv(outputs[1], oof_rows)
     lines = [
-        "# WMRC SV Signed-GIN 交叉拟合 OOF 汇总",
+        "# SV Signed-GIN 交叉拟合 OOF 汇总",
         "",
         "- 模型：`{}`".format(variant),
         "- 外折数：{}".format(num_folds),
