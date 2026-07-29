@@ -38,6 +38,11 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=202607)
     parser.add_argument("--inner-seed", type=int, default=202608)
     parser.add_argument("--inner-validation-ratio", type=float, default=0.1875)
+    parser.add_argument(
+        "--group-key",
+        choices=("subject_id", "site_subject"),
+        default="subject_id",
+    )
     parser.add_argument("--overwrite", action="store_true")
     return parser.parse_args()
 
@@ -46,7 +51,10 @@ def main():
     args = parse_args()
     samples = read_sample_index(args.sample_index)
     assignments = create_outer_folds(
-        samples, num_folds=args.num_outer_folds, seed=args.seed
+        samples,
+        num_folds=args.num_outer_folds,
+        seed=args.seed,
+        group_key=args.group_key,
     )
     outer_result = write_outer_fold_artifacts(
         assignments,
@@ -55,12 +63,14 @@ def main():
         num_folds=args.num_outer_folds,
         seed=args.seed,
         overwrite=args.overwrite,
+        group_key=args.group_key,
     )
     fold_assignments = create_crossfit_fold_assignments(
         samples,
         assignments,
         inner_validation_ratio=args.inner_validation_ratio,
         seed=args.inner_seed,
+        group_key=args.group_key,
     )
     fold_result = write_crossfit_fold_artifacts(
         fold_assignments,
@@ -70,6 +80,7 @@ def main():
         inner_validation_ratio=args.inner_validation_ratio,
         seed=args.inner_seed,
         overwrite=args.overwrite,
+        group_key=args.group_key,
     )
     print(json.dumps(
         {"outer": outer_result, "folds": fold_result},

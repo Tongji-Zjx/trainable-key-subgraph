@@ -34,6 +34,7 @@ class OuterFoldAssignment:
     session_id: str
     label: int
     outer_test_fold: int
+    group_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -46,11 +47,12 @@ class CrossfitFoldAssignment:
     session_id: str
     label: int
     role: str
+    group_id: str = ""
 
 
 @dataclass(frozen=True)
 class _SubjectGroup:
-    subject_id: str
+    group_id: str
     samples: Tuple[IndexSample, ...]
     class_counts: Mapping[int, int]
 
@@ -59,22 +61,43 @@ class _SubjectGroup:
         return len(self.samples)
 
 
-def _subject_groups(samples: Sequence[IndexSample]) -> List[_SubjectGroup]:
+def _sample_group_id(sample: IndexSample, group_key: str) -> str:
+    if group_key == "subject_id":
+        value = sample.subject_id.strip()
+    elif group_key == "site_subject":
+        value = sample.group_id.strip()
+    else:
+        raise ValueError("unsupported crossfit group key")
+    if not value:
+        if group_key == "subject_id":
+            raise ValueError(
+                "cross-fitting requires a non-empty subject_id"
+            )
+        raise ValueError("cross-fitting requires a non-empty group_id")
+    return value
+
+
+def _assignment_group_id(item) -> str:
+    return str(getattr(item, "group_id", "") or item.subject_id).strip()
+
+
+def _subject_groups(
+    samples: Sequence[IndexSample], group_key: str = "subject_id"
+) -> List[_SubjectGroup]:
     members = defaultdict(list)
     seen_keys = set()
     for sample in samples:
-        if not sample.subject_id.strip():
-            raise ValueError("cross-fitting requires a non-empty subject_id")
+        group_id = _sample_group_id(sample, group_key)
         if sample.sample_key in seen_keys:
             raise ValueError("cross-fitting samples contain duplicate sample keys")
         seen_keys.add(sample.sample_key)
-        members[sample.subject_id.strip()].append(sample)
+        members[group_id].append(sample)
     groups = []
-    for subject_id, current in sorted(members.items()):
+    for group_id, current in sorted(members.items()):
         current = tuple(sorted(current, key=lambda item: item.sample_key))
         groups.append(
             _SubjectGroup(
-                subject_id=subject_id,
+                group_id=group_id,
                 samples=current,
                 class_counts=Counter(item.label for item in current),
             )
@@ -138,7 +161,7 @@ def _allocate_once(
             if best_score is None or score < best_score:
                 best_fold = fold_index
                 best_score = score
-        allocation[group.subject_id] = int(best_fold)
+        allocation[group.group_id] = int(best_fold)
         totals[best_fold] += group.size
         classes[best_fold].update(group.class_counts)
     if any(total == 0 for total in totals):
@@ -153,6 +176,7 @@ def create_outer_folds(
     num_folds: int = 5,
     seed: int = 202607,
     attempts: int = 256,
+    group_key: str = "subject_id",
 ) -> List[OuterFoldAssignment]:
     """Create deterministic stratified folds without splitting subjects."""
 
@@ -160,7 +184,7 @@ def create_outer_folds(
         raise ValueError("cross-fitting requires at least two outer folds")
     if attempts < 1 or seed < 0:
         raise ValueError("invalid outer-fold search configuration")
-    groups = _subject_groups(samples)
+    groups = _subject_groups(samples, group_key)
     if len(groups) < num_folds:
         raise ValueError("fewer subject groups than outer folds")
     overall = Counter(sample.label for sample in samples)
@@ -183,7 +207,10 @@ def create_outer_folds(
             subject_id=sample.subject_id.strip(),
             session_id=sample.session_id,
             label=int(sample.label),
-            outer_test_fold=int(best_allocation[sample.subject_id.strip()]),
+            outer_test_fold=int(
+                best_allocation[_sample_group_id(sample, group_key)]
+            ),
+            group_id=_sample_group_id(sample, group_key),
         )
         for sample in samples
     ]
@@ -202,13 +229,17 @@ def summarize_outer_folds(
     seen_keys = set()
     for item in assignments:
         seen_keys.add(item.sample_key)
-        subject_folds[item.subject_id].add(item.outer_test_fold)
+        subject_folds[_assignment_group_id(item)].add(
+            item.outer_test_fold
+        )
     for fold_index in range(num_folds):
         rows = [item for item in assignments if item.outer_test_fold == fold_index]
         counts = Counter(item.label for item in rows)
         folds[str(fold_index)] = {
             "sample_count": len(rows),
-            "subject_count": len({item.subject_id for item in rows}),
+            "subject_count": len(
+                {_assignment_group_id(item) for item in rows}
+            ),
             "class_counts": {str(label): counts[label] for label in (0, 1)},
             "class_ratios": {
                 str(label): counts[label] / float(len(rows)) if rows else 0.0
@@ -314,7 +345,7 @@ def _inner_allocate_once(
                 best_score = current_score
         totals[best_partition] += group.size
         classes[best_partition].update(group.class_counts)
-        allocation[group.subject_id] = (
+        allocation[group.group_id] = (
             "inner_train" if best_partition == 0 else "inner_validation"
         )
     if any(total == 0 for total in totals):
@@ -330,6 +361,7 @@ def create_crossfit_fold_assignments(
     inner_validation_ratio: float = 0.1875,
     seed: int = 202608,
     attempts: int = 256,
+    group_key: str = "subject_id",
 ) -> List[CrossfitFoldAssignment]:
     """Create one fixed inner train/validation split inside every outer-dev."""
 
@@ -351,7 +383,7 @@ def create_crossfit_fold_assignments(
             sample for sample in samples
             if outer_by_key[sample.sample_key].outer_test_fold != outer_fold
         ]
-        groups = _subject_groups(dev_samples)
+        groups = _subject_groups(dev_samples, group_key)
         best_allocation = None
         best_score = None
         for attempt in range(attempts):
@@ -370,7 +402,9 @@ def create_crossfit_fold_assignments(
             if outer_by_key[sample.sample_key].outer_test_fold == outer_fold:
                 role = "outer_test"
             else:
-                role = best_allocation[sample.subject_id.strip()]
+                role = best_allocation[
+                    _sample_group_id(sample, group_key)
+                ]
             output.append(
                 CrossfitFoldAssignment(
                     outer_fold=outer_fold,
@@ -381,6 +415,7 @@ def create_crossfit_fold_assignments(
                     session_id=sample.session_id,
                     label=int(sample.label),
                     role=role,
+                    group_id=_sample_group_id(sample, group_key),
                 )
             )
     output.sort(key=lambda item: (item.outer_fold, item.role, item.sample_key))
@@ -401,7 +436,9 @@ def summarize_crossfit_fold_assignments(
             counts = Counter(item.label for item in current)
             role_summary[role] = {
                 "sample_count": len(current),
-                "subject_count": len({item.subject_id for item in current}),
+                "subject_count": len(
+                    {_assignment_group_id(item) for item in current}
+                ),
                 "class_counts": {str(label): counts[label] for label in (0, 1)},
                 "class_ratios": {
                     str(label): counts[label] / float(len(current)) if current else 0.0
@@ -411,7 +448,7 @@ def summarize_crossfit_fold_assignments(
         subject_roles = defaultdict(set)
         sample_roles = defaultdict(set)
         for item in rows:
-            subject_roles[item.subject_id].add(item.role)
+            subject_roles[_assignment_group_id(item)].add(item.role)
             sample_roles[item.sample_key].add(item.role)
         folds[str(outer_fold)] = {
             "roles": role_summary,
@@ -501,6 +538,7 @@ def write_outer_fold_artifacts(
     num_folds: int = 5,
     seed: int = 202607,
     overwrite: bool = False,
+    group_key: str = "subject_id",
 ) -> Dict[str, str]:
     """Write immutable outer_splits.csv/json bound to the sample index."""
 
@@ -517,7 +555,7 @@ def write_outer_fold_artifacts(
         "schema_version": CROSSFIT_SCHEMA_VERSION,
         "immutable": True,
         "purpose": "confirmatory_cross_fitted_outer_split",
-        "group_key": "subject_id",
+        "group_key": group_key,
         "num_outer_folds": int(num_folds),
         "seed": int(seed),
         "source_index": _portable_reference(source_index_path),
@@ -544,7 +582,10 @@ def read_outer_fold_artifacts(
         payload.get("schema_version") != CROSSFIT_SCHEMA_VERSION
         or not payload.get("immutable")
         or payload.get("purpose") != "confirmatory_cross_fitted_outer_split"
-        or payload.get("group_key") != "subject_id"
+        or payload.get("group_key") not in (
+            "subject_id",
+            "site_subject",
+        )
     ):
         raise ValueError("unsupported outer split artifact")
     if source_index_path is not None and payload.get("source_index_sha256") != file_sha256(Path(source_index_path)):
@@ -564,6 +605,7 @@ def write_crossfit_fold_artifacts(
     inner_validation_ratio: float = 0.1875,
     seed: int = 202608,
     overwrite: bool = False,
+    group_key: str = "subject_id",
 ) -> Dict[str, str]:
     output_dir = Path(output_dir).resolve()
     outer_json_path = Path(outer_json_path).resolve()
@@ -580,7 +622,7 @@ def write_crossfit_fold_artifacts(
         "schema_version": CROSSFIT_SCHEMA_VERSION,
         "immutable": True,
         "purpose": "confirmatory_cross_fitted_fold_roles",
-        "group_key": "subject_id",
+        "group_key": group_key,
         "num_outer_folds": num_folds,
         "inner_validation_ratio": float(inner_validation_ratio),
         "seed": int(seed),
@@ -611,7 +653,10 @@ def read_crossfit_fold_artifacts(
         payload.get("schema_version") != CROSSFIT_SCHEMA_VERSION
         or not payload.get("immutable")
         or payload.get("purpose") != "confirmatory_cross_fitted_fold_roles"
-        or payload.get("group_key") != "subject_id"
+        or payload.get("group_key") not in (
+            "subject_id",
+            "site_subject",
+        )
     ):
         raise ValueError("unsupported crossfit fold artifact")
     if outer_json_path is not None and payload.get("outer_splits_json_sha256") != file_sha256(Path(outer_json_path)):

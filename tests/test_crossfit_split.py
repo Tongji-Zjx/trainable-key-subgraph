@@ -114,6 +114,39 @@ class CrossfitOuterSplitTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "non-empty subject_id"):
             create_outer_folds([invalid] + _samples()[1:])
 
+    def test_site_subject_grouping_does_not_merge_matching_local_ids(self):
+        samples = []
+        for site in ("SLD", "SLI"):
+            for label in (0, 1):
+                for index in range(4):
+                    subject = "sub-{:02d}".format(index)
+                    samples.append(
+                        IndexSample(
+                            sample_key="{}/{}_{}".format(
+                                site, label, subject
+                            ),
+                            sample_id="{}_{}".format(label, subject),
+                            site=site,
+                            subject_id=subject,
+                            session_id="",
+                            label=label,
+                            relative_path="unused",
+                            group_id="{}::{}".format(site, subject),
+                        )
+                    )
+        assignments = create_outer_folds(
+            samples,
+            num_folds=2,
+            seed=17,
+            group_key="site_subject",
+        )
+        summary = validate_outer_folds(assignments, 2)
+        self.assertEqual(summary["total_subjects"], 8)
+        self.assertEqual(
+            {item.group_id for item in assignments},
+            {sample.group_id for sample in samples},
+        )
+
 
 class CrossfitInnerSplitTest(unittest.TestCase):
     def test_inner_roles_are_reproducible_and_outer_test_is_isolated(self):

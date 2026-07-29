@@ -108,7 +108,12 @@ def prepare_fold_protocol(
         "crossfit_assignments": fold_assignments_path.relative_to(project_root).as_posix(),
         "crossfit_assignments_sha256": file_sha256(fold_assignments_path),
         "outer_fold": int(fold), "seed": seed, "ratios": ratios,
-        "group_aware": True, "group_key": "site::subject_id",
+        "group_aware": True,
+        "group_key": (
+            "site::subject_id"
+            if fold_payload.get("group_key") == "site_subject"
+            else "subject_id"
+        ),
         "summary": summary, "assignments": [row.to_dict() for row in assignments],
     }
     _atomic_json(split_json, split_payload)
@@ -118,6 +123,12 @@ def prepare_fold_protocol(
         sample_index_csv=source_index, splits_csv=split_csv, splits_json=split_json,
         output_path=protocol_json,
         edge_presence_threshold=float(source_protocol["edge_presence_threshold"]),
+        protocol_name=(
+            source_protocol.get("protocol_name")
+            if source_protocol.get("protocol_name")
+            in ("strict_theory", "wmrc_no_coord")
+            else "strict_theory"
+        ),
         node_name_policy=source_protocol.get("node_name_policy", "strict"),
         overwrite=overwrite,
     )
