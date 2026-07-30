@@ -52,9 +52,20 @@ class DualSGWProxyOutput:
 
 
 @dataclass(frozen=True)
+class DualSGWTransferOutput:
+    spectral_quantization: torch.Tensor
+    gw_quantization_proxy: torch.Tensor
+    per_sample_spectral_quantization: torch.Tensor
+    per_sample_gw_quantization_proxy: torch.Tensor
+    diagnostics: Dict[str, Any]
+
+
+@dataclass(frozen=True)
 class _ProxyWindowState:
     spectral_quantiles: torch.Tensor
     diffusion_quantiles: torch.Tensor
+    laplacian: torch.Tensor
+    diffusion_distance: torch.Tensor
 
 
 class DualSGWProxy(nn.Module):
@@ -79,16 +90,27 @@ class DualSGWProxy(nn.Module):
             self.config.diffusion_time
         )
 
-    def _state(
-        self, window: HardWindowOutput
-    ) -> Optional[_ProxyWindowState]:
+    @staticmethod
+    def _window_adjacency(window) -> torch.Tensor:
+        if hasattr(window, "adjacency_soft"):
+            return window.adjacency_soft
+        return window.adjacency_st
+
+    @staticmethod
+    def _window_node_mask(window) -> torch.Tensor:
+        if hasattr(window, "node_mask"):
+            return window.node_mask
+        return window.hard_node_mask
+
+    def _state(self, window) -> Optional[_ProxyWindowState]:
         if not window.window_valid:
             return None
-        node_mask = window.hard_node_mask.to(
-            device=window.adjacency_st.device, dtype=torch.bool
+        adjacency = self._window_adjacency(window)
+        node_mask = self._window_node_mask(window).to(
+            device=adjacency.device, dtype=torch.bool
         )
         laplacian = self.laplacian(
-            window.adjacency_st, node_mask=node_mask
+            adjacency, node_mask=node_mask
         )
         spectrum = self.spectral(laplacian, node_mask=node_mask)
         diffusion = self.heat(laplacian, node_mask=node_mask).distance
@@ -103,11 +125,13 @@ class DualSGWProxy(nn.Module):
             diffusion_quantiles=_empirical_quantiles(
                 pair_values, self.grid
             ),
+            laplacian=laplacian,
+            diffusion_distance=diffusion,
         )
 
     def _sequence(
         self,
-        windows: Sequence[HardWindowOutput],
+        windows: Sequence[Any],
         times: Sequence[float],
     ):
         if len(windows) != len(times) or len(windows) < 1:
@@ -115,7 +139,7 @@ class DualSGWProxy(nn.Module):
         states = tuple(self._state(window) for window in windows)
         transitions = []
         valid_mask = []
-        reference = windows[0].adjacency_st
+        reference = self._window_adjacency(windows[0])
         for index in range(max(0, len(states) - 1)):
             left, right = states[index], states[index + 1]
             tau = float(times[index + 1]) - float(times[index])
@@ -167,16 +191,25 @@ class DualSGWProxy(nn.Module):
             variation = reference.new_zeros(
                 (self.config.sgw_variation_dim,)
             )
-        return core, variation, mask
+        return core, variation, mask, states
 
     def _fidelity(
         self,
         batch: ExactSTSEBatch,
-        hard_windows: Sequence[Sequence[HardWindowOutput]],
+        graph_windows: Sequence[Sequence[Any]],
+        graph_states: Optional[
+            Sequence[Sequence[Optional[_ProxyWindowState]]]
+        ] = None,
     ):
         laplacian_terms: List[torch.Tensor] = []
         gw_terms: List[torch.Tensor] = []
-        for exact_sample, windows in zip(batch, hard_windows):
+        if graph_states is not None and len(graph_states) != len(
+            graph_windows
+        ):
+            raise ValueError("proxy fidelity states must align with graphs")
+        for sample_index, (exact_sample, windows) in enumerate(
+            zip(batch, graph_windows)
+        ):
             graph = exact_sample.graph
             for index, hard in enumerate(windows):
                 if not hard.window_valid:
@@ -185,23 +218,35 @@ class DualSGWProxy(nn.Module):
                     graph.adjacency[index],
                     edge_mask=graph.edge_mask[index],
                 )
-                hard_laplacian = self.laplacian(
-                    hard.adjacency_st,
-                    edge_mask=graph.edge_mask[index],
+                state = (
+                    graph_states[sample_index][index]
+                    if graph_states is not None
+                    else None
                 )
+                if state is None:
+                    graph_adjacency = self._window_adjacency(hard)
+                    graph_laplacian = self.laplacian(
+                        graph_adjacency,
+                        edge_mask=graph.edge_mask[index],
+                    )
+                    graph_distance = self.heat(
+                        graph_laplacian
+                    ).distance
+                else:
+                    graph_laplacian = state.laplacian
+                    graph_distance = state.diffusion_distance
                 laplacian_terms.append(
                     laplacian_fidelity_metrics(
-                        full_laplacian, hard_laplacian
+                        full_laplacian, graph_laplacian
                     ).normalized_frobenius_squared
                 )
                 full_distance = self.heat(full_laplacian).distance
-                hard_distance = self.heat(hard_laplacian).distance
                 gw_terms.append(
                     gw_identity_coupling_upper_bound(
-                        full_distance, hard_distance
+                        full_distance, graph_distance
                     ).squared_upper_bound
                 )
-        reference = hard_windows[0][0].adjacency_st
+        reference = self._window_adjacency(graph_windows[0][0])
         laplacian = (
             torch.stack(laplacian_terms).mean()
             if laplacian_terms
@@ -217,15 +262,18 @@ class DualSGWProxy(nn.Module):
     def forward(
         self,
         batch: ExactSTSEBatch,
-        hard_windows: Sequence[Sequence[HardWindowOutput]],
+        graph_windows: Sequence[Sequence[Any]],
+        compute_fidelity: bool = True,
+        reuse_fidelity_states: bool = False,
     ) -> DualSGWProxyOutput:
-        if len(batch) != len(hard_windows) or len(batch) < 1:
+        if len(batch) != len(graph_windows) or len(batch) < 1:
             raise ValueError("proxy batch and hard graphs must be aligned")
         cores = []
         variations = []
         masks = []
-        for exact_sample, windows in zip(batch, hard_windows):
-            core, variation, mask = self._sequence(
+        state_sequences = []
+        for exact_sample, windows in zip(batch, graph_windows):
+            core, variation, mask, states = self._sequence(
                 windows,
                 tuple(
                     float(value)
@@ -235,6 +283,7 @@ class DualSGWProxy(nn.Module):
             cores.append(core)
             variations.append(variation)
             masks.append(mask)
+            state_sequences.append(states)
         core_tensor = torch.stack(cores, dim=0)
         variation_tensor = torch.stack(variations, dim=0)
         representation = torch.cat(
@@ -248,7 +297,19 @@ class DualSGWProxy(nn.Module):
         )
         for index, mask in enumerate(masks):
             padded_mask[index, : mask.numel()] = mask
-        laplacian, gw = self._fidelity(batch, hard_windows)
+        if compute_fidelity:
+            laplacian, gw = self._fidelity(
+                batch,
+                graph_windows,
+                graph_states=(
+                    tuple(state_sequences)
+                    if reuse_fidelity_states
+                    else None
+                ),
+            )
+        else:
+            laplacian = representation.new_zeros(())
+            gw = representation.new_zeros(())
         if tuple(representation.shape[1:]) != (
             self.config.sgw_output_dim,
         ):
@@ -264,6 +325,87 @@ class DualSGWProxy(nn.Module):
                 "feature_semantics": "differentiable_sgw_aligned_proxy",
                 "is_exact_gw": False,
                 "valid_transition_count": int(padded_mask.sum()),
+                "window_states": tuple(state_sequences),
             },
         )
 
+    def compare_soft_and_hard(
+        self,
+        soft_windows: Sequence[Sequence[Any]],
+        hard_windows: Sequence[Sequence[HardWindowOutput]],
+        soft_states: Optional[
+            Sequence[Sequence[Optional[_ProxyWindowState]]]
+        ] = None,
+        hard_states: Optional[
+            Sequence[Sequence[Optional[_ProxyWindowState]]]
+        ] = None,
+    ) -> DualSGWTransferOutput:
+        """Differentiable train-time proxies for soft-to-hard q terms."""
+
+        if len(soft_windows) != len(hard_windows) or len(soft_windows) < 1:
+            raise ValueError("soft and hard graph batches must align")
+        spectral_per_sample = []
+        gw_per_sample = []
+        valid_window_count = 0
+        for sample_index, (soft_sample, hard_sample) in enumerate(
+            zip(soft_windows, hard_windows)
+        ):
+            if len(soft_sample) != len(hard_sample) or len(soft_sample) < 1:
+                raise ValueError("soft and hard graph sequences must align")
+            spectral_terms = []
+            gw_terms = []
+            for window_index, (soft_window, hard_window) in enumerate(
+                zip(soft_sample, hard_sample)
+            ):
+                soft_state = (
+                    soft_states[sample_index][window_index]
+                    if soft_states is not None
+                    else self._state(soft_window)
+                )
+                hard_state = (
+                    hard_states[sample_index][window_index]
+                    if hard_states is not None
+                    else self._state(hard_window)
+                )
+                if soft_state is None or hard_state is None:
+                    continue
+                spectral_terms.append(
+                    (
+                        soft_state.spectral_quantiles
+                        - hard_state.spectral_quantiles
+                    )
+                    .abs()
+                    .mean()
+                )
+                gw_terms.append(
+                    (
+                        soft_state.diffusion_quantiles
+                        - hard_state.diffusion_quantiles
+                    )
+                    .abs()
+                    .mean()
+                )
+                valid_window_count += 1
+            reference = self._window_adjacency(soft_sample[0])
+            spectral_per_sample.append(
+                torch.stack(spectral_terms).mean()
+                if spectral_terms
+                else reference.new_zeros(())
+            )
+            gw_per_sample.append(
+                torch.stack(gw_terms).mean()
+                if gw_terms
+                else reference.new_zeros(())
+            )
+        spectral_tensor = torch.stack(spectral_per_sample)
+        gw_tensor = torch.stack(gw_per_sample)
+        return DualSGWTransferOutput(
+            spectral_quantization=spectral_tensor.mean(),
+            gw_quantization_proxy=gw_tensor.mean(),
+            per_sample_spectral_quantization=spectral_tensor,
+            per_sample_gw_quantization_proxy=gw_tensor,
+            diagnostics={
+                "gw_semantics": "diffusion_quantile_proxy_not_exact_gw",
+                "valid_window_count": int(valid_window_count),
+            },
+        )

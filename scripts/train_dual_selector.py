@@ -56,6 +56,32 @@ def parse_args():
     parser.add_argument("--weight-decay", type=float, default=1.0e-4)
     parser.add_argument("--gradient-clip", type=float, default=1.0)
     parser.add_argument("--early-stopping-patience", type=int, default=15)
+    parser.add_argument(
+        "--selector-objective",
+        choices=("current", "full_soft", "full_soft_hard"),
+        default="current",
+        help=(
+            "current reproduces the original STE hard objective; "
+            "full_soft adds the explicit signed soft path; "
+            "full_soft_hard also controls soft-to-hard quantization"
+        ),
+    )
+    parser.add_argument("--soft-warmup-epochs", type=int, default=3)
+    parser.add_argument(
+        "--selector-soft-ce-weight", type=float, default=0.25
+    )
+    parser.add_argument(
+        "--selector-hard-ce-weight", type=float, default=0.25
+    )
+    parser.add_argument(
+        "--soft-hard-spectral-weight", type=float, default=0.05
+    )
+    parser.add_argument(
+        "--soft-hard-gw-weight", type=float, default=0.02
+    )
+    parser.add_argument(
+        "--soft-hard-kd-weight", type=float, default=0.05
+    )
     parser.add_argument("--smoke", action="store_true")
     return parser.parse_args()
 
@@ -131,13 +157,24 @@ def main():
             max_train_batches=1 if args.smoke else None,
             max_validation_batches=1 if args.smoke else None,
         ),
-        loss_config=DualSTSEHardSGWLossConfig(),
+        loss_config=DualSTSEHardSGWLossConfig(
+            selector_objective=args.selector_objective,
+            selector_soft_ce_weight=args.selector_soft_ce_weight,
+            selector_hard_ce_weight=args.selector_hard_ce_weight,
+            soft_hard_spectral_weight=(
+                args.soft_hard_spectral_weight
+            ),
+            soft_hard_gw_weight=args.soft_hard_gw_weight,
+            soft_hard_kd_weight=args.soft_hard_kd_weight,
+            soft_warmup_epochs=args.soft_warmup_epochs,
+        ),
         output_dir=args.output_dir,
         protocol_sha256=file_sha256(args.protocol),
         provenance={
             "stse_checkpoint_sha256": "not_used_in_selector_stage",
             "selector_checkpoint_sha256": "trained_by_this_stage",
             "sgw_scaler_sha256": "not_applicable",
+            "selector_objective": args.selector_objective,
         },
     )
     print(

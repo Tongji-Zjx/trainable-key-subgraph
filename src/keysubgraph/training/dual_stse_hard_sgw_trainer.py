@@ -240,15 +240,22 @@ def run_dual_epoch(
     max_batches: Optional[int] = None,
     threshold: float = 0.5,
     include_predictions: bool = False,
+    epoch: Optional[int] = None,
 ) -> Dict[str, Any]:
     training = optimizer is not None
     model.train(training)
     labels_all: List[int] = []
     probabilities_all: List[float] = []
+    soft_probabilities_all: List[float] = []
     keys_all: List[str] = []
     component_totals: Dict[str, float] = {}
+    selection_metric_totals: Dict[str, float] = {}
     sample_total = 0
     gradient_norms: List[float] = []
+    transfer_by_class: Dict[str, Dict[int, List[float]]] = {
+        "soft_hard_spectral": {0: [], 1: []},
+        "soft_hard_gw": {0: [], 1: []},
+    }
     started = time.perf_counter()
     for batch_index, cpu_batch in enumerate(data_loader):
         if max_batches is not None and batch_index >= max_batches:
@@ -265,9 +272,14 @@ def run_dual_epoch(
                 batch,
                 exact_sgw_features=exact_features,
                 compute_selector_proxy=stage == "selector_proxy",
+                selector_objective=criterion.config.selector_objective,
             )
             loss = criterion(
-                output, labels, stage, class_weights.to(device)
+                output,
+                labels,
+                stage,
+                class_weights.to(device),
+                epoch=epoch,
             )
             if training:
                 loss.total.backward()
@@ -297,6 +309,11 @@ def run_dual_epoch(
             "edge_budget",
             "laplacian",
             "gw_proxy",
+            "selector_soft_ce",
+            "selector_hard_ce",
+            "soft_hard_spectral",
+            "soft_hard_gw",
+            "soft_hard_kd",
         ):
             value = getattr(loss, name)
             component_totals[name] = component_totals.get(
@@ -309,6 +326,55 @@ def run_dual_epoch(
             float(value)
             for value in probabilities.detach().cpu().tolist()
         )
+        if output.selector_soft_proxy_logits is not None:
+            soft_probabilities = torch.softmax(
+                output.selector_soft_proxy_logits, dim=-1
+            )[:, 1]
+            soft_probabilities_all.extend(
+                float(value)
+                for value in soft_probabilities.detach().cpu().tolist()
+            )
+        transfer = output.diagnostics.get("soft_hard_transfer")
+        if transfer is not None:
+            spectral_values = (
+                transfer.per_sample_spectral_quantization
+                .detach()
+                .cpu()
+                .tolist()
+            )
+            gw_values = (
+                transfer.per_sample_gw_quantization_proxy
+                .detach()
+                .cpu()
+                .tolist()
+            )
+            label_values = labels.detach().cpu().tolist()
+            for label, spectral_value, gw_value in zip(
+                label_values, spectral_values, gw_values
+            ):
+                transfer_by_class["soft_hard_spectral"][
+                    int(label)
+                ].append(float(spectral_value))
+                transfer_by_class["soft_hard_gw"][int(label)].append(
+                    float(gw_value)
+                )
+        selection = output.diagnostics.get("selection", {})
+        for name in (
+            "candidate_node_ratio",
+            "actual_node_ratio",
+            "actual_edge_ratio",
+            "candidate_community_coverage",
+            "final_community_coverage",
+            "node_probability_mean",
+            "node_probability_std",
+            "edge_probability_mean",
+            "edge_probability_std",
+        ):
+            if name in selection:
+                selection_metric_totals[name] = (
+                    selection_metric_totals.get(name, 0.0)
+                    + float(selection[name]) * count
+                )
         keys_all.extend(batch.sample_keys)
     if sample_total < 1:
         raise ValueError("dual epoch processed no samples")
@@ -324,6 +390,34 @@ def run_dual_epoch(
     )
     result["elapsed_seconds"] = time.perf_counter() - started
     result.update(_metrics(labels_all, probabilities_all, threshold))
+    result["hard_roc_auc"] = result["roc_auc"]
+    for name, total in selection_metric_totals.items():
+        result[name] = total / float(sample_total)
+    if soft_probabilities_all:
+        soft_metrics = _metrics(
+            labels_all, soft_probabilities_all, threshold
+        )
+        result["soft_roc_auc"] = soft_metrics["roc_auc"]
+        result["soft_accuracy"] = soft_metrics["accuracy"]
+        result["soft_balanced_accuracy"] = soft_metrics[
+            "balanced_accuracy"
+        ]
+        result["soft_hard_probability_mean_absolute_difference"] = (
+            sum(
+                abs(soft - hard)
+                for soft, hard in zip(
+                    soft_probabilities_all, probabilities_all
+                )
+            )
+            / float(len(probabilities_all))
+        )
+    for name, values_by_class in transfer_by_class.items():
+        result[name + "_by_class"] = {
+            str(label): (
+                sum(values) / float(len(values)) if values else None
+            )
+            for label, values in values_by_class.items()
+        }
     if include_predictions:
         result["predictions"] = [
             {
@@ -470,6 +564,14 @@ def train_dual_stage(
     if history_path.exists():
         raise FileExistsError("dual training output already exists")
     set_reproducible_seed(training_config.seed)
+    if (
+        training_config.stage == "selector_proxy"
+        and provenance.get("selector_objective")
+        not in (None, loss_config.selector_objective)
+    ):
+        raise ValueError(
+            "selector objective disagrees with checkpoint provenance"
+        )
     model.to(device)
     class_weights = class_weights_from_labels(train_labels)
     criterion = DualSTSEHardSGWCriterion(loss_config)
@@ -497,6 +599,7 @@ def train_dual_stage(
             optimizer=optimizer,
             gradient_clip_norm=training_config.gradient_clip_norm,
             max_batches=training_config.max_train_batches,
+            epoch=epoch,
         )
         validation_metrics = run_dual_epoch(
             model,
@@ -507,18 +610,27 @@ def train_dual_stage(
             class_weights,
             feature_lookup=validation_feature_lookup,
             max_batches=training_config.max_validation_batches,
+            epoch=epoch,
         )
         auc = validation_metrics.get("roc_auc")
         selection_value = (
             float(auc) if auc is not None else -validation_metrics["loss"]
         )
         scheduler.step(selection_value)
-        improved = best_epoch == 0 or selection_value > best_auc
+        selection_eligible = not (
+            training_config.stage == "selector_proxy"
+            and loss_config.selector_objective == "full_soft_hard"
+            and training_config.epochs > loss_config.soft_warmup_epochs
+            and epoch <= loss_config.soft_warmup_epochs
+        )
+        improved = selection_eligible and (
+            best_epoch == 0 or selection_value > best_auc
+        )
         if improved:
             best_epoch = epoch
             best_auc = selection_value
             without_improvement = 0
-        else:
+        elif selection_eligible:
             without_improvement += 1
         record = {
             "epoch": epoch,
@@ -555,7 +667,8 @@ def train_dual_stage(
         _atomic_json(history_path, history)
         print(
             "epoch {}/{} stage={} train_loss={:.6f} train_auc={} "
-            "validation_loss={:.6f} validation_auc={}".format(
+            "validation_loss={:.6f} validation_auc={} "
+            "soft_validation_auc={}".format(
                 epoch,
                 training_config.epochs,
                 training_config.stage,
@@ -563,6 +676,7 @@ def train_dual_stage(
                 train_metrics["roc_auc"],
                 validation_metrics["loss"],
                 validation_metrics["roc_auc"],
+                validation_metrics.get("soft_roc_auc"),
             ),
             flush=True,
         )
@@ -590,6 +704,7 @@ def train_dual_stage(
         feature_lookup=validation_feature_lookup,
         max_batches=training_config.max_validation_batches,
         include_predictions=True,
+        epoch=int(payload["best_epoch"]),
     )
     labels = [
         int(item["label"]) for item in validation["predictions"]
@@ -625,4 +740,3 @@ def train_dual_stage(
         "history": history_path,
         "best_evaluation": evaluation_path,
     }
-

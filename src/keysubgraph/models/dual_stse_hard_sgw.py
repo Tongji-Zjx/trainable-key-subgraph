@@ -149,13 +149,25 @@ class DualSTSEHardSGWClassifier(nn.Module):
         batch: ExactSTSEBatch,
         exact_sgw_features: Optional[torch.Tensor] = None,
         compute_selector_proxy: bool = False,
+        selector_objective: str = "current",
         selection_mode: str = "learned",
         random_seed: int = 42,
     ) -> DualSTSEHardSGWOutput:
+        if selector_objective not in (
+            "current",
+            "full_soft",
+            "full_soft_hard",
+        ):
+            raise ValueError("unsupported selector objective")
         stse = self.stse_channel(batch)
         hard_windows = None
         proxy_logits = None
+        soft_proxy_logits = None
+        hard_proxy_logits = None
         proxy_output = None
+        soft_proxy_output = None
+        hard_proxy_output = None
+        transfer_output = None
         selection_diagnostics = {}
         if compute_selector_proxy:
             selection = self.selector(
@@ -165,10 +177,36 @@ class DualSTSEHardSGWClassifier(nn.Module):
             )
             hard_windows = selection.hard_windows
             selection_diagnostics = selection.diagnostics
-            proxy_output = self.proxy(batch, hard_windows)
-            proxy_logits = self.selector_proxy_head(
-                proxy_output.representation
+            hard_proxy_output = self.proxy(
+                batch,
+                hard_windows,
+                compute_fidelity=selector_objective == "current",
             )
+            hard_proxy_logits = self.selector_proxy_head(
+                hard_proxy_output.representation
+            )
+            proxy_output = hard_proxy_output
+            proxy_logits = hard_proxy_logits
+            if selector_objective != "current":
+                soft_proxy_output = self.proxy(
+                    batch,
+                    selection.soft_windows,
+                    compute_fidelity=True,
+                    reuse_fidelity_states=True,
+                )
+                soft_proxy_logits = self.selector_proxy_head(
+                    soft_proxy_output.representation
+                )
+                transfer_output = self.proxy.compare_soft_and_hard(
+                    selection.soft_windows,
+                    hard_windows,
+                    soft_states=soft_proxy_output.diagnostics[
+                        "window_states"
+                    ],
+                    hard_states=hard_proxy_output.diagnostics[
+                        "window_states"
+                    ],
+                )
 
         sgw_logits = None
         sgw_representation = None
@@ -212,6 +250,10 @@ class DualSTSEHardSGWClassifier(nn.Module):
             ),
             "selection": selection_diagnostics,
             "proxy": proxy_output,
+            "soft_proxy": soft_proxy_output,
+            "hard_proxy": hard_proxy_output,
+            "soft_hard_transfer": transfer_output,
+            "selector_objective": selector_objective,
         }
         return DualSTSEHardSGWOutput(
             fusion_logits=fusion_logits,
@@ -223,4 +265,6 @@ class DualSTSEHardSGWClassifier(nn.Module):
             fusion_representation=fusion_representation,
             hard_windows=hard_windows,
             diagnostics=diagnostics,
+            selector_soft_proxy_logits=soft_proxy_logits,
+            selector_hard_proxy_logits=hard_proxy_logits,
         )

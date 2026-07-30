@@ -13,32 +13,55 @@ from .dual_stse_hard_sgw_types import DualSTSEHardSGWOutput
 
 @dataclass(frozen=True)
 class DualSTSEHardSGWLossConfig:
+    selector_objective: str = "current"
     fusion_ce_weight: float = 1.0
     stse_aux_ce_weight: float = 0.30
     sgw_aux_ce_weight: float = 0.50
     selector_proxy_ce_weight: float = 0.50
+    selector_soft_ce_weight: float = 0.25
+    selector_hard_ce_weight: float = 0.25
     node_budget_weight: float = 0.05
     edge_budget_weight: float = 0.05
     laplacian_weight: float = 0.05
     gw_proxy_weight: float = 0.02
+    soft_hard_spectral_weight: float = 0.05
+    soft_hard_gw_weight: float = 0.02
+    soft_hard_kd_weight: float = 0.05
+    soft_hard_kd_temperature: float = 1.0
+    soft_warmup_epochs: int = 3
     target_node_ratio: float = 0.50
     target_edge_ratio: float = 0.30
 
     def __post_init__(self) -> None:
+        if self.selector_objective not in (
+            "current",
+            "full_soft",
+            "full_soft_hard",
+        ):
+            raise ValueError("unsupported selector objective")
         weights = (
             self.fusion_ce_weight,
             self.stse_aux_ce_weight,
             self.sgw_aux_ce_weight,
             self.selector_proxy_ce_weight,
+            self.selector_soft_ce_weight,
+            self.selector_hard_ce_weight,
             self.node_budget_weight,
             self.edge_budget_weight,
             self.laplacian_weight,
             self.gw_proxy_weight,
+            self.soft_hard_spectral_weight,
+            self.soft_hard_gw_weight,
+            self.soft_hard_kd_weight,
         )
         if any(value < 0.0 for value in weights):
             raise ValueError("dual loss weights cannot be negative")
         if self.fusion_ce_weight <= 0.0:
             raise ValueError("dual fusion CE weight must be positive")
+        if self.soft_hard_kd_temperature <= 0.0:
+            raise ValueError("soft-hard KD temperature must be positive")
+        if self.soft_warmup_epochs < 0:
+            raise ValueError("soft warmup epochs cannot be negative")
         for ratio in (self.target_node_ratio, self.target_edge_ratio):
             if ratio <= 0.0 or ratio > 1.0:
                 raise ValueError("dual budget targets must lie in (0,1]")
@@ -55,6 +78,11 @@ class DualSTSEHardSGWLoss:
     edge_budget: torch.Tensor
     laplacian: torch.Tensor
     gw_proxy: torch.Tensor
+    selector_soft_ce: torch.Tensor
+    selector_hard_ce: torch.Tensor
+    soft_hard_spectral: torch.Tensor
+    soft_hard_gw: torch.Tensor
+    soft_hard_kd: torch.Tensor
     stage: str
     weights: Dict[str, float]
 
@@ -92,6 +120,7 @@ class DualSTSEHardSGWCriterion(object):
         labels: torch.Tensor,
         stage: str,
         class_weights: Optional[torch.Tensor] = None,
+        epoch: Optional[int] = None,
     ) -> DualSTSEHardSGWLoss:
         if stage not in ("selector_proxy", "sgw_classifier", "fusion"):
             raise ValueError("unsupported dual loss stage")
@@ -104,18 +133,67 @@ class DualSTSEHardSGWCriterion(object):
         edge_budget = zero
         laplacian = zero
         gw_proxy = zero
+        selector_soft_ce = zero
+        selector_hard_ce = zero
+        soft_hard_spectral = zero
+        soft_hard_gw = zero
+        soft_hard_kd = zero
 
         if stage == "selector_proxy":
             if output.selector_proxy_logits is None:
                 raise ValueError("selector stage requires proxy logits")
-            selector_ce = _weighted_ce(
+            selector_hard_ce = _weighted_ce(
                 output.selector_proxy_logits, labels, class_weights
             )
-            proxy = output.diagnostics.get("proxy")
-            if proxy is None:
-                raise ValueError("selector stage requires proxy diagnostics")
-            laplacian = proxy.laplacian_fidelity
-            gw_proxy = proxy.gw_fidelity
+            selector_ce = selector_hard_ce
+            objective = self.config.selector_objective
+            if objective == "current":
+                proxy = output.diagnostics.get("proxy")
+                if proxy is None:
+                    raise ValueError(
+                        "selector stage requires proxy diagnostics"
+                    )
+                laplacian = proxy.laplacian_fidelity
+                gw_proxy = proxy.gw_fidelity
+            else:
+                soft_logits = output.selector_soft_proxy_logits
+                soft_proxy = output.diagnostics.get("soft_proxy")
+                if soft_logits is None or soft_proxy is None:
+                    raise ValueError(
+                        "transfer selector requires soft proxy outputs"
+                    )
+                selector_soft_ce = _weighted_ce(
+                    soft_logits, labels, class_weights
+                )
+                laplacian = soft_proxy.laplacian_fidelity
+                gw_proxy = soft_proxy.gw_fidelity
+                transfer = output.diagnostics.get(
+                    "soft_hard_transfer"
+                )
+                if transfer is None:
+                    raise ValueError(
+                        "transfer selector requires quantization outputs"
+                    )
+                soft_hard_spectral = (
+                    transfer.spectral_quantization
+                )
+                soft_hard_gw = transfer.gw_quantization_proxy
+                temperature = self.config.soft_hard_kd_temperature
+                teacher = F.softmax(
+                    soft_logits.detach() / temperature, dim=-1
+                )
+                soft_hard_kd = (
+                    F.kl_div(
+                        F.log_softmax(
+                            output.selector_proxy_logits / temperature,
+                            dim=-1,
+                        ),
+                        teacher,
+                        reduction="batchmean",
+                    )
+                    * temperature
+                    * temperature
+                )
             selections = output.diagnostics.get("selection", {}).get(
                 "selections", ()
             )
@@ -140,13 +218,44 @@ class DualSTSEHardSGWCriterion(object):
                     torch.cat(edge_values).mean()
                     - self.config.target_edge_ratio
                 ).abs()
-            total = (
-                self.config.selector_proxy_ce_weight * selector_ce
-                + self.config.node_budget_weight * node_budget
-                + self.config.edge_budget_weight * edge_budget
-                + self.config.laplacian_weight * laplacian
-                + self.config.gw_proxy_weight * gw_proxy
-            )
+            if objective == "current":
+                total = (
+                    self.config.selector_proxy_ce_weight * selector_ce
+                    + self.config.node_budget_weight * node_budget
+                    + self.config.edge_budget_weight * edge_budget
+                    + self.config.laplacian_weight * laplacian
+                    + self.config.gw_proxy_weight * gw_proxy
+                )
+            else:
+                warmup = (
+                    objective == "full_soft_hard"
+                    and epoch is not None
+                    and epoch <= self.config.soft_warmup_epochs
+                )
+                hard_weight = (
+                    0.0
+                    if warmup
+                    else self.config.selector_hard_ce_weight
+                )
+                total = (
+                    self.config.selector_soft_ce_weight
+                    * selector_soft_ce
+                    + hard_weight * selector_hard_ce
+                    + self.config.node_budget_weight * node_budget
+                    + self.config.edge_budget_weight * edge_budget
+                    + self.config.laplacian_weight * laplacian
+                    + self.config.gw_proxy_weight * gw_proxy
+                )
+                if objective == "full_soft_hard" and not warmup:
+                    total = (
+                        total
+                        + self.config.soft_hard_spectral_weight
+                        * soft_hard_spectral
+                        + self.config.soft_hard_gw_weight
+                        * soft_hard_gw
+                        + self.config.soft_hard_kd_weight
+                        * soft_hard_kd
+                    )
         elif stage == "sgw_classifier":
             if output.sgw_logits is None:
                 raise ValueError("SGW stage requires exact SGW logits")
@@ -181,6 +290,11 @@ class DualSTSEHardSGWCriterion(object):
             edge_budget=edge_budget,
             laplacian=laplacian,
             gw_proxy=gw_proxy,
+            selector_soft_ce=selector_soft_ce,
+            selector_hard_ce=selector_hard_ce,
+            soft_hard_spectral=soft_hard_spectral,
+            soft_hard_gw=soft_hard_gw,
+            soft_hard_kd=soft_hard_kd,
             stage=stage,
             weights={
                 "fusion_ce": self.config.fusion_ce_weight,
@@ -189,10 +303,16 @@ class DualSTSEHardSGWCriterion(object):
                 "selector_proxy_ce": (
                     self.config.selector_proxy_ce_weight
                 ),
+                "selector_soft_ce": self.config.selector_soft_ce_weight,
+                "selector_hard_ce": self.config.selector_hard_ce_weight,
                 "node_budget": self.config.node_budget_weight,
                 "edge_budget": self.config.edge_budget_weight,
                 "laplacian": self.config.laplacian_weight,
                 "gw_proxy": self.config.gw_proxy_weight,
+                "soft_hard_spectral": (
+                    self.config.soft_hard_spectral_weight
+                ),
+                "soft_hard_gw": self.config.soft_hard_gw_weight,
+                "soft_hard_kd": self.config.soft_hard_kd_weight,
             },
         )
-

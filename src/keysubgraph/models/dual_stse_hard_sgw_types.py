@@ -113,4 +113,15 @@ class DualSTSEHardSGWOutput:
     fusion_representation: Optional[torch.Tensor]
     hard_windows: Optional[Tuple[Tuple[Any, ...], ...]]
     diagnostics: Dict[str, Any]
+    selector_soft_proxy_logits: Optional[torch.Tensor] = None
+    selector_hard_proxy_logits: Optional[torch.Tensor] = None
 
+
+@dataclass(frozen=True)
+class DualSoftWindowOutput:
+    """Same-node differentiable signed soft graph used during selection."""
+
+    adjacency_soft: torch.Tensor
+    node_mask: torch.Tensor
+    edge_mask: torch.Tensor
+    window_valid: bool
