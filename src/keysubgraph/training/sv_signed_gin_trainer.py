@@ -358,7 +358,9 @@ def run_sv_signed_gin_epoch(
             branch_metrics[name] = current
         metrics["branch_metrics"] = branch_metrics
     if fusion_weight_values:
-        names = ("gin", "static_spectral", "variation")
+        names = tuple(branch_probabilities)
+        if len(names) != len(fusion_weight_values[0]):
+            raise RuntimeError("SV fusion weights and branches disagree")
         metrics["fusion_weights"] = {
             name: sum(values[index] for values in fusion_weight_values)
             / float(len(fusion_weight_values))

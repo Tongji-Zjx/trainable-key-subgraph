@@ -132,7 +132,11 @@ class SVSignedGINTest(unittest.TestCase):
                     "signed_gin_static_anchor_residual",
                     "signed_gin_static_anchor_residual_attention",
                 )
-                else 32
+                else (
+                    16
+                    if variant == "static_spectral_only"
+                    else 32
+                )
             )
             self.assertEqual(tuple(output.logits.shape), (2, 2))
             self.assertEqual(
@@ -140,6 +144,43 @@ class SVSignedGINTest(unittest.TestCase):
             )
             self.assertEqual(
                 output.diagnostics["preserves_signed_edges"], True
+            )
+
+    def test_s_and_sv_are_strict_deletion_ablations(self):
+        batch = SVSignedGINBatch(
+            (_sample("a", 0), _sample("b", 1))
+        )
+        cases = (
+            (
+                "static_spectral_only",
+                ("static_spectral",),
+                False,
+                False,
+            ),
+            (
+                "static_spectral_variation_late_fusion",
+                ("static_spectral", "variation"),
+                False,
+                True,
+            ),
+        )
+        for variant, branches, uses_gin, uses_variation in cases:
+            model = SVSignedGINClassifier(
+                SVSignedGINConfig(variant=variant, dropout=0.0)
+            )
+            output = model(batch)
+            self.assertEqual(
+                tuple(output.branch_logits), branches
+            )
+            self.assertEqual(model.encoder is not None, uses_gin)
+            self.assertEqual(
+                model.variation_projection is not None,
+                uses_variation,
+            )
+            self.assertEqual(output.encoder_outputs, ())
+            self.assertIsNone(output.gin_representation)
+            self.assertAlmostEqual(
+                float(output.fusion_weights.sum()), 1.0, places=6
             )
 
     def test_multibranch_fusion_is_nonnegative_and_supervises_all_branches(self):

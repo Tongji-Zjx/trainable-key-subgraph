@@ -9,6 +9,8 @@ from typing import List, Sequence, Tuple
 
 SV_CROSSFIT_VARIANTS = (
     "sv_static_variation",
+    "static_spectral_only",
+    "static_spectral_variation_late_fusion",
     "signed_gin_variation",
     "signed_gin_static_variation",
     "signed_gin_multibranch_late_fusion",
@@ -177,6 +179,8 @@ def build_sv_crossfit_fold_commands(
             )
         )
         if variant in (
+            "static_spectral_only",
+            "static_spectral_variation_late_fusion",
             "signed_gin_multibranch_late_fusion",
             "signed_gin_static_anchor_residual",
             "signed_gin_static_anchor_residual_attention",

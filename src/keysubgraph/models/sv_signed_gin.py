@@ -18,6 +18,8 @@ from keysubgraph.features.sv_hard_graph_features import (
 
 SV_SIGNED_GIN_VARIANTS = (
     "sv_static_variation",
+    "static_spectral_only",
+    "static_spectral_variation_late_fusion",
     "signed_gin_variation",
     "signed_gin_static_variation",
     "signed_gin_multibranch_late_fusion",
@@ -110,15 +112,25 @@ class SVSignedGINConfig:
 
     @property
     def uses_gin(self) -> bool:
-        return self.variant != "sv_static_variation"
+        return self.variant not in (
+            "sv_static_variation",
+            "static_spectral_only",
+            "static_spectral_variation_late_fusion",
+        )
 
     @property
     def uses_static(self) -> bool:
         return self.variant != "signed_gin_variation"
 
     @property
+    def uses_variation(self) -> bool:
+        return self.variant != "static_spectral_only"
+
+    @property
     def uses_late_fusion(self) -> bool:
         return self.variant in (
+            "static_spectral_only",
+            "static_spectral_variation_late_fusion",
             "signed_gin_multibranch_late_fusion",
             "signed_gin_static_anchor_residual",
             "signed_gin_static_anchor_residual_attention",
@@ -155,10 +167,21 @@ class SVSignedGINConfig:
 
     @property
     def fusion_input_dim(self) -> int:
-        channel_count = 1  # Variation is always present.
+        channel_count = int(self.uses_variation)
         channel_count += int(self.uses_gin)
         channel_count += int(self.uses_static)
         return channel_count * self.channel_projection_dim
+
+    @property
+    def active_branch_names(self) -> Tuple[str, ...]:
+        names = []
+        if self.uses_gin:
+            names.append("gin")
+        if self.uses_static:
+            names.append("static_spectral")
+        if self.uses_variation:
+            names.append("variation")
+        return tuple(names)
 
 
 @dataclass(frozen=True)
@@ -230,7 +253,7 @@ class SVSignedGINOutput:
     final_representation: torch.Tensor
     gin_representation: Optional[torch.Tensor]
     static_projection: Optional[torch.Tensor]
-    variation_projection: torch.Tensor
+    variation_projection: Optional[torch.Tensor]
     gin_projection: Optional[torch.Tensor]
     encoder_outputs: Tuple[SVSignedGINEncoderOutput, ...]
     diagnostics: Dict[str, Any]
@@ -592,9 +615,13 @@ class SVSignedGINClassifier(nn.Module):
             if self.config.uses_static
             else None
         )
-        self.variation_projection = _projection(
-            self.config.variation_dim,
-            self.config.channel_projection_dim,
+        self.variation_projection = (
+            _projection(
+                self.config.variation_dim,
+                self.config.channel_projection_dim,
+            )
+            if self.config.uses_variation
+            else None
         )
         if self.config.uses_late_fusion:
             self.branch_classifiers = nn.ModuleDict(
@@ -608,11 +635,14 @@ class SVSignedGINClassifier(nn.Module):
                         nn.Dropout(self.config.dropout),
                         nn.Linear(self.config.fusion_hidden_dim, 2),
                     )
-                    for name in ("gin", "static_spectral", "variation")
+                    for name in self.config.active_branch_names
                 }
             )
             self.fusion_log_weights = nn.Parameter(
-                torch.zeros(3, dtype=torch.float32),
+                torch.zeros(
+                    len(self.config.active_branch_names),
+                    dtype=torch.float32,
+                ),
                 requires_grad=not self.config.uses_residual_fusion,
             )
             if self.config.uses_residual_fusion:
@@ -820,23 +850,23 @@ class SVSignedGINClassifier(nn.Module):
             )
             static_projected = self.static_projection(static_input)
             channels.append(static_projected)
-        variation_projected = self.variation_projection(variation)
-        channels.append(variation_projected)
+        variation_projected = None
+        if self.config.uses_variation:
+            variation_projected = self.variation_projection(variation)
+            channels.append(variation_projected)
         final = torch.cat(channels, dim=-1)
         branch_logits = None
         fusion_weights = None
         residual_gates = None
         if self.config.uses_late_fusion:
+            projected = {
+                "gin": gin_projected,
+                "static_spectral": static_projected,
+                "variation": variation_projected,
+            }
             branch_logits = {
-                "gin": self.branch_classifiers["gin"](
-                    gin_projected
-                ),
-                "static_spectral": self.branch_classifiers[
-                    "static_spectral"
-                ](static_projected),
-                "variation": self.branch_classifiers["variation"](
-                    variation_projected
-                ),
+                name: self.branch_classifiers[name](projected[name])
+                for name in self.config.active_branch_names
             }
             if self.config.uses_residual_fusion:
                 residual_gates = {
@@ -861,9 +891,8 @@ class SVSignedGINClassifier(nn.Module):
                 )
                 stacked_logits = torch.stack(
                     [
-                        branch_logits["gin"],
-                        branch_logits["static_spectral"],
-                        branch_logits["variation"],
+                        branch_logits[name]
+                        for name in self.config.active_branch_names
                     ],
                     dim=0,
                 )
@@ -916,6 +945,7 @@ class SVSignedGINClassifier(nn.Module):
                     )
                 ),
                 "training_stage": self._training_stage,
+                "active_branches": self.config.active_branch_names,
             },
             branch_logits=branch_logits,
             fusion_weights=fusion_weights,

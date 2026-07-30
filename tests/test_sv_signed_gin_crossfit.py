@@ -97,6 +97,28 @@ class SVSignedGINCrossfitRunnerTest(unittest.TestCase):
         for value in expected:
             self.assertIn(value, train_command)
 
+    def test_s_and_sv_plans_reuse_fold_artifacts_without_gin_baseline(self):
+        variants = (
+            "static_spectral_only",
+            "static_spectral_variation_late_fusion",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            plan = build_sv_crossfit_fold_commands(
+                PROJECT_ROOT,
+                Path(directory),
+                2,
+                variants=variants,
+                device="cuda",
+                seed=42,
+            )
+        stages = [name for name, _, _ in plan]
+        for variant in variants:
+            self.assertIn("train_{}".format(variant), stages)
+            self.assertIn("evaluate_{}".format(variant), stages)
+        self.assertNotIn(
+            "train_signed_gin_multibranch_late_fusion", stages
+        )
+
     def test_static_anchor_residual_plan_enables_two_stage_training(self):
         variant = "signed_gin_static_anchor_residual"
         with tempfile.TemporaryDirectory() as directory:
