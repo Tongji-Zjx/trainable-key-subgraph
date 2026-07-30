@@ -6,7 +6,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Sequence, Tuple
 
 from keysubgraph.data.data_split import file_sha256
 from .sv_signed_gin_artifact import (
@@ -89,6 +89,84 @@ def write_sv_signed_gin_manifest(
     temporary = output_path.with_suffix(output_path.suffix + ".tmp")
     with temporary.open("w", encoding="utf-8", newline="\n") as handle:
         json.dump(payload, handle, ensure_ascii=False, indent=2, sort_keys=True)
+        handle.write("\n")
+    os.replace(str(temporary), str(output_path))
+    return output_path
+
+
+def write_sv_signed_gin_manifest_from_paths(
+    feature_paths: Sequence[Path],
+    output_path: Path,
+    overwrite: bool = False,
+) -> Path:
+    """Write a manifest while retaining at most one feature record in RAM."""
+    output_path = Path(output_path).resolve()
+    if output_path.exists() and not overwrite:
+        raise FileExistsError("SV Signed-GIN manifest already exists")
+    resolved_paths = [Path(path).resolve() for path in feature_paths]
+    if not resolved_paths:
+        raise ValueError("cannot write an empty SV Signed-GIN manifest")
+
+    rows = []
+    keys = set()
+    split = None
+    common = None
+    for resolved in resolved_paths:
+        record = load_sv_signed_gin_record(resolved)
+        record_provenance = _provenance(record)
+        if split is None:
+            split = record.split
+            common = record_provenance
+        elif record.split != split or record_provenance != common:
+            raise ValueError("SV Signed-GIN manifest mixes split/provenance")
+        if record.sample_key in keys:
+            raise ValueError(
+                "SV Signed-GIN manifest contains duplicate samples"
+            )
+        keys.add(record.sample_key)
+        try:
+            relative = resolved.relative_to(
+                output_path.parent
+            ).as_posix()
+        except ValueError:
+            relative = resolved.as_posix()
+        rows.append(
+            {
+                "sample_key": record.sample_key,
+                "sample_id": record.sample_id,
+                "subject_id": record.subject_id,
+                "site": record.site,
+                "label": int(record.label),
+                "split": record.split,
+                "valid_window_count": record.valid_window_count,
+                "valid_transition_count": (
+                    record.valid_transition_count
+                ),
+                "feature_path": relative,
+                "feature_sha256": file_sha256(resolved),
+            }
+        )
+        del record
+
+    rows.sort(key=lambda row: row["sample_key"])
+    payload = {
+        "schema_version": SV_SIGNED_GIN_MANIFEST_SCHEMA_VERSION,
+        "artifact_type": "sv_hard_sgw_signed_gin_manifest",
+        "sample_count": len(rows),
+        "split": split,
+        "records": rows,
+        **common
+    }
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = output_path.with_suffix(output_path.suffix + ".tmp")
+    with temporary.open("w", encoding="utf-8", newline="\n") as handle:
+        json.dump(
+            payload,
+            handle,
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        )
         handle.write("\n")
     os.replace(str(temporary), str(output_path))
     return output_path

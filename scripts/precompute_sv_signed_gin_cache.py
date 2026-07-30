@@ -27,11 +27,12 @@ from keysubgraph.data.exact_stse_dataset import (  # noqa: E402
 from keysubgraph.data.sv_signed_gin_artifact import (  # noqa: E402
     SVSignedGINRecord,
     SVSignedGINWindowRecord,
+    load_sv_signed_gin_record,
     save_sv_signed_gin_record,
 )
 from keysubgraph.data.sv_signed_gin_manifest import (  # noqa: E402
     sv_signed_gin_filename,
-    write_sv_signed_gin_manifest,
+    write_sv_signed_gin_manifest_from_paths,
 )
 from keysubgraph.features.sv_hard_graph_features import (  # noqa: E402
     SVHardSampleFeatureBuilder,
@@ -115,11 +116,55 @@ def main():
     builder = SVHardSampleFeatureBuilder()
     output_dir = Path(args.output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
-    records = []
+    feature_paths = []
     with torch.no_grad():
         for index, cpu_batch in enumerate(loader):
             if args.max_samples is not None and index >= args.max_samples:
                 break
+            cpu_sample = cpu_batch[0].graph
+            path = output_dir / sv_signed_gin_filename(
+                cpu_sample.sample_key
+            )
+            if path.exists() and not args.overwrite:
+                record = load_sv_signed_gin_record(path)
+                checks = (
+                    record.sample_key == cpu_sample.sample_key,
+                    record.sample_id == cpu_sample.sample_id,
+                    record.subject_id == cpu_sample.subject_id,
+                    record.site == cpu_sample.site,
+                    int(record.label) == int(cpu_sample.label),
+                    record.split == cpu_sample.split == args.split,
+                    record.protocol_sha256 == protocol_sha256,
+                    record.selector_checkpoint_sha256
+                    == selector_sha256,
+                    record.selection_mode == args.selection_mode,
+                    int(record.selection_seed)
+                    == int(args.selection_seed),
+                )
+                if not all(checks):
+                    raise ValueError(
+                        "existing SV cache record provenance mismatch: "
+                        + cpu_sample.sample_key
+                    )
+                feature_paths.append(path)
+                print(
+                    "reused {}/{} {} valid_windows={} "
+                    "transitions={}".format(
+                        index + 1,
+                        min(
+                            len(dataset),
+                            args.max_samples
+                            if args.max_samples is not None
+                            else len(dataset),
+                        ),
+                        cpu_sample.sample_key,
+                        record.valid_window_count,
+                        record.valid_transition_count,
+                    ),
+                    flush=True,
+                )
+                del record
+                continue
             batch = cpu_batch.to(device)
             selection = model.selector(
                 batch,
@@ -161,11 +206,10 @@ def main():
                 selection_mode=args.selection_mode,
                 selection_seed=args.selection_seed,
             )
-            path = output_dir / sv_signed_gin_filename(sample.sample_key)
             save_sv_signed_gin_record(
                 record, path, overwrite=args.overwrite
             )
-            records.append((record, path))
+            feature_paths.append(path)
             print(
                 "processed {}/{} {} valid_windows={} transitions={}".format(
                     index + 1,
@@ -181,8 +225,15 @@ def main():
                 ),
                 flush=True,
             )
-    manifest = write_sv_signed_gin_manifest(
-        records,
+            del record
+            del window_records
+            del features
+            del selection
+            del cropped
+            del sample
+            del batch
+    manifest = write_sv_signed_gin_manifest_from_paths(
+        feature_paths,
         output_dir / "manifest.json",
         overwrite=args.overwrite,
     )
@@ -190,7 +241,7 @@ def main():
         json.dumps(
             {
                 "manifest": str(manifest),
-                "sample_count": len(records),
+                "sample_count": len(feature_paths),
                 "split": args.split,
                 "selection_mode": args.selection_mode,
                 "selector_checkpoint_sha256": selector_sha256,

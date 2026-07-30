@@ -19,7 +19,9 @@ from keysubgraph.data.sv_signed_gin_dataset import (
     create_sv_signed_gin_loader,
 )
 from keysubgraph.data.sv_signed_gin_manifest import (
+    read_sv_signed_gin_manifest,
     write_sv_signed_gin_manifest,
+    write_sv_signed_gin_manifest_from_paths,
 )
 from keysubgraph.data.sv_signed_gin_scaler import (
     fit_sv_signed_gin_standardizers,
@@ -84,6 +86,31 @@ class SVSignedGINDataTest(unittest.TestCase):
         self.assertEqual(loaded.valid_window_count, 2)
         self.assertEqual(tuple(loaded.windows[0].node_features.shape), (2, 15))
         self.assertTrue(bool((loaded.windows[0].adjacency > 0.0).any()))
+
+    def test_streaming_manifest_from_paths_matches_saved_records(self):
+        records = (
+            _record("train-b", 1, "train", 2.0, 3),
+            _record("train-a", 0, "train", 0.0, 2),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paths = []
+            for record in records:
+                path = root / (record.sample_key + ".pt")
+                save_sv_signed_gin_record(record, path)
+                paths.append(path)
+            manifest = root / "manifest.json"
+            write_sv_signed_gin_manifest_from_paths(paths, manifest)
+            payload, loaded = read_sv_signed_gin_manifest(manifest)
+        self.assertEqual(payload["sample_count"], 2)
+        self.assertEqual(
+            [row["sample_key"] for row in payload["records"]],
+            ["train-a", "train-b"],
+        )
+        self.assertEqual(
+            [record.sample_key for record in loaded],
+            ["train-a", "train-b"],
+        )
 
     def test_train_only_scalers_and_list_batching(self):
         train_records = (
