@@ -27,11 +27,13 @@ class SVSignedGINDataset(Dataset):
         manifest_path: Path,
         scaler_path: Path,
         max_samples=None,
+        include_windows: bool = True,
     ) -> None:
         if max_samples is not None and int(max_samples) < 1:
             raise ValueError("SV dataset max_samples must be positive")
         self.manifest_path = Path(manifest_path).resolve()
         self.scaler_path = Path(scaler_path).resolve()
+        self.include_windows = bool(include_windows)
         self.manifest, records = read_sv_signed_gin_manifest(
             self.manifest_path
         )
@@ -65,17 +67,21 @@ class SVSignedGINDataset(Dataset):
             else records
         )
         for record in selected_records:
-            windows = tuple(
-                SVSignedGINWindowInput(
-                    node_features=self.scaler.standardize_nodes(
-                        window.node_features.to(torch.float32)
-                    ).detach().clone(),
-                    adjacency=window.adjacency.to(
-                        torch.float32
-                    ).detach().clone(),
+            windows = (
+                tuple(
+                    SVSignedGINWindowInput(
+                        node_features=self.scaler.standardize_nodes(
+                            window.node_features.to(torch.float32)
+                        ).detach().clone(),
+                        adjacency=window.adjacency.to(
+                            torch.float32
+                        ).detach().clone(),
+                    )
+                    for window in record.windows
+                    if window is not None
                 )
-                for window in record.windows
-                if window is not None
+                if self.include_windows
+                else ()
             )
             self.samples.append(
                 SVSignedGINSampleInput(

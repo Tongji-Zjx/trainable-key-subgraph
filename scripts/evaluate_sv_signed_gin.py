@@ -82,7 +82,11 @@ def main():
     thresholds = checkpoint.get("validation_thresholds")
     if not isinstance(thresholds, dict) or args.threshold_strategy not in thresholds:
         raise ValueError("SV checkpoint has no frozen validation threshold")
-    dataset = SVSignedGINDataset(args.manifest, args.scaler)
+    dataset = SVSignedGINDataset(
+        args.manifest,
+        args.scaler,
+        include_windows=model.config.uses_gin,
+    )
     expected = checkpoint["provenance"]
     checks = (
         expected["protocol_sha256"]

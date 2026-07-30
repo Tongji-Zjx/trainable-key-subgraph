@@ -147,6 +147,42 @@ class SVSignedGINDataTest(unittest.TestCase):
                 (_record("v", 0, "validation"),), "manifest"
             )
 
+    def test_summary_only_dataset_omits_graph_windows(self):
+        records = (
+            _record("train-a", 0, "train", 1.0, 2),
+            _record("train-b", 1, "train", 2.0, 3),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest = self._manifest(
+                root / "artifacts", records, "index"
+            )
+            scaler = fit_sv_signed_gin_standardizers(
+                records, file_sha256(manifest)
+            )
+            scaler_path = root / "scaler.json"
+            save_sv_signed_gin_standardizers(scaler, scaler_path)
+            full = SVSignedGINDataset(manifest, scaler_path)
+            summary = SVSignedGINDataset(
+                manifest,
+                scaler_path,
+                include_windows=False,
+            )
+        self.assertTrue(full.samples[0].windows)
+        self.assertEqual(summary.samples[0].windows, ())
+        self.assertTrue(
+            torch.equal(
+                full.samples[0].static_features,
+                summary.samples[0].static_features,
+            )
+        )
+        self.assertTrue(
+            torch.equal(
+                full.samples[0].variation,
+                summary.samples[0].variation,
+            )
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -129,14 +129,33 @@ def main():
     args = parse_args()
     if args.smoke and args.overfit_samples is not None:
         raise ValueError("SV smoke and overfit modes are mutually exclusive")
+    model_config = SVSignedGINConfig(
+        variant=args.variant,
+        gin_hidden_dim=args.gin_hidden_dim,
+        gin_layers=args.gin_layers,
+        dropout=args.dropout,
+        message_mode=args.message_mode,
+        pooling=args.pooling,
+        gin_residual=args.gin_residual,
+        gin_jumping_knowledge=args.gin_jumping_knowledge,
+        gin_compact_readout=args.gin_compact_readout,
+        gin_batch_normalization=args.gin_batch_normalization,
+        gin_residual_attention=args.gin_residual_attention,
+    )
     validation_manifest = (
         args.train_manifest
         if args.overfit_samples is not None
         else args.validation_manifest
     )
-    train = SVSignedGINDataset(args.train_manifest, args.scaler)
+    train = SVSignedGINDataset(
+        args.train_manifest,
+        args.scaler,
+        include_windows=model_config.uses_gin,
+    )
     validation = SVSignedGINDataset(
-        validation_manifest, args.scaler
+        validation_manifest,
+        args.scaler,
+        include_windows=model_config.uses_gin,
     )
     if train.split != "train":
         raise ValueError("SV training manifest must be train")
@@ -164,21 +183,7 @@ def main():
         num_workers=args.num_workers,
         pin_memory=args.device.startswith("cuda"),
     )
-    model = SVSignedGINClassifier(
-        SVSignedGINConfig(
-            variant=args.variant,
-            gin_hidden_dim=args.gin_hidden_dim,
-            gin_layers=args.gin_layers,
-            dropout=args.dropout,
-            message_mode=args.message_mode,
-            pooling=args.pooling,
-            gin_residual=args.gin_residual,
-            gin_jumping_knowledge=args.gin_jumping_knowledge,
-            gin_compact_readout=args.gin_compact_readout,
-            gin_batch_normalization=args.gin_batch_normalization,
-            gin_residual_attention=args.gin_residual_attention,
-        )
-    )
+    model = SVSignedGINClassifier(model_config)
     epochs = 1 if args.smoke else args.epochs
     static_anchor_epochs = (
         1 if args.smoke else args.static_anchor_epochs
