@@ -54,6 +54,13 @@ from .exact_stse import (
     ExactSTSEOutput,
     ExactSTSEWindowEncoder,
 )
+from .structured_short_term import (
+    PrototypeMemoryReadout,
+    StructuredShortTermClassifier,
+    StructuredShortTermConfig,
+    StructuredShortTermOutput,
+    StructuredWindowEncoder,
+)
 from .dual_stse_hard_sgw_types import (
     DUAL_EXPERIMENT_VARIANTS,
     DUAL_TRAINING_STAGES,
@@ -156,4 +163,9 @@ __all__ = [
     "DUAL_SGW_FEATURE_CLASSIFIERS",
     "DualSGWFeatureClassifier",
     "DualSGWFeatureClassifierConfig",
+    "PrototypeMemoryReadout",
+    "StructuredShortTermClassifier",
+    "StructuredShortTermConfig",
+    "StructuredShortTermOutput",
+    "StructuredWindowEncoder",
 ]

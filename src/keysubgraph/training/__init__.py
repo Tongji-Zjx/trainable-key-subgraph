@@ -57,6 +57,14 @@ from .exact_stse_trainer import (
     run_exact_stse_epoch,
     train_exact_stse,
 )
+from .structured_short_term_trainer import (
+    StructuredShortTermTrainingConfig,
+    evaluate_structured_short_term,
+    load_structured_short_term_checkpoint,
+    model_from_structured_short_term_checkpoint,
+    run_structured_short_term_epoch,
+    train_structured_short_term,
+)
 from .dual_stse_hard_sgw_trainer import (
     DualTrainingConfig,
     load_dual_checkpoint,
@@ -106,6 +114,12 @@ __all__.extend(
         "load_exact_stse_checkpoint",
         "run_exact_stse_epoch",
         "train_exact_stse",
+        "StructuredShortTermTrainingConfig",
+        "evaluate_structured_short_term",
+        "load_structured_short_term_checkpoint",
+        "model_from_structured_short_term_checkpoint",
+        "run_structured_short_term_epoch",
+        "train_structured_short_term",
         "DualTrainingConfig",
         "load_dual_checkpoint",
         "run_dual_epoch",
