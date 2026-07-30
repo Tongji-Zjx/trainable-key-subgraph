@@ -127,6 +127,17 @@ def main():
         "checkpoint_sha256": file_sha256(args.checkpoint),
         "manifest_sha256": file_sha256(args.manifest),
         "scaler_sha256": file_sha256(args.scaler),
+        "provenance": {
+            "protocol_sha256": expected["protocol_sha256"],
+            "selector_checkpoint_sha256": expected[
+                "selector_checkpoint_sha256"
+            ],
+            "selection_mode": expected["selection_mode"],
+            "selection_seed": int(expected["selection_seed"]),
+            "training_seed": int(
+                checkpoint["training_config"]["seed"]
+            ),
+        },
         "metrics": {
             key: value
             for key, value in metrics.items()
