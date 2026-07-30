@@ -35,6 +35,7 @@ from keysubgraph.training.dual_stse_hard_sgw_trainer import (  # noqa: E402
     DualTrainingConfig,
     train_dual_stage,
 )
+from keysubgraph.training.trainer import set_reproducible_seed  # noqa: E402
 
 
 def parse_args():
@@ -88,6 +89,7 @@ def parse_args():
 
 def main():
     args = parse_args()
+    set_reproducible_seed(args.seed)
     protocol = validate_data_protocol(args.protocol, PROJECT_ROOT)
     if tuple(protocol_partitions(protocol)) != (
         "train",
