@@ -105,11 +105,15 @@ def collect_theory_neural_diagnostic_inputs(model, loader, device):
                 payload["node_summaries"].append(
                     torch.cat((node_mean, node_std)).cpu().tolist()
                 )
-                edges = torch.cat([
+                edge_values = [
                     window.edge_features[window.adjacency.abs() > 0.0]
                     for window in sample_input.windows
                     if window is not None and bool((window.adjacency.abs() > 0.0).any())
-                ], dim=0)
+                ]
+                edges = (
+                    torch.cat(edge_values, dim=0)
+                    if edge_values else nodes.new_zeros((1, 6))
+                )
                 edge_mean = edges.mean(dim=0)
                 edge_std = torch.sqrt((edges - edge_mean).square().mean(dim=0) + 1.0e-8)
                 payload["edge_summaries"].append(

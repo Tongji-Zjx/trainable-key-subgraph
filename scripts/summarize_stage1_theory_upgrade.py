@@ -101,10 +101,11 @@ def _diagnostic_means(output_root, variant, seed, fold_count):
         representation[name] = float(np.mean([
             item["representation"][name] for item in payloads
         ]))
-    site_probe = float(np.mean([
+    site_values = [
         item["site_probes"]["representations"] for item in payloads
         if item["site_probes"]["representations"] is not None
-    ]))
+    ]
+    site_probe = float(np.mean(site_values)) if site_values else None
     return {
         "representation": representation,
         "site_probe_balanced_accuracy": site_probe,
@@ -173,9 +174,12 @@ def main():
             diagnostics[variant]["representation"]["fisher_ratio"]
             - diagnostics[baseline]["representation"]["fisher_ratio"]
         )
+        candidate_site_probe = diagnostics[variant]["site_probe_balanced_accuracy"]
+        baseline_site_probe = diagnostics[baseline]["site_probe_balanced_accuracy"]
         site_probe_delta = (
-            diagnostics[variant]["site_probe_balanced_accuracy"]
-            - diagnostics[baseline]["site_probe_balanced_accuracy"]
+            candidate_site_probe - baseline_site_probe
+            if candidate_site_probe is not None and baseline_site_probe is not None
+            else None
         )
         candidates[variant] = {
             "pooled_auc_delta": auc_delta,
@@ -196,7 +200,9 @@ def main():
                 "rank_and_fisher_consistent": not (
                     rank_delta > 0.0 and fisher_delta <= 0.0
                 ),
-                "site_probe_not_obviously_stronger": site_probe_delta <= 0.05,
+                "site_probe_not_obviously_stronger": (
+                    site_probe_delta is None or site_probe_delta <= 0.05
+                ),
             },
         }
     result = {
