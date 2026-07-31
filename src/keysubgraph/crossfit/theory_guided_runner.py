@@ -6,6 +6,8 @@ import sys
 from pathlib import Path
 from typing import List, Sequence, Tuple
 
+from keysubgraph.models.theory_guided_neural import THEORY_NEURAL_VARIANTS
+
 
 def _command(*values) -> List[str]:
     return [str(value) for value in values]
@@ -102,4 +104,132 @@ def build_stage0_crossfit_commands(
             output_root / "pooled" / "pooled_metrics.json",
         )
     )
+    return commands
+
+
+def build_stage1_fold_commands(
+    project_root: Path,
+    crossfit_root: Path,
+    output_root: Path,
+    fold: int,
+    variants: Sequence[str] = THEORY_NEURAL_VARIANTS,
+    device: str = "cuda",
+    seed: int = 42,
+    epochs: int = 80,
+    batch_size: int = 4,
+    accumulation_steps: int = 2,
+    num_workers: int = 2,
+    gw_max_iter: int = 100,
+    gw_sinkhorn_iter: int = 100,
+    gw_tolerance: float = 1.0e-7,
+) -> List[Tuple[str, List[str], Path]]:
+    """Build one resumable Stage-1 outer-fold pipeline."""
+
+    project_root = Path(project_root).resolve()
+    crossfit_root = Path(crossfit_root).resolve()
+    output_root = Path(output_root).resolve()
+    fold = int(fold)
+    if fold < 0:
+        raise ValueError("Stage-1 fold must be non-negative")
+    variants = tuple(str(value) for value in variants)
+    if not variants or any(value not in THEORY_NEURAL_VARIANTS for value in variants):
+        raise ValueError("Stage-1 variants are invalid")
+    if batch_size * accumulation_steps < 8:
+        raise ValueError("Stage-1 formal effective batch must be at least 8")
+    source = crossfit_root / "fold_{}".format(fold)
+    target = output_root / "fold_{}".format(fold)
+    protocol = source / "protocol" / "data_protocol.json"
+    selector = source / "selector" / "best_checkpoint.pt"
+    python = sys.executable
+    commands = []
+    for split in ("train", "validation", "test"):
+        cache = target / "cache" / split
+        commands.append(
+            (
+                "cache_{}".format(split),
+                _command(
+                    python, "-u", project_root / "scripts" / "precompute_theory_neural_cache.py",
+                    "--protocol", protocol,
+                    "--split", split,
+                    "--selector-checkpoint", selector,
+                    "--output-dir", cache,
+                    "--device", device,
+                    "--num-workers", num_workers,
+                    "--selection-seed", seed,
+                    "--gw-max-iter", gw_max_iter,
+                    "--gw-sinkhorn-iter", gw_sinkhorn_iter,
+                    "--gw-tolerance", gw_tolerance,
+                ),
+                cache / "manifest.json",
+            )
+        )
+    scaler = target / "cache" / "train_scaler.json"
+    commands.append(
+        (
+            "fit_scaler",
+            _command(
+                python, "-u", project_root / "scripts" / "fit_theory_neural_scaler.py",
+                "--train-manifest", target / "cache" / "train" / "manifest.json",
+                "--output", scaler,
+            ),
+            scaler,
+        )
+    )
+    for variant in variants:
+        model_dir = target / "models" / "{}_seed{}".format(variant, seed)
+        commands.append(
+            (
+                "train_{}".format(variant),
+                _command(
+                    python, "-u", project_root / "scripts" / "train_theory_guided_neural.py",
+                    "--train-manifest", target / "cache" / "train" / "manifest.json",
+                    "--validation-manifest", target / "cache" / "validation" / "manifest.json",
+                    "--scaler", scaler,
+                    "--variant", variant,
+                    "--output-dir", model_dir,
+                    "--device", device,
+                    "--epochs", epochs,
+                    "--batch-size", batch_size,
+                    "--gradient-accumulation-steps", accumulation_steps,
+                    "--num-workers", num_workers,
+                    "--seed", seed,
+                ),
+                model_dir / "best_evaluation.json",
+            )
+        )
+        commands.append(
+            (
+                "evaluate_{}".format(variant),
+                _command(
+                    python, "-u", project_root / "scripts" / "evaluate_theory_guided_neural.py",
+                    "--manifest", target / "cache" / "test" / "manifest.json",
+                    "--scaler", scaler,
+                    "--checkpoint", model_dir / "best_checkpoint.pt",
+                    "--output", model_dir / "outer_test_evaluation.json",
+                    "--device", device,
+                    "--batch-size", max(batch_size, 8),
+                    "--num-workers", num_workers,
+                    "--seed", seed,
+                ),
+                model_dir / "outer_test_evaluation.json",
+            )
+        )
+        commands.append(
+            (
+                "diagnose_{}".format(variant),
+                _command(
+                    python, "-u", project_root / "scripts" / "diagnose_theory_guided_neural.py",
+                    "--train-manifest", target / "cache" / "train" / "manifest.json",
+                    "--validation-manifest", target / "cache" / "validation" / "manifest.json",
+                    "--scaler", scaler,
+                    "--checkpoint", model_dir / "best_checkpoint.pt",
+                    "--output", model_dir / "diagnostics.json",
+                    "--device", device,
+                    "--batch-size", max(batch_size, 8),
+                    "--num-workers", num_workers,
+                    "--seed", seed,
+                ),
+                model_dir / "diagnostics.json",
+            )
+        )
     return commands
