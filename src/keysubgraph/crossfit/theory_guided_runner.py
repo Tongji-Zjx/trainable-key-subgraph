@@ -154,7 +154,13 @@ def build_stage1_fold_commands(
                     "--selector-checkpoint", selector,
                     "--output-dir", cache,
                     "--device", device,
-                    "--num-workers", num_workers,
+                    # Variable-length graph samples retain many tensor-backed
+                    # files while the cache is being written.  Multiple loader
+                    # workers can exhaust the process file-descriptor/shared-
+                    # memory limit on long formal folds, so cache construction
+                    # is deliberately single-process as well as downstream
+                    # artifact loading.
+                    "--num-workers", 0,
                     "--selection-seed", seed,
                     "--gw-max-iter", gw_max_iter,
                     "--gw-sinkhorn-iter", gw_sinkhorn_iter,

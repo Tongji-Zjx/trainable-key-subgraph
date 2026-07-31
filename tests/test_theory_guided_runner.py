@@ -67,7 +67,7 @@ class TheoryGuidedRunnerTest(unittest.TestCase):
         by_name = {name: command for name, command, _ in commands}
         self.assertEqual(
             by_name["cache_train"][by_name["cache_train"].index("--num-workers") + 1],
-            "3",
+            "0",
         )
         self.assertEqual(
             by_name["train_N0_signed_gin"][
