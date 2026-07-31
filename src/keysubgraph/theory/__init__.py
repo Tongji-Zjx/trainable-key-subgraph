@@ -38,6 +38,22 @@ from .tg_features import (
     load_tg_sgw_feature_artifact,
     save_tg_sgw_feature_artifact,
 )
+from .sgw_core_features import (
+    SGWCoreConfig,
+    SGWCoreSequence,
+    compute_sgw_core_sequence,
+    load_stage0_sample_artifact,
+    save_stage0_sample_artifact,
+)
+from .class_margin_diagnostics import (
+    apply_standardizer,
+    class_margin_metrics,
+    component_margin_metrics,
+    exact_uniform_wasserstein,
+    exact_uniform_wasserstein_from_cost,
+    fit_train_only_standardizer,
+    stratified_paired_bootstrap,
+)
 
 __all__ = [
     "DifferentiableGWLoss",
@@ -72,4 +88,16 @@ __all__ = [
     "TGSGWFeatureArtifact",
     "load_tg_sgw_feature_artifact",
     "save_tg_sgw_feature_artifact",
+    "SGWCoreConfig",
+    "SGWCoreSequence",
+    "compute_sgw_core_sequence",
+    "load_stage0_sample_artifact",
+    "save_stage0_sample_artifact",
+    "apply_standardizer",
+    "class_margin_metrics",
+    "component_margin_metrics",
+    "exact_uniform_wasserstein",
+    "exact_uniform_wasserstein_from_cost",
+    "fit_train_only_standardizer",
+    "stratified_paired_bootstrap",
 ]
