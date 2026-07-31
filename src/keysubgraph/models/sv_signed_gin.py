@@ -14,6 +14,10 @@ from keysubgraph.features.sv_hard_graph_features import (
     SV_STATIC_FEATURE_DIM,
     SV_VARIATION_DIM,
 )
+from keysubgraph.features.sv_theory_geometry import (
+    SV_DIFFUSION_GEOMETRY_DIM,
+    SV_SPECTRAL_DIRECTION_DIM,
+)
 
 
 SV_SIGNED_GIN_VARIANTS = (
@@ -23,6 +27,9 @@ SV_SIGNED_GIN_VARIANTS = (
     "signed_gin_variation",
     "signed_gin_static_variation",
     "signed_gin_multibranch_late_fusion",
+    "signed_gin_multibranch_spectral_direction",
+    "signed_gin_multibranch_diffusion_geometry",
+    "signed_gin_multibranch_theory_geometry",
     "signed_gin_static_anchor_residual",
     "signed_gin_static_anchor_residual_attention",
 )
@@ -47,6 +54,8 @@ class SVSignedGINConfig:
     node_feature_dim: int = SV_NODE_FEATURE_DIM
     static_feature_dim: int = SV_STATIC_FEATURE_DIM
     variation_dim: int = SV_VARIATION_DIM
+    spectral_direction_dim: int = SV_SPECTRAL_DIRECTION_DIM
+    diffusion_geometry_dim: int = SV_DIFFUSION_GEOMETRY_DIM
     gin_hidden_dim: int = 64
     gin_layers: int = 2
     attention_hidden_dim: int = 32
@@ -66,7 +75,12 @@ class SVSignedGINConfig:
     def __post_init__(self) -> None:
         if self.variant not in SV_SIGNED_GIN_VARIANTS:
             raise ValueError("unsupported SV Signed-GIN variant")
-        is_default_svg = self.variant == SV_DEFAULT_VARIANT
+        is_default_svg = self.variant in (
+            SV_DEFAULT_VARIANT,
+            "signed_gin_multibranch_spectral_direction",
+            "signed_gin_multibranch_diffusion_geometry",
+            "signed_gin_multibranch_theory_geometry",
+        )
         defaults = {
             "message_mode": (
                 "signed_normalized"
@@ -86,9 +100,19 @@ class SVSignedGINConfig:
             (self.node_feature_dim, SV_NODE_FEATURE_DIM),
             (self.static_feature_dim, SV_STATIC_FEATURE_DIM),
             (self.variation_dim, SV_VARIATION_DIM),
+            (
+                self.spectral_direction_dim,
+                SV_SPECTRAL_DIRECTION_DIM,
+            ),
+            (
+                self.diffusion_geometry_dim,
+                SV_DIFFUSION_GEOMETRY_DIM,
+            ),
         )
         if any(value != required for value, required in expected):
-            raise ValueError("SV feature dimensions are frozen to 15/28/16")
+            raise ValueError(
+                "SV feature dimensions are frozen to 15/28/16/16/28"
+            )
         dimensions = (
             self.gin_hidden_dim,
             self.gin_layers,
@@ -149,8 +173,32 @@ class SVSignedGINConfig:
             "static_spectral_only",
             "static_spectral_variation_late_fusion",
             "signed_gin_multibranch_late_fusion",
+            "signed_gin_multibranch_spectral_direction",
+            "signed_gin_multibranch_diffusion_geometry",
+            "signed_gin_multibranch_theory_geometry",
             "signed_gin_static_anchor_residual",
             "signed_gin_static_anchor_residual_attention",
+        )
+
+    @property
+    def uses_spectral_direction(self) -> bool:
+        return self.variant in (
+            "signed_gin_multibranch_spectral_direction",
+            "signed_gin_multibranch_theory_geometry",
+        )
+
+    @property
+    def uses_diffusion_geometry(self) -> bool:
+        return self.variant in (
+            "signed_gin_multibranch_diffusion_geometry",
+            "signed_gin_multibranch_theory_geometry",
+        )
+
+    @property
+    def uses_theory_geometry(self) -> bool:
+        return (
+            self.uses_spectral_direction
+            or self.uses_diffusion_geometry
         )
 
     @property
@@ -187,6 +235,8 @@ class SVSignedGINConfig:
         channel_count = int(self.uses_variation)
         channel_count += int(self.uses_gin)
         channel_count += int(self.uses_static)
+        channel_count += int(self.uses_spectral_direction)
+        channel_count += int(self.uses_diffusion_geometry)
         return channel_count * self.channel_projection_dim
 
     @property
@@ -198,6 +248,10 @@ class SVSignedGINConfig:
             names.append("static_spectral")
         if self.uses_variation:
             names.append("variation")
+        if self.uses_spectral_direction:
+            names.append("spectral_direction")
+        if self.uses_diffusion_geometry:
+            names.append("diffusion_geometry")
         return tuple(names)
 
 
@@ -220,6 +274,8 @@ class SVSignedGINSampleInput:
     windows: Tuple[SVSignedGINWindowInput, ...]
     static_features: torch.Tensor
     variation: torch.Tensor
+    spectral_direction: Optional[torch.Tensor] = None
+    diffusion_geometry: Optional[torch.Tensor] = None
 
     def to(self, device) -> "SVSignedGINSampleInput":
         return SVSignedGINSampleInput(
@@ -228,6 +284,16 @@ class SVSignedGINSampleInput:
             windows=tuple(window.to(device) for window in self.windows),
             static_features=self.static_features.to(device),
             variation=self.variation.to(device),
+            spectral_direction=(
+                self.spectral_direction.to(device)
+                if self.spectral_direction is not None
+                else None
+            ),
+            diffusion_geometry=(
+                self.diffusion_geometry.to(device)
+                if self.diffusion_geometry is not None
+                else None
+            ),
         )
 
 
@@ -272,6 +338,8 @@ class SVSignedGINOutput:
     static_projection: Optional[torch.Tensor]
     variation_projection: Optional[torch.Tensor]
     gin_projection: Optional[torch.Tensor]
+    spectral_direction_projection: Optional[torch.Tensor]
+    diffusion_geometry_projection: Optional[torch.Tensor]
     encoder_outputs: Tuple[SVSignedGINEncoderOutput, ...]
     diagnostics: Dict[str, Any]
     branch_logits: Optional[Dict[str, torch.Tensor]] = None
@@ -640,6 +708,22 @@ class SVSignedGINClassifier(nn.Module):
             if self.config.uses_variation
             else None
         )
+        self.spectral_direction_projection = (
+            _projection(
+                self.config.spectral_direction_dim,
+                self.config.channel_projection_dim,
+            )
+            if self.config.uses_spectral_direction
+            else None
+        )
+        self.diffusion_geometry_projection = (
+            _projection(
+                self.config.diffusion_geometry_dim,
+                self.config.channel_projection_dim,
+            )
+            if self.config.uses_diffusion_geometry
+            else None
+        )
         if self.config.uses_late_fusion:
             self.branch_classifiers = nn.ModuleDict(
                 {
@@ -871,6 +955,52 @@ class SVSignedGINClassifier(nn.Module):
         if self.config.uses_variation:
             variation_projected = self.variation_projection(variation)
             channels.append(variation_projected)
+        spectral_direction_projected = None
+        if self.config.uses_spectral_direction:
+            if any(
+                sample.spectral_direction is None for sample in batch
+            ):
+                raise ValueError(
+                    "spectral-direction variant requires theory sidecars"
+                )
+            spectral_direction = torch.stack(
+                [sample.spectral_direction for sample in batch], dim=0
+            )
+            if tuple(spectral_direction.shape[1:]) != (
+                self.config.spectral_direction_dim,
+            ):
+                raise ValueError(
+                    "SV spectral-direction batch dimension is invalid"
+                )
+            spectral_direction_projected = (
+                self.spectral_direction_projection(
+                    spectral_direction
+                )
+            )
+            channels.append(spectral_direction_projected)
+        diffusion_geometry_projected = None
+        if self.config.uses_diffusion_geometry:
+            if any(
+                sample.diffusion_geometry is None for sample in batch
+            ):
+                raise ValueError(
+                    "diffusion-geometry variant requires theory sidecars"
+                )
+            diffusion_geometry = torch.stack(
+                [sample.diffusion_geometry for sample in batch], dim=0
+            )
+            if tuple(diffusion_geometry.shape[1:]) != (
+                self.config.diffusion_geometry_dim,
+            ):
+                raise ValueError(
+                    "SV diffusion-geometry batch dimension is invalid"
+                )
+            diffusion_geometry_projected = (
+                self.diffusion_geometry_projection(
+                    diffusion_geometry
+                )
+            )
+            channels.append(diffusion_geometry_projected)
         final = torch.cat(channels, dim=-1)
         branch_logits = None
         fusion_weights = None
@@ -880,6 +1010,10 @@ class SVSignedGINClassifier(nn.Module):
                 "gin": gin_projected,
                 "static_spectral": static_projected,
                 "variation": variation_projected,
+                "spectral_direction": (
+                    spectral_direction_projected
+                ),
+                "diffusion_geometry": diffusion_geometry_projected,
             }
             branch_logits = {
                 name: self.branch_classifiers[name](projected[name])
@@ -927,6 +1061,12 @@ class SVSignedGINClassifier(nn.Module):
             static_projection=static_projected,
             variation_projection=variation_projected,
             gin_projection=gin_projected,
+            spectral_direction_projection=(
+                spectral_direction_projected
+            ),
+            diffusion_geometry_projection=(
+                diffusion_geometry_projected
+            ),
             encoder_outputs=encoder_outputs,
             diagnostics={
                 "variant": self.config.variant,
@@ -963,6 +1103,12 @@ class SVSignedGINClassifier(nn.Module):
                 ),
                 "training_stage": self._training_stage,
                 "active_branches": self.config.active_branch_names,
+                "uses_spectral_direction": (
+                    self.config.uses_spectral_direction
+                ),
+                "uses_multiscale_diffusion_geometry": (
+                    self.config.uses_diffusion_geometry
+                ),
             },
             branch_logits=branch_logits,
             fusion_weights=fusion_weights,

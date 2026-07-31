@@ -58,6 +58,12 @@ def _sample(key, label, offset, node_count, window_count):
         windows=tuple(windows),
         static_features=torch.full((28,), float(offset)),
         variation=torch.full((16,), abs(float(offset))),
+        spectral_direction=torch.linspace(
+            -0.25, 0.25, 16
+        ) + float(offset),
+        diffusion_geometry=torch.linspace(
+            0.0, 1.0, 28
+        ) + abs(float(offset)),
     )
 
 
@@ -73,23 +79,34 @@ def main():
     results = {}
     for variant in SV_SIGNED_GIN_VARIANTS:
         torch.manual_seed(42)
-        improved = (
-            variant == "signed_gin_multibranch_late_fusion"
+        improved = variant in (
+            "signed_gin_multibranch_late_fusion",
+            "signed_gin_multibranch_spectral_direction",
+            "signed_gin_multibranch_diffusion_geometry",
+            "signed_gin_multibranch_theory_geometry",
         )
+        residual_attention = (
+            variant
+            == "signed_gin_static_anchor_residual_attention"
+        )
+        compact_profile = improved or residual_attention
         model = SVSignedGINClassifier(
             SVSignedGINConfig(
                 variant=variant,
                 dropout=0.0,
                 message_mode=(
                     "signed_normalized"
-                    if improved
+                    if compact_profile
                     else "signed_weighted"
                 ),
-                pooling="mean_std" if improved else "attention",
+                pooling=(
+                    "mean_std" if compact_profile else "attention"
+                ),
                 gin_residual=improved,
                 gin_jumping_knowledge=improved,
-                gin_compact_readout=improved,
+                gin_compact_readout=compact_profile,
                 gin_batch_normalization=improved,
+                gin_residual_attention=residual_attention,
             )
         ).to(device)
         output = model(batch)

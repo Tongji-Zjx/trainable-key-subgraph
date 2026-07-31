@@ -43,6 +43,8 @@ def _sample(key="sample", label=0, permutation=None):
         windows=windows,
         static_features=torch.linspace(0.0, 1.0, 28),
         variation=torch.linspace(0.1, 0.8, 16),
+        spectral_direction=torch.linspace(-0.5, 0.5, 16),
+        diffusion_geometry=torch.linspace(0.0, 1.0, 28),
     )
 
 
@@ -71,6 +73,21 @@ class SVSignedGINTest(unittest.TestCase):
             tuple(output.branch_logits),
             ("gin", "static_spectral", "variation"),
         )
+
+    def test_legacy_svg_config_gains_only_default_sidecar_dimensions(self):
+        current = SVSignedGINConfig()
+        legacy = {
+            key: value
+            for key, value in current.__dict__.items()
+            if key
+            not in (
+                "spectral_direction_dim",
+                "diffusion_geometry_dim",
+            )
+        }
+        restored = SVSignedGINConfig(**legacy)
+        self.assertEqual(restored, current)
+        self.assertFalse(restored.uses_theory_geometry)
 
     def test_signed_aggregation_uses_sign_and_magnitude(self):
         layer = SignedGINLayer(2, dropout=0.0)
@@ -149,21 +166,7 @@ class SVSignedGINTest(unittest.TestCase):
                 )
             )
             output = model(batch)
-            expected = (
-                48
-                if variant
-                in (
-                    "signed_gin_static_variation",
-                    "signed_gin_multibranch_late_fusion",
-                    "signed_gin_static_anchor_residual",
-                    "signed_gin_static_anchor_residual_attention",
-                )
-                else (
-                    16
-                    if variant == "static_spectral_only"
-                    else 32
-                )
-            )
+            expected = model.config.fusion_input_dim
             self.assertEqual(tuple(output.logits.shape), (2, 2))
             self.assertEqual(
                 tuple(output.final_representation.shape), (2, expected)
@@ -257,6 +260,82 @@ class SVSignedGINTest(unittest.TestCase):
         self.assertGreater(
             float(model.fusion_log_weights.grad.abs().sum()), 0.0
         )
+
+    def test_theory_geometry_branches_are_explicit_and_trainable(self):
+        torch.manual_seed(739)
+        model = SVSignedGINClassifier(
+            SVSignedGINConfig(
+                variant="signed_gin_multibranch_theory_geometry",
+                gin_hidden_dim=8,
+                attention_hidden_dim=4,
+                channel_projection_dim=4,
+                fusion_hidden_dim=4,
+                dropout=0.0,
+            )
+        )
+        batch = SVSignedGINBatch(
+            (_sample("a", 0), _sample("b", 1))
+        )
+        output = model(batch)
+        self.assertEqual(
+            tuple(output.branch_logits),
+            (
+                "gin",
+                "static_spectral",
+                "variation",
+                "spectral_direction",
+                "diffusion_geometry",
+            ),
+        )
+        self.assertEqual(
+            tuple(output.spectral_direction_projection.shape), (2, 4)
+        )
+        self.assertEqual(
+            tuple(output.diffusion_geometry_projection.shape), (2, 4)
+        )
+        loss = torch.stack(
+            [
+                torch.nn.functional.cross_entropy(
+                    logits, batch.labels
+                )
+                for logits in output.branch_logits.values()
+            ]
+        ).mean()
+        loss.backward()
+        for name, module in (
+            (
+                "spectral_direction",
+                model.spectral_direction_projection,
+            ),
+            (
+                "diffusion_geometry",
+                model.diffusion_geometry_projection,
+            ),
+        ):
+            gradient = sum(
+                float(parameter.grad.abs().sum())
+                for parameter in module.parameters()
+                if parameter.grad is not None
+            )
+            self.assertGreater(gradient, 0.0, name)
+
+    def test_theory_geometry_variant_rejects_missing_sidecars(self):
+        sample = _sample()
+        missing = SVSignedGINSampleInput(
+            sample_key=sample.sample_key,
+            label=sample.label,
+            windows=sample.windows,
+            static_features=sample.static_features,
+            variation=sample.variation,
+        )
+        model = SVSignedGINClassifier(
+            SVSignedGINConfig(
+                variant="signed_gin_multibranch_theory_geometry",
+                dropout=0.0,
+            )
+        )
+        with self.assertRaisesRegex(ValueError, "sidecars"):
+            model(SVSignedGINBatch((missing,)))
 
     def test_compact_batch_normalized_gin_supports_singleton_batch(self):
         model = SVSignedGINClassifier(

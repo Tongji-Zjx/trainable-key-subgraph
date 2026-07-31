@@ -1,4 +1,4 @@
-"""Train SG0/SG1/SG2 classifiers on frozen SV hard-graph caches."""
+"""Train SV classifiers, including fixed theory-geometry branch ablations."""
 
 from __future__ import absolute_import, division, print_function
 
@@ -20,6 +20,9 @@ from keysubgraph.data.sv_signed_gin_dataset import (  # noqa: E402
     SVSignedGINDataset,
     create_sv_signed_gin_loader,
 )
+from keysubgraph.data.sv_theory_geometry import (  # noqa: E402
+    SVTheoryAugmentedDataset,
+)
 from keysubgraph.models.sv_signed_gin import (  # noqa: E402
     SV_DEFAULT_VARIANT,
     SV_SIGNED_GIN_MESSAGE_MODES,
@@ -39,6 +42,9 @@ def parse_args():
     parser.add_argument("--train-manifest", type=Path, required=True)
     parser.add_argument("--validation-manifest", type=Path, required=True)
     parser.add_argument("--scaler", type=Path, required=True)
+    parser.add_argument("--theory-train-cache", type=Path)
+    parser.add_argument("--theory-validation-cache", type=Path)
+    parser.add_argument("--theory-scaler", type=Path)
     parser.add_argument(
         "--variant",
         choices=SV_SIGNED_GIN_VARIANTS,
@@ -146,7 +152,12 @@ def parse_args():
 def _resolve_architecture_defaults(args):
     """Apply the formal SVG profile without changing explicit ablations."""
 
-    is_default_svg = args.variant == SV_DEFAULT_VARIANT
+    is_default_svg = args.variant in (
+        SV_DEFAULT_VARIANT,
+        "signed_gin_multibranch_spectral_direction",
+        "signed_gin_multibranch_diffusion_geometry",
+        "signed_gin_multibranch_theory_geometry",
+    )
     if args.message_mode is None:
         args.message_mode = (
             "signed_normalized" if is_default_svg else "signed_weighted"
@@ -213,16 +224,51 @@ def main():
         if args.overfit_samples is not None
         else args.validation_manifest
     )
-    train = SVSignedGINDataset(
-        args.train_manifest,
-        args.scaler,
-        include_windows=model_config.uses_gin,
+    theory_arguments = (
+        args.theory_train_cache,
+        args.theory_validation_cache,
+        args.theory_scaler,
     )
-    validation = SVSignedGINDataset(
-        validation_manifest,
-        args.scaler,
-        include_windows=model_config.uses_gin,
-    )
+    if model_config.uses_theory_geometry:
+        if any(value is None for value in theory_arguments):
+            raise ValueError(
+                "theory-geometry variants require train/validation "
+                "sidecars and a train-only theory scaler"
+            )
+        validation_theory_cache = (
+            args.theory_train_cache
+            if args.overfit_samples is not None
+            else args.theory_validation_cache
+        )
+        train = SVTheoryAugmentedDataset(
+            args.train_manifest,
+            args.scaler,
+            args.theory_train_cache,
+            args.theory_scaler,
+            include_windows=model_config.uses_gin,
+        )
+        validation = SVTheoryAugmentedDataset(
+            validation_manifest,
+            args.scaler,
+            validation_theory_cache,
+            args.theory_scaler,
+            include_windows=model_config.uses_gin,
+        )
+    else:
+        if any(value is not None for value in theory_arguments):
+            raise ValueError(
+                "theory sidecars were supplied to a non-theory variant"
+            )
+        train = SVSignedGINDataset(
+            args.train_manifest,
+            args.scaler,
+            include_windows=model_config.uses_gin,
+        )
+        validation = SVSignedGINDataset(
+            validation_manifest,
+            args.scaler,
+            include_windows=model_config.uses_gin,
+        )
     if train.split != "train":
         raise ValueError("SV training manifest must be train")
     if args.overfit_samples is None and validation.split != "validation":
@@ -297,6 +343,20 @@ def main():
         ),
         "scaler_sha256": file_sha256(args.scaler),
     }
+    if model_config.uses_theory_geometry:
+        provenance.update(
+            {
+                "theory_train_cache_sha256": file_sha256(
+                    args.theory_train_cache
+                ),
+                "theory_validation_cache_sha256": file_sha256(
+                    validation_theory_cache
+                ),
+                "theory_scaler_sha256": file_sha256(
+                    args.theory_scaler
+                ),
+            }
+        )
     result = train_sv_signed_gin_classifier(
         model=model,
         train_loader=train_loader,

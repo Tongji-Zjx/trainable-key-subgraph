@@ -1,4 +1,4 @@
-"""Evaluate a frozen SV Signed-GIN checkpoint with validation-fit threshold."""
+"""Evaluate a frozen SV checkpoint with its validation-fit threshold."""
 
 from __future__ import absolute_import, division, print_function
 
@@ -21,6 +21,9 @@ from keysubgraph.data.sv_signed_gin_dataset import (  # noqa: E402
     SVSignedGINDataset,
     create_sv_signed_gin_loader,
 )
+from keysubgraph.data.sv_theory_geometry import (  # noqa: E402
+    SVTheoryAugmentedDataset,
+)
 from keysubgraph.models.sv_signed_gin import (  # noqa: E402
     SVSignedGINClassifier,
     SVSignedGINConfig,
@@ -35,6 +38,8 @@ def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest", type=Path, required=True)
     parser.add_argument("--scaler", type=Path, required=True)
+    parser.add_argument("--theory-cache", type=Path)
+    parser.add_argument("--theory-scaler", type=Path)
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument(
         "--threshold-strategy",
@@ -82,11 +87,28 @@ def main():
     thresholds = checkpoint.get("validation_thresholds")
     if not isinstance(thresholds, dict) or args.threshold_strategy not in thresholds:
         raise ValueError("SV checkpoint has no frozen validation threshold")
-    dataset = SVSignedGINDataset(
-        args.manifest,
-        args.scaler,
-        include_windows=model.config.uses_gin,
-    )
+    if model.config.uses_theory_geometry:
+        if args.theory_cache is None or args.theory_scaler is None:
+            raise ValueError(
+                "theory-geometry evaluation requires its sidecar/scaler"
+            )
+        dataset = SVTheoryAugmentedDataset(
+            args.manifest,
+            args.scaler,
+            args.theory_cache,
+            args.theory_scaler,
+            include_windows=model.config.uses_gin,
+        )
+    else:
+        if args.theory_cache is not None or args.theory_scaler is not None:
+            raise ValueError(
+                "theory sidecars were supplied to a non-theory model"
+            )
+        dataset = SVSignedGINDataset(
+            args.manifest,
+            args.scaler,
+            include_windows=model.config.uses_gin,
+        )
     expected = checkpoint["provenance"]
     checks = (
         expected["protocol_sha256"]
@@ -100,6 +122,27 @@ def main():
     )
     if not all(checks):
         raise ValueError("SV evaluation provenance mismatch")
+    if model.config.uses_theory_geometry:
+        cache_hash_matches = True
+        if dataset.split == "train":
+            cache_hash_matches = (
+                expected["theory_train_cache_sha256"]
+                == file_sha256(args.theory_cache)
+            )
+        elif dataset.split == "validation":
+            cache_hash_matches = (
+                expected["theory_validation_cache_sha256"]
+                == file_sha256(args.theory_cache)
+            )
+        theory_checks = (
+            expected["theory_scaler_sha256"]
+            == file_sha256(args.theory_scaler),
+            cache_hash_matches,
+        )
+        if not all(theory_checks):
+            raise ValueError(
+                "SV theory evaluation provenance mismatch"
+            )
     loader = create_sv_signed_gin_loader(
         dataset,
         batch_size=args.batch_size,
@@ -145,6 +188,13 @@ def main():
         },
         "predictions": metrics["predictions"],
     }
+    if model.config.uses_theory_geometry:
+        result["theory_feature_cache_sha256"] = file_sha256(
+            args.theory_cache
+        )
+        result["theory_scaler_sha256"] = file_sha256(
+            args.theory_scaler
+        )
     _atomic_json(args.output, result)
     print(
         json.dumps(
