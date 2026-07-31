@@ -28,6 +28,7 @@ from keysubgraph.training.theory_guided_neural_trainer import (  # noqa: E402
     TheoryNeuralTrainingConfig,
     train_theory_neural_classifier,
 )
+from keysubgraph.training.trainer import set_reproducible_seed  # noqa: E402
 
 
 def parse_args():
@@ -63,6 +64,9 @@ def parse_args():
 
 def main():
     args = parse_args()
+    # Seed before model construction so nested N0--N4 comparisons share the
+    # same initialization for every common parameter tensor.
+    set_reproducible_seed(args.seed)
     if args.batch_size * args.gradient_accumulation_steps < 8 and not args.smoke:
         raise ValueError("formal Stage-1 training requires effective batch >= 8")
     train = TheoryNeuralDataset(
