@@ -6,6 +6,7 @@ import torch
 
 from keysubgraph.data.graph_dataset import GraphSequenceSample  # noqa: F401
 from keysubgraph.models.sv_signed_gin import (
+    SV_DEFAULT_VARIANT,
     SV_SIGNED_GIN_VARIANTS,
     SignedGINKeySubgraphEncoder,
     SignedGINLayer,
@@ -46,6 +47,31 @@ def _sample(key="sample", label=0, permutation=None):
 
 
 class SVSignedGINTest(unittest.TestCase):
+    def test_default_profile_is_formal_svg(self):
+        config = SVSignedGINConfig()
+        self.assertEqual(
+            config.variant,
+            "signed_gin_multibranch_late_fusion",
+        )
+        self.assertEqual(config.variant, SV_DEFAULT_VARIANT)
+        self.assertTrue(config.uses_static)
+        self.assertTrue(config.uses_variation)
+        self.assertTrue(config.uses_gin)
+        self.assertTrue(config.uses_late_fusion)
+        self.assertEqual(config.message_mode, "signed_normalized")
+        self.assertEqual(config.pooling, "mean_std")
+        self.assertTrue(config.gin_residual)
+        self.assertTrue(config.gin_jumping_knowledge)
+        self.assertTrue(config.gin_compact_readout)
+        self.assertTrue(config.gin_batch_normalization)
+        output = SVSignedGINClassifier(config)(
+            SVSignedGINBatch((_sample("a", 0), _sample("b", 1)))
+        )
+        self.assertEqual(
+            tuple(output.branch_logits),
+            ("gin", "static_spectral", "variation"),
+        )
+
     def test_signed_aggregation_uses_sign_and_magnitude(self):
         layer = SignedGINLayer(2, dropout=0.0)
         states = torch.tensor(((1.0, 2.0), (3.0, 4.0)))

@@ -15,6 +15,7 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from keysubgraph.crossfit.sv_signed_gin_runner import (  # noqa: E402
+    SV_CROSSFIT_DEFAULT_VARIANT,
     SV_CROSSFIT_VARIANTS,
     build_sv_crossfit_fold_commands,
 )
@@ -35,7 +36,7 @@ def parse_args():
         "--variants",
         nargs="+",
         choices=SV_CROSSFIT_VARIANTS,
-        default=["signed_gin_static_variation"],
+        default=[SV_CROSSFIT_DEFAULT_VARIANT],
     )
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--seed", type=int, default=42)

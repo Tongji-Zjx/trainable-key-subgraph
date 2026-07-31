@@ -17,6 +17,7 @@ SV_CROSSFIT_VARIANTS = (
     "signed_gin_static_anchor_residual",
     "signed_gin_static_anchor_residual_attention",
 )
+SV_CROSSFIT_DEFAULT_VARIANT = "signed_gin_multibranch_late_fusion"
 
 
 def _command(*values) -> List[str]:
@@ -27,7 +28,7 @@ def build_sv_crossfit_fold_commands(
     project_root: Path,
     output_root: Path,
     fold: int,
-    variants: Sequence[str] = ("signed_gin_static_variation",),
+    variants: Sequence[str] = (SV_CROSSFIT_DEFAULT_VARIANT,),
     device: str = "cuda",
     seed: int = 42,
     selector_epochs: int = 80,

@@ -21,6 +21,7 @@ from keysubgraph.data.sv_signed_gin_dataset import (  # noqa: E402
     create_sv_signed_gin_loader,
 )
 from keysubgraph.models.sv_signed_gin import (  # noqa: E402
+    SV_DEFAULT_VARIANT,
     SV_SIGNED_GIN_MESSAGE_MODES,
     SV_SIGNED_GIN_POOLING_MODES,
     SV_SIGNED_GIN_VARIANTS,
@@ -39,7 +40,13 @@ def parse_args():
     parser.add_argument("--validation-manifest", type=Path, required=True)
     parser.add_argument("--scaler", type=Path, required=True)
     parser.add_argument(
-        "--variant", choices=SV_SIGNED_GIN_VARIANTS, required=True
+        "--variant",
+        choices=SV_SIGNED_GIN_VARIANTS,
+        default=SV_DEFAULT_VARIANT,
+        help=(
+            "model variant; defaults to the formal SVG architecture "
+            "(Static-spectral + Variation + SignedGIN)"
+        ),
     )
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--device", default="cpu")
@@ -68,28 +75,58 @@ def parse_args():
     parser.add_argument(
         "--message-mode",
         choices=SV_SIGNED_GIN_MESSAGE_MODES,
-        default="signed_weighted",
+        default=None,
     )
     parser.add_argument(
         "--pooling",
         choices=SV_SIGNED_GIN_POOLING_MODES,
-        default="attention",
-    )
-    parser.add_argument("--gin-residual", action="store_true")
-    parser.add_argument(
-        "--gin-jumping-knowledge", action="store_true"
+        default=None,
     )
     parser.add_argument(
-        "--gin-compact-readout", action="store_true"
+        "--gin-residual",
+        dest="gin_residual",
+        action="store_true",
     )
     parser.add_argument(
-        "--gin-batch-normalization", action="store_true"
+        "--no-gin-residual",
+        dest="gin_residual",
+        action="store_false",
+    )
+    parser.add_argument(
+        "--gin-jumping-knowledge",
+        dest="gin_jumping_knowledge",
+        action="store_true",
+    )
+    parser.add_argument(
+        "--no-gin-jumping-knowledge",
+        dest="gin_jumping_knowledge",
+        action="store_false",
+    )
+    parser.add_argument(
+        "--gin-compact-readout",
+        dest="gin_compact_readout",
+        action="store_true",
+    )
+    parser.add_argument(
+        "--no-gin-compact-readout",
+        dest="gin_compact_readout",
+        action="store_false",
+    )
+    parser.add_argument(
+        "--gin-batch-normalization",
+        dest="gin_batch_normalization",
+        action="store_true",
+    )
+    parser.add_argument(
+        "--no-gin-batch-normalization",
+        dest="gin_batch_normalization",
+        action="store_false",
     )
     parser.add_argument(
         "--gin-residual-attention", action="store_true"
     )
     parser.add_argument(
-        "--auxiliary-loss-weight", type=float, default=0.0
+        "--auxiliary-loss-weight", type=float, default=None
     )
     parser.add_argument(
         "--residual-gate-penalty-weight", type=float, default=0.01
@@ -97,7 +134,36 @@ def parse_args():
     parser.add_argument("--smoke", action="store_true")
     parser.add_argument("--overfit-samples", type=int)
     parser.add_argument("--disable-early-stopping", action="store_true")
+    parser.set_defaults(
+        gin_residual=None,
+        gin_jumping_knowledge=None,
+        gin_compact_readout=None,
+        gin_batch_normalization=None,
+    )
     return parser.parse_args()
+
+
+def _resolve_architecture_defaults(args):
+    """Apply the formal SVG profile without changing explicit ablations."""
+
+    is_default_svg = args.variant == SV_DEFAULT_VARIANT
+    if args.message_mode is None:
+        args.message_mode = (
+            "signed_normalized" if is_default_svg else "signed_weighted"
+        )
+    if args.pooling is None:
+        args.pooling = "mean_std" if is_default_svg else "attention"
+    for name in (
+        "gin_residual",
+        "gin_jumping_knowledge",
+        "gin_compact_readout",
+        "gin_batch_normalization",
+    ):
+        if getattr(args, name) is None:
+            setattr(args, name, bool(is_default_svg))
+    if args.auxiliary_loss_weight is None:
+        args.auxiliary_loss_weight = 0.25 if is_default_svg else 0.0
+    return args
 
 
 def _balanced_limit(dataset, count):
@@ -126,7 +192,7 @@ def _balanced_limit(dataset, count):
 
 
 def main():
-    args = parse_args()
+    args = _resolve_architecture_defaults(parse_args())
     if args.smoke and args.overfit_samples is not None:
         raise ValueError("SV smoke and overfit modes are mutually exclusive")
     model_config = SVSignedGINConfig(

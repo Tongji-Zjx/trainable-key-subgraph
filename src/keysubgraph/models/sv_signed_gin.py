@@ -26,6 +26,7 @@ SV_SIGNED_GIN_VARIANTS = (
     "signed_gin_static_anchor_residual",
     "signed_gin_static_anchor_residual_attention",
 )
+SV_DEFAULT_VARIANT = "signed_gin_multibranch_late_fusion"
 SV_SIGNED_GIN_MESSAGE_MODES = (
     "signed_weighted",
     "signed_normalized",
@@ -42,7 +43,7 @@ SV_SIGNED_GIN_POOLING_MODES = (
 
 @dataclass(frozen=True)
 class SVSignedGINConfig:
-    variant: str = "signed_gin_variation"
+    variant: str = SV_DEFAULT_VARIANT
     node_feature_dim: int = SV_NODE_FEATURE_DIM
     static_feature_dim: int = SV_STATIC_FEATURE_DIM
     variation_dim: int = SV_VARIATION_DIM
@@ -53,18 +54,34 @@ class SVSignedGINConfig:
     fusion_hidden_dim: int = 16
     dropout: float = 0.10
     learnable_epsilon: bool = True
-    message_mode: str = "signed_weighted"
-    pooling: str = "attention"
-    gin_residual: bool = False
-    gin_jumping_knowledge: bool = False
-    gin_compact_readout: bool = False
-    gin_batch_normalization: bool = False
+    message_mode: Optional[str] = None
+    pooling: Optional[str] = None
+    gin_residual: Optional[bool] = None
+    gin_jumping_knowledge: Optional[bool] = None
+    gin_compact_readout: Optional[bool] = None
+    gin_batch_normalization: Optional[bool] = None
     gin_residual_attention: bool = False
     residual_gate_initial_logit: float = -6.0
 
     def __post_init__(self) -> None:
         if self.variant not in SV_SIGNED_GIN_VARIANTS:
             raise ValueError("unsupported SV Signed-GIN variant")
+        is_default_svg = self.variant == SV_DEFAULT_VARIANT
+        defaults = {
+            "message_mode": (
+                "signed_normalized"
+                if is_default_svg
+                else "signed_weighted"
+            ),
+            "pooling": "mean_std" if is_default_svg else "attention",
+            "gin_residual": bool(is_default_svg),
+            "gin_jumping_knowledge": bool(is_default_svg),
+            "gin_compact_readout": bool(is_default_svg),
+            "gin_batch_normalization": bool(is_default_svg),
+        }
+        for name, value in defaults.items():
+            if getattr(self, name) is None:
+                object.__setattr__(self, name, value)
         expected = (
             (self.node_feature_dim, SV_NODE_FEATURE_DIM),
             (self.static_feature_dim, SV_STATIC_FEATURE_DIM),

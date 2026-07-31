@@ -2,7 +2,12 @@
 
 更新日期：2026-07-29  
 当前模型变体：`signed_gin_multibranch_late_fusion`  
-当前状态：**实验候选架构，尚未升级为正式默认模型**
+当前状态：**研究默认架构（SVG）**
+
+> 2026-07-31 决策更新：项目选择 SVG 作为理论契合优先的研究默认架构，
+> 原 `current` selector 保持不变，S 保留为主要精简基线。本文后续早期状态
+> 描述按历史记录保留；最新决策及解释边界以
+> `docs/SV_HardSGW_SVG_Default_Architecture_Decision.md` 为准。
 
 ## 1. 任务与设计目标
 

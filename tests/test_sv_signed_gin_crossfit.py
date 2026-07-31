@@ -13,6 +13,7 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from keysubgraph.crossfit.sv_signed_gin_runner import (  # noqa: E402
+    SV_CROSSFIT_DEFAULT_VARIANT,
     build_sv_crossfit_fold_commands,
 )
 from keysubgraph.crossfit.sv_signed_gin_summary import (  # noqa: E402
@@ -32,6 +33,36 @@ def _write_json(path, payload):
 
 
 class SVSignedGINCrossfitRunnerTest(unittest.TestCase):
+    def test_default_plan_trains_formal_svg(self):
+        with tempfile.TemporaryDirectory() as directory:
+            plan = build_sv_crossfit_fold_commands(
+                PROJECT_ROOT,
+                Path(directory),
+                0,
+                device="cpu",
+                selector_epochs=1,
+                model_epochs=1,
+                num_workers=0,
+            )
+        stage = "train_{}".format(SV_CROSSFIT_DEFAULT_VARIANT)
+        train_command = next(
+            command for name, command, _ in plan if name == stage
+        )
+        self.assertEqual(
+            SV_CROSSFIT_DEFAULT_VARIANT,
+            "signed_gin_multibranch_late_fusion",
+        )
+        self.assertIn("--message-mode", train_command)
+        self.assertIn("signed_normalized", train_command)
+        self.assertIn("--pooling", train_command)
+        self.assertIn("mean_std", train_command)
+        self.assertIn("--gin-residual", train_command)
+        self.assertIn("--gin-jumping-knowledge", train_command)
+        self.assertIn("--gin-compact-readout", train_command)
+        self.assertIn("--gin-batch-normalization", train_command)
+        self.assertIn("--auxiliary-loss-weight", train_command)
+        self.assertIn("0.25", train_command)
+
     def test_plan_is_ordered_resumable_and_uses_fold_local_artifacts(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
