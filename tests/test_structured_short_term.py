@@ -2,6 +2,7 @@ from __future__ import absolute_import, division, print_function
 
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 import torch
@@ -15,8 +16,16 @@ from keysubgraph.features.structured_short_term_features import (
     StructuredShortTermStandardizer,
     fit_structured_short_term_standardizer,
 )
+from keysubgraph.features.paper_short_term_pst import (
+    PST_RAW_STATISTIC_NAMES,
+    PaperShortTermCommunityFrequency,
+    compute_paper_short_term_pst_statistics,
+    fit_paper_short_term_community_frequency,
+    paper_short_term_pst_feature_schema,
+)
 from keysubgraph.models.structured_short_term import (
     PAPER_ALIGNED_VARIANT,
+    PAPER_ALIGNED_PST_VARIANT,
     StructuredShortTermClassifier,
     StructuredShortTermConfig,
 )
@@ -76,6 +85,20 @@ def _identity_standardizer():
         train_node_count=20,
         protocol_sha256="a" * 64,
         edge_presence_threshold=0.0,
+    )
+
+
+def _paper_frequency(epsilon=1.0e-12):
+    return PaperShortTermCommunityFrequency(
+        counts=((3, 4), (7, 4)),
+        total_count=8,
+        train_sample_count=1,
+        train_window_count=2,
+        protocol_sha256="a" * 64,
+        train_manifest_sha256="b" * 64,
+        train_sample_keys_sha256="c" * 64,
+        epsilon=epsilon,
+        outer_fold=0,
     )
 
 
@@ -188,6 +211,103 @@ class StructuredShortTermFeatureTest(unittest.TestCase):
                     protocol,
                     edge_presence_threshold=0.0,
                 )
+
+    def test_pst_frequency_is_train_only_and_round_trips(self):
+        train = (_graph_sample("pst-a", 0, 2),)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            protocol = root / "protocol.json"
+            manifest = root / "splits.csv"
+            protocol.write_text('{"frozen": true}\n', encoding="utf-8")
+            manifest.write_text("sample_key,split\npst-a,train\n", encoding="utf-8")
+            frequency = fit_paper_short_term_community_frequency(
+                train,
+                protocol,
+                manifest,
+                outer_fold=2,
+            )
+            self.assertEqual(frequency.count_mapping, {3: 4, 7: 4})
+            self.assertEqual(frequency.train_window_count, 2)
+            self.assertEqual(frequency.outer_fold, 2)
+            path = root / "community_frequency.json"
+            frequency.save(path)
+            self.assertEqual(
+                PaperShortTermCommunityFrequency.load(path).to_dict(),
+                frequency.to_dict(),
+            )
+            with self.assertRaisesRegex(ValueError, "only consume train"):
+                fit_paper_short_term_community_frequency(
+                    (
+                        _graph_sample(
+                            "pst-validation",
+                            0,
+                            1,
+                            split="validation",
+                        ),
+                    ),
+                    protocol,
+                    manifest,
+                )
+
+    def test_pst_raw_statistics_follow_fixed_schema_and_ignore_invalid_labels(self):
+        sample = _graph_sample("pst-stats", 0, 2)
+        frequency = _paper_frequency()
+        statistics = compute_paper_short_term_pst_statistics(
+            sample,
+            frequency,
+        )
+        degrees = torch.cat(
+            tuple(adjacency.abs().sum(dim=1) for adjacency in sample.adjacency)
+        )
+        expected_anomaly = -torch.log(
+            torch.tensor(0.5 + frequency.epsilon)
+        )
+        expected = torch.stack(
+            (
+                degrees.mean(),
+                degrees.std(unbiased=False),
+                degrees.max(),
+                expected_anomaly,
+                torch.tensor(0.0),
+                torch.tensor(2.0),
+            )
+        )
+        self.assertEqual(len(PST_RAW_STATISTIC_NAMES), 6)
+        self.assertTrue(torch.allclose(statistics, expected, atol=1.0e-6))
+        invalid = replace(
+            sample,
+            communities=tuple(
+                torch.full_like(values, -1) for values in sample.communities
+            ),
+        )
+        invalid_statistics = compute_paper_short_term_pst_statistics(
+            invalid,
+            frequency,
+        )
+        self.assertEqual(invalid_statistics[3:5].tolist(), [0.0, 0.0])
+        self.assertEqual(float(invalid_statistics[5]), 2.0)
+
+    def test_pst_unseen_community_is_finite_and_uses_epsilon(self):
+        sample = _graph_sample("pst-unseen", 0, 1)
+        unseen = replace(
+            sample,
+            communities=(torch.full_like(sample.communities[0], 11),),
+        )
+        frequency = _paper_frequency()
+        statistics = compute_paper_short_term_pst_statistics(
+            unseen,
+            frequency,
+        )
+        self.assertTrue(bool(torch.isfinite(statistics).all()))
+        self.assertAlmostEqual(
+            float(statistics[3]),
+            -float(torch.log(torch.tensor(frequency.epsilon))),
+            places=5,
+        )
+        self.assertEqual(float(statistics[4]), 0.0)
+        schema = paper_short_term_pst_feature_schema(16)
+        self.assertEqual(schema["order"], list(PST_RAW_STATISTIC_NAMES))
+        self.assertEqual(schema["projection_dim"], 16)
 
 
 class StructuredShortTermModelTest(unittest.TestCase):
@@ -375,6 +495,72 @@ class StructuredShortTermModelTest(unittest.TestCase):
             output = model(GraphSequenceBatch((self.left, self.right)))
         self.assertIsNone(output.memory_update)
         self.assertTrue(torch.equal(before, model.memory_readout.memory))
+
+    def test_paper_pst_variant_restores_six_statistics_and_projection(self):
+        config = StructuredShortTermConfig(
+            hidden_dim=16,
+            node_ffn_dim=24,
+            transformer_layers=1,
+            transformer_heads=4,
+            transformer_ffn_dim=32,
+            memory_slots=5,
+            statistics_embedding_dim=8,
+            classifier_hidden_dims=(12, 6),
+            dropout=0.0,
+            variant=PAPER_ALIGNED_PST_VARIANT,
+            community_vocab_size=128,
+            community_embedding_dim=6,
+        )
+        model = StructuredShortTermClassifier(
+            config,
+            _identity_standardizer(),
+            community_frequency=_paper_frequency(),
+        )
+        batch = GraphSequenceBatch((self.left, self.right))
+        output = model(batch)
+        self.assertEqual(tuple(output.sequence_statistics.shape), (2, 6))
+        self.assertEqual(tuple(output.statistics_representation.shape), (2, 8))
+        self.assertEqual(tuple(output.final_representation.shape), (2, 40))
+        self.assertEqual(output.time_mask.sum(dim=1).tolist(), [2, 4])
+        self.assertEqual(output.sequence_statistics[:, 5].tolist(), [2.0, 4.0])
+        self.assertTrue(output.diagnostics["uses_pst"])
+        self.assertTrue(output.diagnostics["uses_community_embedding"])
+        torch.nn.functional.cross_entropy(output.logits, batch.labels).backward()
+        self.assertGreater(
+            float(model.statistics_projection.weight.grad.abs().sum()),
+            0.0,
+        )
+
+    def test_paper_pst_list_batch_padding_does_not_change_statistics(self):
+        model = StructuredShortTermClassifier(
+            StructuredShortTermConfig(
+                hidden_dim=16,
+                node_ffn_dim=24,
+                transformer_layers=1,
+                transformer_heads=4,
+                transformer_ffn_dim=32,
+                memory_slots=5,
+                statistics_embedding_dim=8,
+                classifier_hidden_dims=(12, 6),
+                dropout=0.0,
+                variant=PAPER_ALIGNED_PST_VARIANT,
+                community_embedding_dim=6,
+            ),
+            _identity_standardizer(),
+            community_frequency=_paper_frequency(),
+        ).eval()
+        with torch.no_grad():
+            alone = model(GraphSequenceBatch((self.left,)))
+            together = model(GraphSequenceBatch((self.left, self.right)))
+        self.assertTrue(
+            torch.equal(
+                alone.sequence_statistics[0],
+                together.sequence_statistics[0],
+            )
+        )
+        self.assertTrue(
+            torch.allclose(alone.logits[0], together.logits[0], atol=1.0e-6)
+        )
 
 
 if __name__ == "__main__":

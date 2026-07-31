@@ -18,13 +18,20 @@ from keysubgraph.features.structured_short_term_features import (
     StructuredShortTermStandardizer,
     StructuredWindowFeatures,
 )
+from keysubgraph.features.paper_short_term_pst import (
+    PST_RAW_STATISTIC_NAMES,
+    PaperShortTermCommunityFrequency,
+    compute_paper_short_term_pst_statistics,
+)
 
 
 STRUCTURED_SAFE_VARIANT = "structured_safe"
 PAPER_ALIGNED_VARIANT = "paper_aligned_no_coordinate"
+PAPER_ALIGNED_PST_VARIANT = "paper_aligned_no_coordinate_with_pst"
 SUPPORTED_SHORT_TERM_VARIANTS = (
     STRUCTURED_SAFE_VARIANT,
     PAPER_ALIGNED_VARIANT,
+    PAPER_ALIGNED_PST_VARIANT,
 )
 STRUCTURED_SAFE_MODEL_NAME = (
     "coordinate_free_community_structured_short_term"
@@ -32,6 +39,17 @@ STRUCTURED_SAFE_MODEL_NAME = (
 PAPER_ALIGNED_MODEL_NAME = (
     "paper_aligned_no_coordinate_short_term"
 )
+PAPER_ALIGNED_PST_MODEL_NAME = (
+    "paper_aligned_no_coordinate_short_term_with_pst"
+)
+
+
+def is_paper_aligned_variant(variant: str) -> bool:
+    return variant in (PAPER_ALIGNED_VARIANT, PAPER_ALIGNED_PST_VARIANT)
+
+
+def variant_uses_pst(variant: str) -> bool:
+    return variant == PAPER_ALIGNED_PST_VARIANT
 
 
 @dataclass(frozen=True)
@@ -52,6 +70,7 @@ class StructuredShortTermConfig:
     variant: str = STRUCTURED_SAFE_VARIANT
     community_vocab_size: int = 128
     community_embedding_dim: int = 16
+    pst_anomaly_epsilon: float = 1.0e-12
 
     def __post_init__(self) -> None:
         dimensions = (
@@ -83,6 +102,8 @@ class StructuredShortTermConfig:
             raise ValueError("dropout must lie in [0,1)")
         if self.epsilon <= 0.0:
             raise ValueError("epsilon must be positive")
+        if self.pst_anomaly_epsilon <= 0.0:
+            raise ValueError("p_ST anomaly epsilon must be positive")
 
     def to_dict(self) -> Dict[str, Any]:
         payload = asdict(self)
@@ -390,16 +411,43 @@ class StructuredShortTermClassifier(nn.Module):
         self,
         config: StructuredShortTermConfig,
         standardizer: StructuredShortTermStandardizer,
+        community_frequency: Optional[
+            PaperShortTermCommunityFrequency
+        ] = None,
     ) -> None:
         super().__init__()
         self.config = config
         self.standardizer = standardizer
-        self.model_name = (
-            PAPER_ALIGNED_MODEL_NAME
-            if config.variant == PAPER_ALIGNED_VARIANT
-            else STRUCTURED_SAFE_MODEL_NAME
-        )
-        if config.variant == PAPER_ALIGNED_VARIANT:
+        if config.variant == PAPER_ALIGNED_PST_VARIANT:
+            self.model_name = PAPER_ALIGNED_PST_MODEL_NAME
+        elif config.variant == PAPER_ALIGNED_VARIANT:
+            self.model_name = PAPER_ALIGNED_MODEL_NAME
+        else:
+            self.model_name = STRUCTURED_SAFE_MODEL_NAME
+        self.community_frequency = community_frequency
+        if variant_uses_pst(config.variant):
+            if community_frequency is None:
+                raise ValueError(
+                    "paper-aligned p_ST requires train-only community frequency"
+                )
+            if abs(
+                float(community_frequency.epsilon)
+                - float(config.pst_anomaly_epsilon)
+            ) > 1.0e-18:
+                raise ValueError("p_ST anomaly epsilon mismatch")
+            self.register_buffer(
+                "pst_community_probabilities",
+                community_frequency.probability_tensor(
+                    config.community_vocab_size
+                ),
+            )
+        else:
+            if community_frequency is not None:
+                raise ValueError(
+                    "community frequency is only valid for the p_ST variant"
+                )
+            self.register_buffer("pst_community_probabilities", None)
+        if is_paper_aligned_variant(config.variant):
             self.feature_builder = None
             self.window_encoder = PaperAlignedWindowEncoder(config)
         else:
@@ -424,13 +472,17 @@ class StructuredShortTermClassifier(nn.Module):
             num_layers=config.transformer_layers,
             norm=nn.LayerNorm(config.hidden_dim),
         )
-        if config.variant == PAPER_ALIGNED_VARIANT:
+        if is_paper_aligned_variant(config.variant):
             self.memory_readout = PaperBrainFunctionMemory(
                 config.hidden_dim,
                 config.memory_slots,
             )
             self.statistics_norm = None
-            self.statistics_projection = None
+            self.statistics_projection = (
+                nn.Linear(6, config.statistics_embedding_dim)
+                if variant_uses_pst(config.variant)
+                else None
+            )
         else:
             self.memory_readout = PrototypeMemoryReadout(
                 config.hidden_dim,
@@ -442,11 +494,12 @@ class StructuredShortTermClassifier(nn.Module):
                 config.statistics_embedding_dim,
             )
         first, second = config.classifier_hidden_dims
-        classifier_input = config.hidden_dim * 2 + (
-            0
-            if config.variant == PAPER_ALIGNED_VARIANT
-            else config.statistics_embedding_dim
-        )
+        classifier_input = config.hidden_dim * 2
+        if (
+            config.variant == STRUCTURED_SAFE_VARIANT
+            or variant_uses_pst(config.variant)
+        ):
+            classifier_input += config.statistics_embedding_dim
         self.classifier = nn.Sequential(
             nn.Linear(classifier_input, first),
             nn.ReLU(),
@@ -565,13 +618,22 @@ class StructuredShortTermClassifier(nn.Module):
             tuple(item.window_embedding for item in encodings),
             dim=0,
         )
-        return embeddings, embeddings.new_zeros((0,)), tuple(encodings)
+        statistics = (
+            compute_paper_short_term_pst_statistics(
+                sample,
+                self.community_frequency,
+                self.pst_community_probabilities,
+            )
+            if variant_uses_pst(self.config.variant)
+            else embeddings.new_zeros((0,))
+        )
+        return embeddings, statistics, tuple(encodings)
 
     def _encode_sample(
         self,
         sample: GraphSequenceSample,
     ) -> Tuple[torch.Tensor, torch.Tensor, Tuple[Any, ...]]:
-        if self.config.variant == PAPER_ALIGNED_VARIANT:
+        if is_paper_aligned_variant(self.config.variant):
             return self._encode_paper_sample(sample)
         return self._encode_safe_sample(sample)
 
@@ -579,7 +641,7 @@ class StructuredShortTermClassifier(nn.Module):
         self,
         update: Optional[BrainFunctionMemoryUpdate],
     ) -> None:
-        if self.config.variant == PAPER_ALIGNED_VARIANT:
+        if is_paper_aligned_variant(self.config.variant):
             self.memory_readout.commit(update)
 
     def forward(self, batch: GraphSequenceBatch) -> StructuredShortTermOutput:
@@ -629,7 +691,7 @@ class StructuredShortTermClassifier(nn.Module):
             src_key_padding_mask=padding_mask,
         )
         cls_representation = temporal[:, 0]
-        if self.config.variant == PAPER_ALIGNED_VARIANT:
+        if is_paper_aligned_variant(self.config.variant):
             (
                 memory_representation,
                 memory_attention,
@@ -638,16 +700,32 @@ class StructuredShortTermClassifier(nn.Module):
                 cls_representation,
                 propose_write=self.training,
             )
-            sequence_statistics = cls_representation.new_zeros(
-                (batch_size, 0)
-            )
-            statistics_representation = cls_representation.new_zeros(
-                (batch_size, 0)
-            )
-            final_representation = torch.cat(
-                (cls_representation, memory_representation),
-                dim=-1,
-            )
+            if variant_uses_pst(self.config.variant):
+                sequence_statistics = torch.stack(
+                    tuple(sample_statistics), dim=0
+                )
+                statistics_representation = self.statistics_projection(
+                    sequence_statistics
+                )
+                final_representation = torch.cat(
+                    (
+                        cls_representation,
+                        memory_representation,
+                        statistics_representation,
+                    ),
+                    dim=-1,
+                )
+            else:
+                sequence_statistics = cls_representation.new_zeros(
+                    (batch_size, 0)
+                )
+                statistics_representation = cls_representation.new_zeros(
+                    (batch_size, 0)
+                )
+                final_representation = torch.cat(
+                    (cls_representation, memory_representation),
+                    dim=-1,
+                )
         else:
             memory_representation, memory_attention = self.memory_readout(
                 cls_representation
@@ -690,19 +768,26 @@ class StructuredShortTermClassifier(nn.Module):
                         "delta_absolute_degree",
                         "community_embedding",
                     )
-                    if self.config.variant == PAPER_ALIGNED_VARIANT
+                    if is_paper_aligned_variant(self.config.variant)
                     else NODE_FEATURE_NAMES
                 ),
                 "uses_coordinates": False,
                 "uses_community_embedding": (
-                    self.config.variant == PAPER_ALIGNED_VARIANT
+                    is_paper_aligned_variant(self.config.variant)
                 ),
                 "uses_sequence_statistics": (
-                    self.config.variant != PAPER_ALIGNED_VARIANT
+                    self.config.variant == STRUCTURED_SAFE_VARIANT
+                    or variant_uses_pst(self.config.variant)
+                ),
+                "uses_pst": variant_uses_pst(self.config.variant),
+                "pst_raw_statistic_names": (
+                    PST_RAW_STATISTIC_NAMES
+                    if variant_uses_pst(self.config.variant)
+                    else ()
                 ),
                 "memory_update": (
                     "paper_gated_batch_average"
-                    if self.config.variant == PAPER_ALIGNED_VARIANT
+                    if is_paper_aligned_variant(self.config.variant)
                     else "optimizer_gradient_only"
                 ),
                 "variant": self.config.variant,

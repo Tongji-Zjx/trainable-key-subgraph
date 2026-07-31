@@ -18,6 +18,7 @@ from keysubgraph.crossfit.structured_short_term_summary import (  # noqa: E402
 )
 from keysubgraph.models.structured_short_term import (  # noqa: E402
     PAPER_ALIGNED_VARIANT,
+    PAPER_ALIGNED_PST_VARIANT,
     STRUCTURED_SAFE_VARIANT,
 )
 
@@ -30,7 +31,11 @@ def parse_args():
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument(
         "--model-variant",
-        choices=(STRUCTURED_SAFE_VARIANT, PAPER_ALIGNED_VARIANT),
+        choices=(
+            STRUCTURED_SAFE_VARIANT,
+            PAPER_ALIGNED_VARIANT,
+            PAPER_ALIGNED_PST_VARIANT,
+        ),
         default=STRUCTURED_SAFE_VARIANT,
     )
     parser.add_argument("--overwrite", action="store_true")

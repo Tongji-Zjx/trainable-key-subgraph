@@ -1,5 +1,6 @@
 from __future__ import absolute_import, division, print_function
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -11,9 +12,14 @@ from keysubgraph.data.data_split import file_sha256
 from keysubgraph.features.structured_short_term_features import (
     StructuredShortTermStandardizer,
 )
+from keysubgraph.features.paper_short_term_pst import (
+    fit_paper_short_term_community_frequency,
+)
 from keysubgraph.models.structured_short_term import (
     PAPER_ALIGNED_MODEL_NAME,
     PAPER_ALIGNED_VARIANT,
+    PAPER_ALIGNED_PST_MODEL_NAME,
+    PAPER_ALIGNED_PST_VARIANT,
     StructuredShortTermClassifier,
     StructuredShortTermConfig,
 )
@@ -21,6 +27,7 @@ from keysubgraph.training.structured_short_term_trainer import (
     StructuredShortTermTrainingConfig,
     evaluate_structured_short_term,
     load_structured_short_term_checkpoint,
+    model_from_structured_short_term_checkpoint,
     train_structured_short_term,
 )
 from tests.test_structured_short_term import (
@@ -228,6 +235,121 @@ class StructuredShortTermTrainingTest(unittest.TestCase):
             self.assertTrue(
                 torch.equal(frozen_memory, model.memory_readout.memory)
             )
+
+    def test_pst_frequency_and_schema_are_checkpointed(self):
+        train_samples = (
+            _graph_sample("pst-train-0", 0, 2),
+            _graph_sample("pst-train-1", 1, 3),
+        )
+        validation_batch = GraphSequenceBatch(
+            (
+                _graph_sample(
+                    "pst-validation-0", 0, 2, split="validation"
+                ),
+                _graph_sample(
+                    "pst-validation-1", 1, 3, split="validation"
+                ),
+            )
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            protocol = root / "protocol.json"
+            manifest = root / "splits.csv"
+            protocol.write_text('{"immutable": true}\n', encoding="utf-8")
+            manifest.write_text(
+                "sample_key,split\npst-train-0,train\npst-train-1,train\n",
+                encoding="utf-8",
+            )
+            protocol_hash = file_sha256(protocol)
+            base = _identity_standardizer()
+            standardizer = StructuredShortTermStandardizer(
+                node_mean=base.node_mean,
+                node_std=base.node_std,
+                community_mean=base.community_mean,
+                community_std=base.community_std,
+                train_sample_count=2,
+                train_window_count=5,
+                train_node_count=20,
+                protocol_sha256=protocol_hash,
+                edge_presence_threshold=0.0,
+            )
+            standardizer_path = root / "standardizer.json"
+            standardizer.save(standardizer_path)
+            frequency = fit_paper_short_term_community_frequency(
+                train_samples,
+                protocol,
+                manifest,
+                outer_fold=0,
+            )
+            frequency_path = root / "community_frequency.json"
+            frequency.save(frequency_path)
+            model = StructuredShortTermClassifier(
+                StructuredShortTermConfig(
+                    hidden_dim=16,
+                    node_ffn_dim=24,
+                    transformer_layers=1,
+                    transformer_heads=4,
+                    transformer_ffn_dim=32,
+                    memory_slots=4,
+                    statistics_embedding_dim=8,
+                    classifier_hidden_dims=(12, 6),
+                    dropout=0.0,
+                    variant=PAPER_ALIGNED_PST_VARIANT,
+                    community_embedding_dim=6,
+                ),
+                standardizer,
+                community_frequency=frequency,
+            )
+            result = train_structured_short_term(
+                model=model,
+                train_loader=[GraphSequenceBatch(train_samples)],
+                validation_loader=[validation_batch],
+                train_labels=(0, 1),
+                device=torch.device("cpu"),
+                training_config=StructuredShortTermTrainingConfig(
+                    epochs=1,
+                    early_stopping_patience=0,
+                    scheduler_patience=1,
+                ),
+                output_dir=root / "pst-training",
+                protocol_path=protocol,
+                protocol_sha256=protocol_hash,
+                standardizer_path=standardizer_path,
+                standardizer_sha256=file_sha256(standardizer_path),
+                community_frequency_path=frequency_path,
+                community_frequency_sha256=file_sha256(frequency_path),
+            )
+            checkpoint = load_structured_short_term_checkpoint(
+                result["best_checkpoint"],
+                model,
+                torch.device("cpu"),
+                protocol_hash,
+                file_sha256(standardizer_path),
+                file_sha256(frequency_path),
+            )
+            self.assertEqual(checkpoint["model_name"], PAPER_ALIGNED_PST_MODEL_NAME)
+            self.assertEqual(
+                checkpoint["community_frequency"], frequency.to_dict()
+            )
+            evaluation = json.loads(
+                result["best_evaluation"].read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                set(evaluation["train"]["pst_raw_statistics"]),
+                {
+                    "degree_mean",
+                    "degree_std",
+                    "degree_max",
+                    "anomaly_mean",
+                    "anomaly_std",
+                    "num_valid_windows",
+                },
+            )
+            self.assertTrue((root / "pst-training" / "feature_schema.json").is_file())
+            restored, _ = model_from_structured_short_term_checkpoint(
+                result["best_checkpoint"], torch.device("cpu")
+            )
+            self.assertEqual(restored.model_name, PAPER_ALIGNED_PST_MODEL_NAME)
 
 
 if __name__ == "__main__":

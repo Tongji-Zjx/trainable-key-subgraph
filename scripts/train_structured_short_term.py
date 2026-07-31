@@ -28,11 +28,17 @@ from keysubgraph.data.graph_dataset import (  # noqa: E402
 from keysubgraph.features.structured_short_term_features import (  # noqa: E402
     StructuredShortTermStandardizer,
 )
+from keysubgraph.features.paper_short_term_pst import (  # noqa: E402
+    PaperShortTermCommunityFrequency,
+)
 from keysubgraph.models.structured_short_term import (  # noqa: E402
     PAPER_ALIGNED_VARIANT,
+    PAPER_ALIGNED_PST_VARIANT,
     STRUCTURED_SAFE_VARIANT,
     StructuredShortTermClassifier,
     StructuredShortTermConfig,
+    is_paper_aligned_variant,
+    variant_uses_pst,
 )
 from keysubgraph.training import (  # noqa: E402
     StructuredShortTermTrainingConfig,
@@ -45,6 +51,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--protocol", type=Path, required=True)
     parser.add_argument("--standardizer", type=Path, required=True)
+    parser.add_argument("--community-frequency", type=Path)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--device", default="auto")
     parser.add_argument("--epochs", type=int, default=80)
@@ -71,12 +78,17 @@ def parse_args():
     parser.add_argument("--memory-slots", type=int, default=8)
     parser.add_argument(
         "--model-variant",
-        choices=(STRUCTURED_SAFE_VARIANT, PAPER_ALIGNED_VARIANT),
+        choices=(
+            STRUCTURED_SAFE_VARIANT,
+            PAPER_ALIGNED_VARIANT,
+            PAPER_ALIGNED_PST_VARIANT,
+        ),
         default=STRUCTURED_SAFE_VARIANT,
     )
     parser.add_argument("--community-vocab-size", type=int, default=128)
     parser.add_argument("--community-embedding-dim", type=int, default=16)
     parser.add_argument("--statistics-embedding-dim", type=int, default=16)
+    parser.add_argument("--pst-anomaly-epsilon", type=float, default=1.0e-12)
     parser.add_argument("--classifier-hidden-1", type=int, default=64)
     parser.add_argument("--classifier-hidden-2", type=int, default=32)
     parser.add_argument("--dropout", type=float, default=0.10)
@@ -97,6 +109,21 @@ def main():
     standardizer = StructuredShortTermStandardizer.load(args.standardizer)
     protocol_hash = file_sha256(args.protocol)
     standardizer_hash = file_sha256(args.standardizer)
+    uses_pst = variant_uses_pst(args.model_variant)
+    if uses_pst and args.community_frequency is None:
+        raise ValueError("p_ST variant requires --community-frequency")
+    if not uses_pst and args.community_frequency is not None:
+        raise ValueError(
+            "--community-frequency is only valid for the p_ST variant"
+        )
+    community_frequency = (
+        PaperShortTermCommunityFrequency.load(args.community_frequency)
+        if uses_pst
+        else None
+    )
+    community_frequency_hash = (
+        file_sha256(args.community_frequency) if uses_pst else None
+    )
     if standardizer.protocol_sha256 != protocol_hash:
         raise ValueError("standardizer was fitted for a different protocol")
     if (
@@ -128,6 +155,14 @@ def main():
         raise ValueError(
             "standardizer does not cover the complete frozen training split"
         )
+    if community_frequency is not None:
+        splits_hash = file_sha256(PROJECT_ROOT / paths["splits_csv"])
+        if community_frequency.protocol_sha256 != protocol_hash:
+            raise ValueError("community frequency protocol hash mismatch")
+        if community_frequency.train_manifest_sha256 != splits_hash:
+            raise ValueError("community frequency split-manifest mismatch")
+        if community_frequency.train_sample_count != len(train_dataset):
+            raise ValueError("community frequency train sample mismatch")
     device = _device(args.device)
     train_loader = create_data_loader(
         train_dataset,
@@ -162,8 +197,10 @@ def main():
             variant=args.model_variant,
             community_vocab_size=args.community_vocab_size,
             community_embedding_dim=args.community_embedding_dim,
+            pst_anomaly_epsilon=args.pst_anomaly_epsilon,
         ),
         standardizer,
+        community_frequency=community_frequency,
     )
     config = StructuredShortTermTrainingConfig(
         epochs=1 if args.smoke else args.epochs,
@@ -194,6 +231,8 @@ def main():
         protocol_sha256=protocol_hash,
         standardizer_path=args.standardizer,
         standardizer_sha256=standardizer_hash,
+        community_frequency_path=args.community_frequency,
+        community_frequency_sha256=community_frequency_hash,
         resume_checkpoint=args.resume,
     )
     if device.type == "cuda":
@@ -212,10 +251,16 @@ def main():
             "validation_sample_count": len(validation_dataset),
             "uses_coordinates": False,
             "uses_community_embedding": (
-                args.model_variant == PAPER_ALIGNED_VARIANT
+                is_paper_aligned_variant(args.model_variant)
             ),
             "uses_sequence_statistics": (
-                args.model_variant != PAPER_ALIGNED_VARIANT
+                args.model_variant == STRUCTURED_SAFE_VARIANT or uses_pst
+            ),
+            "uses_pst": uses_pst,
+            "community_frequency": (
+                None
+                if args.community_frequency is None
+                else str(args.community_frequency.resolve())
             ),
             "model_variant": args.model_variant,
             "elapsed_seconds": time.perf_counter() - started,

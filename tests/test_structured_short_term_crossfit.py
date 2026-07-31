@@ -22,6 +22,8 @@ from keysubgraph.crossfit.structured_short_term_summary import (  # noqa: E402
 from keysubgraph.models.structured_short_term import (  # noqa: E402
     PAPER_ALIGNED_MODEL_NAME,
     PAPER_ALIGNED_VARIANT,
+    PAPER_ALIGNED_PST_MODEL_NAME,
+    PAPER_ALIGNED_PST_VARIANT,
 )
 
 
@@ -97,6 +99,36 @@ class StructuredShortTermCrossfitRunnerTest(unittest.TestCase):
         self.assertEqual(
             train[train.index("--model-variant") + 1],
             PAPER_ALIGNED_VARIANT,
+        )
+
+    def test_pst_plan_fits_fold_local_frequency_before_training(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            plan = build_structured_short_term_crossfit_fold_commands(
+                PROJECT_ROOT,
+                root,
+                1,
+                model_variant=PAPER_ALIGNED_PST_VARIANT,
+            )
+        self.assertEqual(
+            [item[0] for item in plan],
+            [
+                "standardizer",
+                "community_frequency",
+                "train",
+                "evaluate_validation",
+                "evaluate_test",
+            ],
+        )
+        for _, _, artifact in plan:
+            self.assertIn("paper_aligned_short_term_with_pst", str(artifact))
+        frequency = plan[1][1]
+        self.assertEqual(frequency[frequency.index("--outer-fold") + 1], "1")
+        train = plan[2][1]
+        self.assertIn("--community-frequency", train)
+        self.assertEqual(
+            train[train.index("--model-variant") + 1],
+            PAPER_ALIGNED_PST_VARIANT,
         )
 
 
@@ -211,6 +243,33 @@ class StructuredShortTermCrossfitSummaryTest(unittest.TestCase):
                 _write_json(paper / name, payload)
         return assignments
 
+    def _pst_fixture(self, root):
+        assignments = self._fixture(root)
+        for fold in (0, 1):
+            safe = (
+                root
+                / "fold_{}".format(fold)
+                / "structured_short_term"
+                / "evaluation_seed42"
+            )
+            pst = (
+                root
+                / "fold_{}".format(fold)
+                / "paper_aligned_short_term_with_pst"
+                / "evaluation_seed42"
+            )
+            pst.mkdir(parents=True, exist_ok=True)
+            for name in (
+                "validation_evaluation.json",
+                "test_evaluation.json",
+            ):
+                payload = json.loads(
+                    (safe / name).read_text(encoding="utf-8")
+                )
+                payload["model_name"] = PAPER_ALIGNED_PST_MODEL_NAME
+                _write_json(pst / name, payload)
+        return assignments
+
     def test_summary_audits_exact_coverage_and_writes_outputs(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -318,6 +377,25 @@ class StructuredShortTermCrossfitSummaryTest(unittest.TestCase):
             )
             self.assertIn(
                 "paper_aligned_short_term_seed42",
+                str(result["summary_json"]),
+            )
+
+    def test_pst_summary_uses_separate_paths_and_model_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            assignments = self._pst_fixture(root)
+            result = summarize_structured_short_term_crossfit(
+                root,
+                assignments,
+                model_variant=PAPER_ALIGNED_PST_VARIANT,
+            )
+            payload = json.loads(
+                result["summary_json"].read_text(encoding="utf-8")
+            )
+            self.assertEqual(payload["model_name"], PAPER_ALIGNED_PST_MODEL_NAME)
+            self.assertEqual(payload["model_variant"], PAPER_ALIGNED_PST_VARIANT)
+            self.assertIn(
+                "paper_aligned_short_term_with_pst_seed42",
                 str(result["summary_json"]),
             )
 

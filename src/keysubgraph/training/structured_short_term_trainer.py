@@ -15,11 +15,19 @@ from sklearn.metrics import roc_auc_score
 from keysubgraph.features.structured_short_term_features import (
     StructuredShortTermStandardizer,
 )
+from keysubgraph.features.paper_short_term_pst import (
+    PST_RAW_STATISTIC_NAMES,
+    PaperShortTermCommunityFrequency,
+    paper_short_term_pst_feature_schema,
+)
+from keysubgraph.data.data_split import file_sha256
 from keysubgraph.models.structured_short_term import (
     PAPER_ALIGNED_MODEL_NAME,
+    PAPER_ALIGNED_PST_MODEL_NAME,
     STRUCTURED_SAFE_MODEL_NAME,
     StructuredShortTermClassifier,
     StructuredShortTermConfig,
+    variant_uses_pst,
 )
 from keysubgraph.training.dual_sgw_feature_trainer import (
     binary_metrics,
@@ -31,7 +39,8 @@ from keysubgraph.training.trainer import (
 )
 
 
-STRUCTURED_SHORT_TERM_CHECKPOINT_SCHEMA_VERSION = 1
+STRUCTURED_SHORT_TERM_CHECKPOINT_SCHEMA_VERSION = 2
+SUPPORTED_STRUCTURED_SHORT_TERM_CHECKPOINT_SCHEMAS = (1, 2)
 
 
 @dataclass(frozen=True)
@@ -147,6 +156,7 @@ def run_structured_short_term_epoch(
     sample_total = 0
     gradient_norms: List[float] = []
     memory_entropies: List[float] = []
+    pst_statistics: List[torch.Tensor] = []
     started = time.perf_counter()
     weights = class_weights.to(device=device, dtype=torch.float32)
 
@@ -197,9 +207,19 @@ def run_structured_short_term_epoch(
         memory_entropies.extend(
             float(value) for value in entropy.detach().cpu().tolist()
         )
+        if (
+            output.diagnostics.get("uses_pst")
+            and tuple(output.sequence_statistics.shape[1:]) == (6,)
+        ):
+            pst_statistics.append(output.sequence_statistics.detach().cpu())
 
     if sample_total <= 0:
         raise ValueError("short-term epoch processed no samples")
+    pst_values = (
+        torch.cat(tuple(pst_statistics), dim=0)
+        if pst_statistics
+        else None
+    )
     metrics = binary_metrics(labels_all, probabilities_all, threshold)
     metrics.update(
         {
@@ -218,6 +238,21 @@ def run_structured_short_term_epoch(
             ),
             "mean_normalized_memory_entropy": (
                 sum(memory_entropies) / float(len(memory_entropies))
+            ),
+            "pst_raw_statistics": (
+                None
+                if pst_values is None
+                else {
+                    name: {
+                        "mean": float(pst_values[:, index].mean()),
+                        "standard_deviation": float(
+                            pst_values[:, index].std(unbiased=False)
+                        ),
+                        "minimum": float(pst_values[:, index].min()),
+                        "maximum": float(pst_values[:, index].max()),
+                    }
+                    for index, name in enumerate(PST_RAW_STATISTIC_NAMES)
+                }
             ),
             "elapsed_seconds": time.perf_counter() - started,
         }
@@ -273,6 +308,10 @@ def _checkpoint_payload(
     standardizer_sha256: str,
     best_epoch: int,
     best_key: Tuple[float, float, float],
+    community_frequency_path: Optional[Path] = None,
+    community_frequency_sha256: Optional[str] = None,
+    feature_schema_path: Optional[Path] = None,
+    feature_schema_sha256: Optional[str] = None,
     thresholds: Optional[Dict[str, float]] = None,
 ) -> Dict[str, Any]:
     return {
@@ -286,6 +325,23 @@ def _checkpoint_payload(
         "standardizer": model.standardizer.to_dict(),
         "standardizer_path": str(Path(standardizer_path).resolve()),
         "standardizer_sha256": str(standardizer_sha256),
+        "community_frequency": (
+            model.community_frequency.to_dict()
+            if model.community_frequency is not None
+            else None
+        ),
+        "community_frequency_path": (
+            None
+            if community_frequency_path is None
+            else str(Path(community_frequency_path).resolve())
+        ),
+        "community_frequency_sha256": community_frequency_sha256,
+        "pst_feature_schema_path": (
+            None
+            if feature_schema_path is None
+            else str(Path(feature_schema_path).resolve())
+        ),
+        "pst_feature_schema_sha256": feature_schema_sha256,
         "training_config": asdict(training_config),
         "class_weights": class_weights.detach().cpu(),
         "protocol_path": str(Path(protocol_path).resolve()),
@@ -304,13 +360,13 @@ def load_structured_short_term_checkpoint(
     device: torch.device,
     expected_protocol_sha256: Optional[str] = None,
     expected_standardizer_sha256: Optional[str] = None,
+    expected_community_frequency_sha256: Optional[str] = None,
 ) -> Dict[str, Any]:
     payload = _trusted_load(path, device)
     if payload.get("model_name") != model.model_name:
         raise ValueError("not a structured short-term checkpoint")
-    if (
-        payload.get("schema_version")
-        != STRUCTURED_SHORT_TERM_CHECKPOINT_SCHEMA_VERSION
+    if payload.get("schema_version") not in (
+        SUPPORTED_STRUCTURED_SHORT_TERM_CHECKPOINT_SCHEMAS
     ):
         raise ValueError("unsupported structured short-term checkpoint schema")
     payload_config = StructuredShortTermConfig.from_dict(
@@ -320,6 +376,13 @@ def load_structured_short_term_checkpoint(
         raise ValueError("structured short-term model configuration mismatch")
     if payload.get("standardizer") != model.standardizer.to_dict():
         raise ValueError("structured short-term standardizer mismatch")
+    expected_frequency = (
+        model.community_frequency.to_dict()
+        if model.community_frequency is not None
+        else None
+    )
+    if payload.get("community_frequency") != expected_frequency:
+        raise ValueError("structured short-term community frequency mismatch")
     if (
         expected_protocol_sha256 is not None
         and payload.get("protocol_sha256") != expected_protocol_sha256
@@ -331,6 +394,12 @@ def load_structured_short_term_checkpoint(
         != expected_standardizer_sha256
     ):
         raise ValueError("structured short-term standardizer hash mismatch")
+    if (
+        expected_community_frequency_sha256 is not None
+        and payload.get("community_frequency_sha256")
+        != expected_community_frequency_sha256
+    ):
+        raise ValueError("structured short-term frequency hash mismatch")
     model.load_state_dict(payload["model_state_dict"])
     return payload
 
@@ -343,13 +412,25 @@ def model_from_structured_short_term_checkpoint(
     if payload.get("model_name") not in (
         STRUCTURED_SAFE_MODEL_NAME,
         PAPER_ALIGNED_MODEL_NAME,
+        PAPER_ALIGNED_PST_MODEL_NAME,
     ):
         raise ValueError("not a structured short-term checkpoint")
     config = StructuredShortTermConfig.from_dict(payload["model_config"])
     standardizer = StructuredShortTermStandardizer.from_dict(
         payload["standardizer"]
     )
-    model = StructuredShortTermClassifier(config, standardizer).to(device)
+    frequency = (
+        None
+        if payload.get("community_frequency") is None
+        else PaperShortTermCommunityFrequency.from_dict(
+            payload["community_frequency"]
+        )
+    )
+    model = StructuredShortTermClassifier(
+        config,
+        standardizer,
+        community_frequency=frequency,
+    ).to(device)
     if payload.get("model_name") != model.model_name:
         raise ValueError("structured short-term checkpoint variant mismatch")
     model.load_state_dict(payload["model_state_dict"])
@@ -368,6 +449,8 @@ def train_structured_short_term(
     protocol_sha256: str,
     standardizer_path: Path,
     standardizer_sha256: str,
+    community_frequency_path: Optional[Path] = None,
+    community_frequency_sha256: Optional[str] = None,
     resume_checkpoint: Optional[Path] = None,
 ) -> Dict[str, Any]:
     output_dir = Path(output_dir).resolve()
@@ -375,6 +458,45 @@ def train_structured_short_term(
     history_path = output_dir / "history.json"
     if history_path.exists() and resume_checkpoint is None:
         raise FileExistsError("structured short-term training output exists")
+    uses_pst = variant_uses_pst(model.config.variant)
+    if uses_pst and (
+        community_frequency_path is None
+        or community_frequency_sha256 is None
+        or model.community_frequency is None
+    ):
+        raise ValueError("p_ST training requires a frozen frequency artifact")
+    if not uses_pst and (
+        community_frequency_path is not None
+        or community_frequency_sha256 is not None
+    ):
+        raise ValueError("community frequency is invalid for this variant")
+    if uses_pst:
+        frequency_path = Path(community_frequency_path).resolve()
+        if not frequency_path.is_file():
+            raise FileNotFoundError(str(frequency_path))
+        if file_sha256(frequency_path) != community_frequency_sha256:
+            raise ValueError("p_ST community frequency file hash mismatch")
+        frozen_frequency = PaperShortTermCommunityFrequency.load(
+            frequency_path
+        )
+        if frozen_frequency.to_dict() != model.community_frequency.to_dict():
+            raise ValueError("p_ST model frequency differs from frozen artifact")
+        if frozen_frequency.protocol_sha256 != protocol_sha256:
+            raise ValueError("p_ST frequency was fitted for another protocol")
+    feature_schema_path = None
+    feature_schema_sha256 = None
+    if uses_pst:
+        feature_schema_path = output_dir / "feature_schema.json"
+        expected_schema = paper_short_term_pst_feature_schema(
+            model.config.statistics_embedding_dim
+        )
+        if feature_schema_path.exists():
+            with feature_schema_path.open("r", encoding="utf-8") as handle:
+                if json.load(handle) != expected_schema:
+                    raise ValueError("p_ST feature schema mismatch")
+        else:
+            _atomic_json(feature_schema_path, expected_schema)
+        feature_schema_sha256 = file_sha256(feature_schema_path)
     set_reproducible_seed(training_config.seed)
     model.to(device)
     class_weights = class_weights_from_labels(train_labels)
@@ -402,6 +524,7 @@ def train_structured_short_term(
             device,
             protocol_sha256,
             standardizer_sha256,
+            community_frequency_sha256,
         )
         optimizer.load_state_dict(payload["optimizer_state_dict"])
         scheduler.load_state_dict(payload["scheduler_state_dict"])
@@ -472,6 +595,10 @@ def train_structured_short_term(
             standardizer_sha256,
             best_epoch,
             best_key,
+            community_frequency_path,
+            community_frequency_sha256,
+            feature_schema_path,
+            feature_schema_sha256,
         )
         _atomic_torch_save(output_dir / "last_checkpoint.pt", checkpoint)
         if improved:
@@ -510,6 +637,7 @@ def train_structured_short_term(
         device,
         protocol_sha256,
         standardizer_sha256,
+        community_frequency_sha256,
     )
     best_train = run_structured_short_term_epoch(
         model,
@@ -563,6 +691,8 @@ def train_structured_short_term(
         "history": history_path,
         "best_evaluation": evaluation_path,
         "validation_thresholds": thresholds,
+        "community_frequency": community_frequency_path,
+        "feature_schema": feature_schema_path,
     }
 
 

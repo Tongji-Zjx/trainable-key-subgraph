@@ -57,6 +57,8 @@ from .exact_stse import (
 from .structured_short_term import (
     PAPER_ALIGNED_MODEL_NAME,
     PAPER_ALIGNED_VARIANT,
+    PAPER_ALIGNED_PST_MODEL_NAME,
+    PAPER_ALIGNED_PST_VARIANT,
     STRUCTURED_SAFE_MODEL_NAME,
     STRUCTURED_SAFE_VARIANT,
     SUPPORTED_SHORT_TERM_VARIANTS,
@@ -67,6 +69,8 @@ from .structured_short_term import (
     StructuredShortTermConfig,
     StructuredShortTermOutput,
     StructuredWindowEncoder,
+    is_paper_aligned_variant,
+    variant_uses_pst,
 )
 from .dual_stse_hard_sgw_types import (
     DUAL_EXPERIMENT_VARIANTS,
@@ -172,6 +176,8 @@ __all__ = [
     "DualSGWFeatureClassifierConfig",
     "PAPER_ALIGNED_MODEL_NAME",
     "PAPER_ALIGNED_VARIANT",
+    "PAPER_ALIGNED_PST_MODEL_NAME",
+    "PAPER_ALIGNED_PST_VARIANT",
     "STRUCTURED_SAFE_MODEL_NAME",
     "STRUCTURED_SAFE_VARIANT",
     "SUPPORTED_SHORT_TERM_VARIANTS",
@@ -182,4 +188,6 @@ __all__ = [
     "StructuredShortTermConfig",
     "StructuredShortTermOutput",
     "StructuredWindowEncoder",
+    "is_paper_aligned_variant",
+    "variant_uses_pst",
 ]

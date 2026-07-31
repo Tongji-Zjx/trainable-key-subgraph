@@ -29,6 +29,10 @@ from keysubgraph.training import (  # noqa: E402
     evaluate_structured_short_term,
     model_from_structured_short_term_checkpoint,
 )
+from keysubgraph.models.structured_short_term import (  # noqa: E402
+    is_paper_aligned_variant,
+    variant_uses_pst,
+)
 
 
 def parse_args():
@@ -67,11 +71,20 @@ def main():
         device,
     )
     uses_community_embedding = bool(
-        model.config.variant == "paper_aligned_no_coordinate"
+        is_paper_aligned_variant(model.config.variant)
     )
+    uses_pst = variant_uses_pst(model.config.variant)
     protocol_hash = file_sha256(args.protocol)
     if checkpoint.get("protocol_sha256") != protocol_hash:
         raise ValueError("checkpoint protocol hash mismatch")
+    if model.community_frequency is not None:
+        if model.community_frequency.protocol_sha256 != protocol_hash:
+            raise ValueError("checkpoint community frequency protocol mismatch")
+        splits_hash = file_sha256(
+            PROJECT_ROOT / protocol["paths"]["splits_csv"]
+        )
+        if model.community_frequency.train_manifest_sha256 != splits_hash:
+            raise ValueError("checkpoint community frequency split mismatch")
     thresholds = checkpoint.get("validation_thresholds", {})
     if args.threshold_strategy not in thresholds:
         raise ValueError("checkpoint has no frozen validation threshold")
@@ -146,7 +159,12 @@ def main():
                     "enabled" if uses_community_embedding else "disabled"
                 ),
                 "- Sequence statistics branch: {}".format(
-                    "disabled" if uses_community_embedding else "enabled"
+                    "enabled"
+                    if (not uses_community_embedding or uses_pst)
+                    else "disabled"
+                ),
+                "- Paper p_ST branch: {}".format(
+                    "enabled" if uses_pst else "disabled"
                 ),
                 "- Model variant: `{}`".format(model.config.variant),
                 "- Threshold source: validation ({})".format(

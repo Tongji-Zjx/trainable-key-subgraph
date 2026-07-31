@@ -19,6 +19,8 @@ from .sv_signed_gin_summary import (
 from keysubgraph.models.structured_short_term import (
     PAPER_ALIGNED_MODEL_NAME,
     PAPER_ALIGNED_VARIANT,
+    PAPER_ALIGNED_PST_MODEL_NAME,
+    PAPER_ALIGNED_PST_VARIANT,
     STRUCTURED_SAFE_MODEL_NAME,
     STRUCTURED_SAFE_VARIANT,
 )
@@ -121,7 +123,13 @@ def summarize_structured_short_term_crossfit(
 
     output_root = Path(output_root).resolve()
     fold_assignments = Path(fold_assignments).resolve()
-    if model_variant == PAPER_ALIGNED_VARIANT:
+    if model_variant == PAPER_ALIGNED_PST_VARIANT:
+        model_name = PAPER_ALIGNED_PST_MODEL_NAME
+        branch_name = "paper_aligned_short_term_with_pst"
+        summary_name = "paper_aligned_short_term_with_pst_seed{}".format(
+            seed
+        )
+    elif model_variant == PAPER_ALIGNED_VARIANT:
         model_name = PAPER_ALIGNED_MODEL_NAME
         branch_name = "paper_aligned_short_term"
         summary_name = "paper_aligned_short_term_seed{}".format(seed)
