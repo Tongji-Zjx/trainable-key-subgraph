@@ -191,7 +191,11 @@ def build_stage1_fold_commands(
                     "--epochs", epochs,
                     "--batch-size", batch_size,
                     "--gradient-accumulation-steps", accumulation_steps,
-                    "--num-workers", num_workers,
+                    # Variable-length records contain many tensors per sample.
+                    # Multiprocessing sends each storage through a file
+                    # descriptor and can exceed the server fd limit; artifact
+                    # training is therefore intentionally single-process.
+                    "--num-workers", 0,
                     "--seed", seed,
                 ),
                 model_dir / "best_evaluation.json",
@@ -208,7 +212,7 @@ def build_stage1_fold_commands(
                     "--output", model_dir / "outer_test_evaluation.json",
                     "--device", device,
                     "--batch-size", max(batch_size, 8),
-                    "--num-workers", num_workers,
+                    "--num-workers", 0,
                     "--seed", seed,
                 ),
                 model_dir / "outer_test_evaluation.json",
@@ -226,7 +230,7 @@ def build_stage1_fold_commands(
                     "--output", model_dir / "diagnostics.json",
                     "--device", device,
                     "--batch-size", max(batch_size, 8),
-                    "--num-workers", num_workers,
+                    "--num-workers", 0,
                     "--seed", seed,
                 ),
                 model_dir / "diagnostics.json",

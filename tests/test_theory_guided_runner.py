@@ -53,7 +53,7 @@ class TheoryGuidedRunnerTest(unittest.TestCase):
                 root, root / "source", root / "output", 1,
                 variants=("N0_signed_gin", "N4_ema_center"),
                 device="cpu", epochs=2, batch_size=4,
-                accumulation_steps=2, num_workers=0,
+                accumulation_steps=2, num_workers=3,
                 gw_max_iter=2, gw_sinkhorn_iter=3,
             )
         names = [item[0] for item in commands]
@@ -64,6 +64,17 @@ class TheoryGuidedRunnerTest(unittest.TestCase):
         self.assertIn("evaluate_N4_ema_center", names)
         self.assertIn("diagnose_N4_ema_center", names)
         self.assertEqual(len({str(item[2]) for item in commands}), len(commands))
+        by_name = {name: command for name, command, _ in commands}
+        self.assertEqual(
+            by_name["cache_train"][by_name["cache_train"].index("--num-workers") + 1],
+            "3",
+        )
+        self.assertEqual(
+            by_name["train_N0_signed_gin"][
+                by_name["train_N0_signed_gin"].index("--num-workers") + 1
+            ],
+            "0",
+        )
 
     def test_formal_effective_batch_is_enforced(self):
         with self.assertRaises(ValueError):
