@@ -19,6 +19,10 @@ from keysubgraph.crossfit.structured_short_term_summary import (  # noqa: E402
     MODEL_NAME,
     summarize_structured_short_term_crossfit,
 )
+from keysubgraph.models.structured_short_term import (  # noqa: E402
+    PAPER_ALIGNED_MODEL_NAME,
+    PAPER_ALIGNED_VARIANT,
+)
 
 
 def _write_json(path, payload):
@@ -78,6 +82,23 @@ class StructuredShortTermCrossfitRunnerTest(unittest.TestCase):
                 batch_size=0,
             )
 
+    def test_paper_aligned_plan_is_isolated_from_safe_outputs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            plan = build_structured_short_term_crossfit_fold_commands(
+                PROJECT_ROOT,
+                root,
+                0,
+                model_variant=PAPER_ALIGNED_VARIANT,
+            )
+        for _, command, artifact in plan:
+            self.assertIn("paper_aligned_short_term", str(artifact))
+        train = plan[1][1]
+        self.assertEqual(
+            train[train.index("--model-variant") + 1],
+            PAPER_ALIGNED_VARIANT,
+        )
+
 
 class StructuredShortTermCrossfitSummaryTest(unittest.TestCase):
     def _prediction(self, key, label, probability):
@@ -89,9 +110,15 @@ class StructuredShortTermCrossfitSummaryTest(unittest.TestCase):
             "prediction": int(probability >= 0.5),
         }
 
-    def _evaluation(self, split, predictions, threshold=0.5):
+    def _evaluation(
+        self,
+        split,
+        predictions,
+        threshold=0.5,
+        model_name=MODEL_NAME,
+    ):
         return {
-            "model_name": MODEL_NAME,
+            "model_name": model_name,
             "split": split,
             "threshold_source": "frozen_validation",
             "threshold_fit_split": "validation",
@@ -156,6 +183,33 @@ class StructuredShortTermCrossfitSummaryTest(unittest.TestCase):
             },
         )
         return assignment_path
+
+    def _paper_fixture(self, root):
+        assignments = self._fixture(root)
+        for fold in (0, 1):
+            safe = (
+                root
+                / "fold_{}".format(fold)
+                / "structured_short_term"
+                / "evaluation_seed42"
+            )
+            paper = (
+                root
+                / "fold_{}".format(fold)
+                / "paper_aligned_short_term"
+                / "evaluation_seed42"
+            )
+            paper.mkdir(parents=True, exist_ok=True)
+            for name in (
+                "validation_evaluation.json",
+                "test_evaluation.json",
+            ):
+                payload = json.loads(
+                    (safe / name).read_text(encoding="utf-8")
+                )
+                payload["model_name"] = PAPER_ALIGNED_MODEL_NAME
+                _write_json(paper / name, payload)
+        return assignments
 
     def test_summary_audits_exact_coverage_and_writes_outputs(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -241,6 +295,31 @@ class StructuredShortTermCrossfitSummaryTest(unittest.TestCase):
                     root,
                     assignments,
                 )
+
+    def test_paper_summary_uses_separate_paths_and_model_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            assignments = self._paper_fixture(root)
+            result = summarize_structured_short_term_crossfit(
+                root,
+                assignments,
+                model_variant=PAPER_ALIGNED_VARIANT,
+            )
+            payload = json.loads(
+                result["summary_json"].read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                payload["model_name"],
+                PAPER_ALIGNED_MODEL_NAME,
+            )
+            self.assertEqual(
+                payload["model_variant"],
+                PAPER_ALIGNED_VARIANT,
+            )
+            self.assertIn(
+                "paper_aligned_short_term_seed42",
+                str(result["summary_json"]),
+            )
 
 
 if __name__ == "__main__":

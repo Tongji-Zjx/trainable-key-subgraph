@@ -16,9 +16,15 @@ from .sv_signed_gin_summary import (
     _sha256,
     _site_stratified_auc,
 )
+from keysubgraph.models.structured_short_term import (
+    PAPER_ALIGNED_MODEL_NAME,
+    PAPER_ALIGNED_VARIANT,
+    STRUCTURED_SAFE_MODEL_NAME,
+    STRUCTURED_SAFE_VARIANT,
+)
 
 
-MODEL_NAME = "coordinate_free_community_structured_short_term"
+MODEL_NAME = STRUCTURED_SAFE_MODEL_NAME
 
 
 def _load_json(path: Path) -> Mapping[str, Any]:
@@ -58,10 +64,11 @@ def _validate_evaluation(
     evaluation,
     split,
     expected,
+    expected_model_name=MODEL_NAME,
     expected_threshold=None,
 ):
     if (
-        evaluation.get("model_name") != MODEL_NAME
+        evaluation.get("model_name") != expected_model_name
         or evaluation.get("split") != split
         or evaluation.get("threshold_source") != "frozen_validation"
         or evaluation.get("threshold_fit_split") != "validation"
@@ -108,17 +115,28 @@ def summarize_structured_short_term_crossfit(
     seed: int = 42,
     output_dir: Path = None,
     overwrite: bool = False,
+    model_variant: str = STRUCTURED_SAFE_VARIANT,
 ) -> Dict[str, Any]:
     """Validate and aggregate exactly one outer-test prediction per sample."""
 
     output_root = Path(output_root).resolve()
     fold_assignments = Path(fold_assignments).resolve()
+    if model_variant == PAPER_ALIGNED_VARIANT:
+        model_name = PAPER_ALIGNED_MODEL_NAME
+        branch_name = "paper_aligned_short_term"
+        summary_name = "paper_aligned_short_term_seed{}".format(seed)
+    elif model_variant == STRUCTURED_SAFE_VARIANT:
+        model_name = STRUCTURED_SAFE_MODEL_NAME
+        branch_name = "structured_short_term"
+        summary_name = "structured_short_term_seed{}".format(seed)
+    else:
+        raise ValueError("unsupported structured short-term variant")
     output_dir = (
         Path(output_dir).resolve()
         if output_dir is not None
         else output_root
         / "oof_summary"
-        / "structured_short_term_seed{}".format(seed)
+        / summary_name
     )
     outputs = (
         output_dir / "summary.json",
@@ -149,7 +167,7 @@ def summarize_structured_short_term_crossfit(
         evaluation_dir = (
             output_root
             / "fold_{}".format(fold)
-            / "structured_short_term"
+            / branch_name
             / "evaluation_seed{}".format(seed)
         )
         validation_path = evaluation_dir / "validation_evaluation.json"
@@ -167,12 +185,14 @@ def summarize_structured_short_term_crossfit(
             validation,
             "validation",
             expected[fold]["inner_validation"],
+            expected_model_name=model_name,
         )
         test = _load_json(test_path)
         _, predictions = _validate_evaluation(
             test,
             "test",
             expected[fold]["outer_test"],
+            expected_model_name=model_name,
             expected_threshold=threshold,
         )
 
@@ -250,7 +270,8 @@ def summarize_structured_short_term_crossfit(
         "artifact_type": (
             "structured_short_term_crossfit_oof_summary"
         ),
-        "model_name": MODEL_NAME,
+        "model_name": model_name,
+        "model_variant": model_variant,
         "seed": int(seed),
         "num_outer_folds": num_folds,
         "threshold_policy": (
@@ -275,7 +296,7 @@ def summarize_structured_short_term_crossfit(
     lines = [
         "# 结构化短期分支 3-fold OOF 汇总",
         "",
-        "- 模型：`{}`".format(MODEL_NAME),
+        "- 模型：`{}`".format(model_name),
         "- 外折数：{}".format(num_folds),
         "- OOF 样本数：{}".format(len(oof_rows)),
         "- 每个样本恰好一次 outer-test 预测：是",

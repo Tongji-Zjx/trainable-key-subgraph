@@ -66,6 +66,9 @@ def main():
         args.checkpoint,
         device,
     )
+    uses_community_embedding = bool(
+        model.config.variant == "paper_aligned_no_coordinate"
+    )
     protocol_hash = file_sha256(args.protocol)
     if checkpoint.get("protocol_sha256") != protocol_hash:
         raise ValueError("checkpoint protocol hash mismatch")
@@ -139,7 +142,13 @@ def main():
                 ),
                 "",
                 "- Coordinate features: disabled",
-                "- Raw community embedding: disabled",
+                "- Raw community embedding: {}".format(
+                    "enabled" if uses_community_embedding else "disabled"
+                ),
+                "- Sequence statistics branch: {}".format(
+                    "disabled" if uses_community_embedding else "enabled"
+                ),
+                "- Model variant: `{}`".format(model.config.variant),
                 "- Threshold source: validation ({})".format(
                     args.threshold_strategy
                 ),

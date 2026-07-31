@@ -17,6 +17,10 @@ if str(SRC_ROOT) not in sys.path:
 from keysubgraph.crossfit.structured_short_term_runner import (  # noqa: E402
     build_structured_short_term_crossfit_fold_commands,
 )
+from keysubgraph.models.structured_short_term import (  # noqa: E402
+    PAPER_ALIGNED_VARIANT,
+    STRUCTURED_SAFE_VARIANT,
+)
 
 
 def parse_args():
@@ -29,6 +33,11 @@ def parse_args():
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--evaluation-batch-size", type=int, default=8)
     parser.add_argument("--num-workers", type=int, default=2)
+    parser.add_argument(
+        "--model-variant",
+        choices=(STRUCTURED_SAFE_VARIANT, PAPER_ALIGNED_VARIANT),
+        default=STRUCTURED_SAFE_VARIANT,
+    )
     parser.add_argument("--print-only", action="store_true")
     return parser.parse_args()
 
@@ -77,6 +86,7 @@ def main():
         batch_size=args.batch_size,
         evaluation_batch_size=args.evaluation_batch_size,
         num_workers=args.num_workers,
+        model_variant=args.model_variant,
     )
     if args.print_only:
         print(

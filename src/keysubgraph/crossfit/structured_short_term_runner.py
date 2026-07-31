@@ -6,6 +6,11 @@ import sys
 from pathlib import Path
 from typing import List, Tuple
 
+from keysubgraph.models.structured_short_term import (
+    PAPER_ALIGNED_VARIANT,
+    STRUCTURED_SAFE_VARIANT,
+)
+
 
 def _command(*values) -> List[str]:
     return [str(value) for value in values]
@@ -21,6 +26,7 @@ def build_structured_short_term_crossfit_fold_commands(
     batch_size: int = 4,
     evaluation_batch_size: int = 8,
     num_workers: int = 2,
+    model_variant: str = STRUCTURED_SAFE_VARIANT,
 ) -> List[Tuple[str, List[str], Path]]:
     """Return ordered fold-local commands and completion artifacts."""
 
@@ -32,11 +38,21 @@ def build_structured_short_term_crossfit_fold_commands(
         raise ValueError("invalid structured short-term training configuration")
     if num_workers < 0:
         raise ValueError("num_workers must be non-negative")
+    if model_variant not in (
+        STRUCTURED_SAFE_VARIANT,
+        PAPER_ALIGNED_VARIANT,
+    ):
+        raise ValueError("unsupported structured short-term variant")
 
     python = sys.executable
     fold_root = output_root / "fold_{}".format(fold)
     protocol = fold_root / "protocol" / "data_protocol.json"
-    branch_root = fold_root / "structured_short_term"
+    branch_name = (
+        "paper_aligned_short_term"
+        if model_variant == PAPER_ALIGNED_VARIANT
+        else "structured_short_term"
+    )
+    branch_root = fold_root / branch_name
     standardizer = branch_root / "standardizer.json"
     training = branch_root / "training_seed{}".format(seed)
     evaluation = branch_root / "evaluation_seed{}".format(seed)
@@ -90,6 +106,8 @@ def build_structured_short_term_crossfit_fold_commands(
                 15,
                 "--selection-metric",
                 "roc_auc",
+                "--model-variant",
+                model_variant,
             ),
             training / "best_evaluation.json",
         ),

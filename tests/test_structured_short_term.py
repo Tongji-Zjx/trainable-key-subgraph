@@ -16,6 +16,7 @@ from keysubgraph.features.structured_short_term_features import (
     fit_structured_short_term_standardizer,
 )
 from keysubgraph.models.structured_short_term import (
+    PAPER_ALIGNED_VARIANT,
     StructuredShortTermClassifier,
     StructuredShortTermConfig,
 )
@@ -278,6 +279,102 @@ class StructuredShortTermModelTest(unittest.TestCase):
             original = model(GraphSequenceBatch((self.left,))).logits
             permuted = model(GraphSequenceBatch((changed,))).logits
         self.assertTrue(torch.allclose(original, permuted, atol=1.0e-6))
+
+    def test_paper_aligned_variant_uses_raw_community_and_no_statistics(self):
+        config = StructuredShortTermConfig(
+            hidden_dim=16,
+            node_ffn_dim=24,
+            transformer_layers=1,
+            transformer_heads=4,
+            transformer_ffn_dim=32,
+            memory_slots=5,
+            statistics_embedding_dim=8,
+            classifier_hidden_dims=(12, 6),
+            dropout=0.0,
+            variant=PAPER_ALIGNED_VARIANT,
+            community_vocab_size=128,
+            community_embedding_dim=6,
+        )
+        model = StructuredShortTermClassifier(
+            config,
+            _identity_standardizer(),
+        )
+        batch = GraphSequenceBatch((self.left, self.right))
+        memory_before = model.memory_readout.memory.detach().clone()
+        output = model(batch)
+        first = output.window_encodings[0][0]
+        self.assertEqual(tuple(first.node_features.shape), (4, 8))
+        self.assertTrue(
+            torch.allclose(
+                first.absolute_degree,
+                torch.tensor([1.0, 1.0, 1.0, 1.2]),
+                atol=1.0e-6,
+            )
+        )
+        self.assertTrue(
+            torch.equal(
+                first.delta_absolute_degree,
+                torch.zeros_like(first.delta_absolute_degree),
+            )
+        )
+        self.assertEqual(first.community_indices.tolist(), [8, 8, 4, 4])
+        self.assertEqual(tuple(output.sequence_statistics.shape), (2, 0))
+        self.assertEqual(
+            tuple(output.statistics_representation.shape),
+            (2, 0),
+        )
+        self.assertEqual(tuple(output.final_representation.shape), (2, 32))
+        self.assertIsNotNone(output.memory_update)
+        self.assertTrue(output.diagnostics["uses_community_embedding"])
+        self.assertFalse(output.diagnostics["uses_sequence_statistics"])
+        loss = torch.nn.functional.cross_entropy(
+            output.logits,
+            batch.labels,
+        )
+        loss.backward()
+        self.assertGreater(
+            float(
+                model.window_encoder.community_embedding.weight.grad
+                .abs().sum()
+            ),
+            0.0,
+        )
+        self.assertGreater(
+            float(
+                model.memory_readout.write_projection.weight.grad
+                .abs().sum()
+            ),
+            0.0,
+        )
+        model.commit_memory_write(output.memory_update)
+        self.assertFalse(
+            torch.equal(memory_before, model.memory_readout.memory)
+        )
+
+    def test_paper_memory_is_read_only_during_evaluation(self):
+        config = StructuredShortTermConfig(
+            hidden_dim=16,
+            node_ffn_dim=24,
+            transformer_layers=1,
+            transformer_heads=4,
+            transformer_ffn_dim=32,
+            memory_slots=5,
+            statistics_embedding_dim=8,
+            classifier_hidden_dims=(12, 6),
+            dropout=0.0,
+            variant=PAPER_ALIGNED_VARIANT,
+            community_vocab_size=128,
+            community_embedding_dim=6,
+        )
+        model = StructuredShortTermClassifier(
+            config,
+            _identity_standardizer(),
+        ).eval()
+        before = model.memory_readout.memory.detach().clone()
+        with torch.no_grad():
+            output = model(GraphSequenceBatch((self.left, self.right)))
+        self.assertIsNone(output.memory_update)
+        self.assertTrue(torch.equal(before, model.memory_readout.memory))
 
 
 if __name__ == "__main__":

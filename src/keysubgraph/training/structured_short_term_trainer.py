@@ -16,6 +16,8 @@ from keysubgraph.features.structured_short_term_features import (
     StructuredShortTermStandardizer,
 )
 from keysubgraph.models.structured_short_term import (
+    PAPER_ALIGNED_MODEL_NAME,
+    STRUCTURED_SAFE_MODEL_NAME,
     StructuredShortTermClassifier,
     StructuredShortTermConfig,
 )
@@ -171,6 +173,7 @@ def run_structured_short_term_epoch(
                 )
                 gradient_norms.append(float(gradient_norm.detach().cpu()))
                 optimizer.step()
+                model.commit_memory_write(output.memory_update)
         count = int(labels.numel())
         sample_total += count
         weighted_loss_total += float(weighted_loss.detach().cpu()) * count
@@ -310,7 +313,10 @@ def load_structured_short_term_checkpoint(
         != STRUCTURED_SHORT_TERM_CHECKPOINT_SCHEMA_VERSION
     ):
         raise ValueError("unsupported structured short-term checkpoint schema")
-    if payload.get("model_config") != model.config.to_dict():
+    payload_config = StructuredShortTermConfig.from_dict(
+        payload["model_config"]
+    ).to_dict()
+    if payload_config != model.config.to_dict():
         raise ValueError("structured short-term model configuration mismatch")
     if payload.get("standardizer") != model.standardizer.to_dict():
         raise ValueError("structured short-term standardizer mismatch")
@@ -334,13 +340,18 @@ def model_from_structured_short_term_checkpoint(
     device: torch.device,
 ) -> Tuple[StructuredShortTermClassifier, Dict[str, Any]]:
     payload = _trusted_load(path, device)
-    if payload.get("model_name") != StructuredShortTermClassifier.model_name:
+    if payload.get("model_name") not in (
+        STRUCTURED_SAFE_MODEL_NAME,
+        PAPER_ALIGNED_MODEL_NAME,
+    ):
         raise ValueError("not a structured short-term checkpoint")
     config = StructuredShortTermConfig.from_dict(payload["model_config"])
     standardizer = StructuredShortTermStandardizer.from_dict(
         payload["standardizer"]
     )
     model = StructuredShortTermClassifier(config, standardizer).to(device)
+    if payload.get("model_name") != model.model_name:
+        raise ValueError("structured short-term checkpoint variant mismatch")
     model.load_state_dict(payload["model_state_dict"])
     return model, payload
 

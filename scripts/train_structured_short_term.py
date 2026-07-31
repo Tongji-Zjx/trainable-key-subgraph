@@ -29,6 +29,8 @@ from keysubgraph.features.structured_short_term_features import (  # noqa: E402
     StructuredShortTermStandardizer,
 )
 from keysubgraph.models.structured_short_term import (  # noqa: E402
+    PAPER_ALIGNED_VARIANT,
+    STRUCTURED_SAFE_VARIANT,
     StructuredShortTermClassifier,
     StructuredShortTermConfig,
 )
@@ -67,6 +69,13 @@ def parse_args():
     parser.add_argument("--transformer-heads", type=int, default=4)
     parser.add_argument("--transformer-ffn-dim", type=int, default=128)
     parser.add_argument("--memory-slots", type=int, default=8)
+    parser.add_argument(
+        "--model-variant",
+        choices=(STRUCTURED_SAFE_VARIANT, PAPER_ALIGNED_VARIANT),
+        default=STRUCTURED_SAFE_VARIANT,
+    )
+    parser.add_argument("--community-vocab-size", type=int, default=128)
+    parser.add_argument("--community-embedding-dim", type=int, default=16)
     parser.add_argument("--statistics-embedding-dim", type=int, default=16)
     parser.add_argument("--classifier-hidden-1", type=int, default=64)
     parser.add_argument("--classifier-hidden-2", type=int, default=32)
@@ -150,6 +159,9 @@ def main():
                 args.classifier_hidden_2,
             ),
             dropout=args.dropout,
+            variant=args.model_variant,
+            community_vocab_size=args.community_vocab_size,
+            community_embedding_dim=args.community_embedding_dim,
         ),
         standardizer,
     )
@@ -199,7 +211,13 @@ def main():
             "train_sample_count": len(train_dataset),
             "validation_sample_count": len(validation_dataset),
             "uses_coordinates": False,
-            "uses_community_embedding": False,
+            "uses_community_embedding": (
+                args.model_variant == PAPER_ALIGNED_VARIANT
+            ),
+            "uses_sequence_statistics": (
+                args.model_variant != PAPER_ALIGNED_VARIANT
+            ),
+            "model_variant": args.model_variant,
             "elapsed_seconds": time.perf_counter() - started,
             "cuda_peak_memory_mib": (
                 torch.cuda.max_memory_allocated(device) / (1024.0 * 1024.0)

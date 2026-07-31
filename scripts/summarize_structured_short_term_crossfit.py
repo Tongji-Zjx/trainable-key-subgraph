@@ -16,6 +16,10 @@ if str(SRC_ROOT) not in sys.path:
 from keysubgraph.crossfit.structured_short_term_summary import (  # noqa: E402
     summarize_structured_short_term_crossfit,
 )
+from keysubgraph.models.structured_short_term import (  # noqa: E402
+    PAPER_ALIGNED_VARIANT,
+    STRUCTURED_SAFE_VARIANT,
+)
 
 
 def parse_args():
@@ -24,6 +28,11 @@ def parse_args():
     parser.add_argument("--fold-assignments", type=Path)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--output-dir", type=Path)
+    parser.add_argument(
+        "--model-variant",
+        choices=(STRUCTURED_SAFE_VARIANT, PAPER_ALIGNED_VARIANT),
+        default=STRUCTURED_SAFE_VARIANT,
+    )
     parser.add_argument("--overwrite", action="store_true")
     return parser.parse_args()
 
@@ -43,6 +52,7 @@ def main():
         seed=args.seed,
         output_dir=args.output_dir,
         overwrite=args.overwrite,
+        model_variant=args.model_variant,
     )
     print(
         json.dumps(
