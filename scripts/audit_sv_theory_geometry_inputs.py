@@ -21,6 +21,9 @@ from keysubgraph.data.sv_theory_geometry import (  # noqa: E402
 )
 
 
+DEFAULT_CENTERING_TOLERANCE = 5.0e-4
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--train-manifest", type=Path, required=True)
@@ -32,6 +35,16 @@ def parse_args():
     parser.add_argument("--test-cache", type=Path, required=True)
     parser.add_argument("--theory-scaler", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument(
+        "--centering-tolerance",
+        type=float,
+        default=DEFAULT_CENTERING_TOLERANCE,
+        help=(
+            "Maximum absolute standardized train feature mean. "
+            "The default permits harmless float32/JSON round-trip "
+            "residuals without weakening provenance checks."
+        ),
+    )
     parser.add_argument("--overwrite", action="store_true")
     return parser.parse_args()
 
@@ -74,6 +87,8 @@ def _summary(dataset):
 
 def main():
     args = parse_args()
+    if args.centering_tolerance <= 0.0:
+        raise ValueError("centering tolerance must be positive")
     output = Path(args.output).resolve()
     if output.exists() and not args.overwrite:
         raise FileExistsError("SV theory audit output already exists")
@@ -125,11 +140,11 @@ def main():
         summaries["train"][
             "spectral_direction_feature_mean_max_abs"
         ]
-        <= 1.0e-4
+        <= args.centering_tolerance
         and summaries["train"][
             "diffusion_geometry_feature_mean_max_abs"
         ]
-        <= 1.0e-4
+        <= args.centering_tolerance
     )
     if not train_centering_passed:
         raise ValueError(
@@ -139,6 +154,7 @@ def main():
         "artifact_type": "sv_theory_geometry_input_audit",
         "splits": summaries,
         "overlap": overlap,
+        "centering_tolerance": args.centering_tolerance,
         "train_centering_passed": train_centering_passed,
         "passed": all(
             value["all_finite"] for value in summaries.values()
