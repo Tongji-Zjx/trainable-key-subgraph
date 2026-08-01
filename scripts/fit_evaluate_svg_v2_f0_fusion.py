@@ -19,7 +19,7 @@ if str(SRC_ROOT) not in sys.path:
 from keysubgraph.analysis.svg_v2_f0_fusion import (  # noqa: E402
     apply_f0_fusion,
     fit_f0_fusion,
-    read_prediction_csv,
+    read_prediction_artifact,
 )
 
 
@@ -64,10 +64,10 @@ def main():
     prediction_path = output / "predictions.csv"
     if (result_path.exists() or prediction_path.exists()) and not args.overwrite:
         raise FileExistsError("F0 fusion output exists")
-    fit_short = read_prediction_csv(args.fit_short_term)
-    fit_svg = read_prediction_csv(args.fit_svg)
-    eval_short = read_prediction_csv(args.evaluate_short_term)
-    eval_svg = read_prediction_csv(args.evaluate_svg)
+    fit_short = read_prediction_artifact(args.fit_short_term)
+    fit_svg = read_prediction_artifact(args.fit_svg)
+    eval_short = read_prediction_artifact(args.evaluate_short_term)
+    eval_svg = read_prediction_artifact(args.evaluate_svg)
     fit_keys = set(fit_short)
     evaluate_keys = set(eval_short)
     if fit_keys.intersection(evaluate_keys):

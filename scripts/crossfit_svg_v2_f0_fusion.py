@@ -1,4 +1,4 @@
-"""Strictly cross-fit F0 fusion from aligned short-term and SVG OOF files."""
+"""Run the explicitly non-nested outer-OOF F0 fusion diagnostic."""
 
 from __future__ import absolute_import, print_function
 
@@ -17,7 +17,7 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from keysubgraph.analysis.svg_v2_f0_fusion import (  # noqa: E402
-    crossfit_f0_fusion,
+    crossfit_oof_f0_fusion,
     read_crossfit_prediction_csv,
 )
 
@@ -55,10 +55,10 @@ def main():
     result_path = output / "evaluation.json"
     prediction_path = output / "oof_predictions.csv"
     if (result_path.exists() or prediction_path.exists()) and not args.overwrite:
-        raise FileExistsError("strict F0 cross-fit output exists")
+        raise FileExistsError("outer-OOF F0 diagnostic output exists")
     short_term = read_crossfit_prediction_csv(args.short_term_oof)
     svg = read_crossfit_prediction_csv(args.svg_oof)
-    result = crossfit_f0_fusion(
+    result = crossfit_oof_f0_fusion(
         short_term,
         svg,
         l1_weight=args.l1_weight,
@@ -66,10 +66,12 @@ def main():
     )
     predictions = result.pop("predictions")
     payload = {
-        "artifact_type": "svg_v2_short_term_f0_strict_crossfit_evaluation",
-        "fusion_protocol": "strict_crossfit",
+        "artifact_type": "svg_v2_short_term_f0_outer_oof_diagnostic",
+        "fusion_protocol": "outer_oof_crossfit_surrogate",
+        "strict_nested_stacking": False,
+        "formal_f0_estimate": False,
         "every_sample_predicted_once": True,
-        "test_threshold_fitting": False,
+        "held_fold_threshold_fitting": False,
         "source_sha256": {
             "short_term_oof": _sha256(args.short_term_oof),
             "svg_oof": _sha256(args.svg_oof),

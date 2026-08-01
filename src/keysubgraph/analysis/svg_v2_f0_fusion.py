@@ -3,6 +3,7 @@
 from __future__ import absolute_import, division, print_function
 
 import csv
+import json
 import math
 from collections import Counter
 from pathlib import Path
@@ -40,6 +41,33 @@ def read_prediction_csv(path: Path) -> Dict[str, Dict[str, object]]:
             }
     if not rows:
         raise ValueError("fusion prediction file is empty")
+    return rows
+
+
+def read_prediction_artifact(path: Path) -> Dict[str, Dict[str, object]]:
+    """Read either a prediction CSV or an evaluation JSON artifact."""
+
+    path = Path(path).resolve()
+    if path.suffix.lower() == ".csv":
+        return read_prediction_csv(path)
+    if path.suffix.lower() != ".json":
+        raise ValueError("prediction artifact must be CSV or JSON")
+    with path.open("r", encoding="utf-8") as handle:
+        payload = json.load(handle)
+    predictions = payload.get("predictions")
+    if not isinstance(predictions, list) or not predictions:
+        raise ValueError("evaluation JSON has no predictions")
+    rows = {}
+    for row in predictions:
+        key = str(row["sample_key"])
+        if key in rows:
+            raise ValueError("fusion predictions contain duplicate samples")
+        rows[key] = {
+            "sample_key": key,
+            "label": int(row["label"]),
+            "site": str(row["site"]),
+            "positive_probability": float(row["positive_probability"]),
+        }
     return rows
 
 
@@ -273,19 +301,24 @@ def _crossfit_classification_metrics(predictions):
     }
 
 
-def crossfit_f0_fusion(
+def crossfit_oof_f0_fusion(
     short_term_oof: Mapping[str, Mapping[str, object]],
     svg_oof: Mapping[str, Mapping[str, object]],
     l1_weight: float = 1.0e-3,
     optimization_steps: int = 2000,
 ) -> Dict[str, object]:
-    """Fit the F0 meta-learner out of fold and predict every sample once."""
+    """Run a leave-one-outer-fold-out OOF fusion diagnostic.
+
+    This is useful as a cheap robustness diagnostic, but it is not the nested
+    inner cross-fitting protocol used for the formal F0 estimate because the
+    underlying base-model training sets overlap across outer folds.
+    """
 
     if set(short_term_oof) != set(svg_oof):
         raise ValueError("fusion branches do not cover the same samples")
     folds = sorted({int(row["fold"]) for row in short_term_oof.values()})
     if len(folds) < 2:
-        raise ValueError("strict F0 cross-fit requires at least two folds")
+        raise ValueError("OOF F0 cross-fit requires at least two folds")
     predictions = []
     fold_results = []
     for fold in folds:
@@ -331,9 +364,9 @@ def crossfit_f0_fusion(
             }
         )
     if len(predictions) != len(short_term_oof):
-        raise RuntimeError("strict F0 did not predict every OOF sample once")
+        raise RuntimeError("OOF F0 did not predict every sample once")
     if len({row["sample_key"] for row in predictions}) != len(predictions):
-        raise RuntimeError("strict F0 generated duplicate OOF predictions")
+        raise RuntimeError("OOF F0 generated duplicate predictions")
     predictions.sort(key=lambda row: (int(row["fold"]), row["sample_key"]))
     return {
         "folds": folds,
