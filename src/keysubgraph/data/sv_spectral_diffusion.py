@@ -156,7 +156,11 @@ def validate_sv_spectral_diffusion_record(
         )
         if not torch.allclose(
             identity,
-            torch.eye(count, dtype=identity.dtype),
+            torch.eye(
+                count,
+                dtype=identity.dtype,
+                device=identity.device,
+            ),
             atol=2.0e-4,
             rtol=0.0,
         ):
