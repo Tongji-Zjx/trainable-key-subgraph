@@ -4,6 +4,7 @@ import unittest
 
 from keysubgraph.analysis.svg_v2_f0_fusion import (
     apply_f0_fusion,
+    crossfit_f0_fusion,
     fit_f0_fusion,
 )
 
@@ -39,6 +40,32 @@ class SVGv2F0FusionTest(unittest.TestCase):
         svg = _branch("other", (0.2, 0.7))
         with self.assertRaisesRegex(ValueError, "same samples"):
             fit_f0_fusion(short, svg, optimization_steps=2)
+
+    def test_strict_crossfit_predicts_each_sample_once(self):
+        short = _branch(
+            "oof", (0.10, 0.90, 0.20, 0.80, 0.15, 0.85, 0.25, 0.75)
+        )
+        svg = _branch(
+            "oof", (0.30, 0.70, 0.35, 0.65, 0.40, 0.60, 0.45, 0.55)
+        )
+        for index, key in enumerate(sorted(short)):
+            short[key]["fold"] = (index // 2) % 2
+            svg[key]["fold"] = (index // 2) % 2
+        result = crossfit_f0_fusion(
+            short, svg, optimization_steps=30
+        )
+        self.assertEqual(result["folds"], [0, 1])
+        self.assertEqual(len(result["predictions"]), len(short))
+        self.assertEqual(
+            len({row["sample_key"] for row in result["predictions"]}),
+            len(short),
+        )
+        self.assertTrue(
+            all(
+                row["fit_and_evaluation_disjoint"]
+                for row in result["fold_results"]
+            )
+        )
 
 
 if __name__ == "__main__":

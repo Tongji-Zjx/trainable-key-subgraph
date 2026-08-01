@@ -4,6 +4,7 @@ from __future__ import absolute_import, division, print_function
 
 import csv
 import math
+from collections import Counter
 from pathlib import Path
 from typing import Dict, Mapping, Sequence, Tuple
 
@@ -33,6 +34,31 @@ def read_prediction_csv(path: Path) -> Dict[str, Dict[str, object]]:
                 raise ValueError("fusion predictions contain duplicate samples")
             rows[key] = {
                 "sample_key": key,
+                "label": int(row["label"]),
+                "site": str(row["site"]),
+                "positive_probability": float(row["positive_probability"]),
+            }
+    if not rows:
+        raise ValueError("fusion prediction file is empty")
+    return rows
+
+
+def read_crossfit_prediction_csv(
+    path: Path,
+) -> Dict[str, Dict[str, object]]:
+    """Read OOF predictions while retaining immutable outer-fold identity."""
+
+    rows = {}
+    with Path(path).resolve().open("r", encoding="utf-8", newline="") as handle:
+        for row in csv.DictReader(handle):
+            key = str(row["sample_key"])
+            if key in rows:
+                raise ValueError("fusion predictions contain duplicate samples")
+            if "fold" not in row or row["fold"] in (None, ""):
+                raise ValueError("cross-fit fusion predictions require fold")
+            rows[key] = {
+                "sample_key": key,
+                "fold": int(row["fold"]),
                 "label": int(row["label"]),
                 "site": str(row["site"]),
                 "positive_probability": float(row["positive_probability"]),
@@ -203,3 +229,115 @@ def apply_f0_fusion(
         for index, key in enumerate(keys)
     ]
     return {"metrics": metrics, "predictions": predictions}
+
+
+def _crossfit_classification_metrics(predictions):
+    labels = [int(row["label"]) for row in predictions]
+    probabilities = [float(row["positive_probability"]) for row in predictions]
+    sites = [str(row["site"]) for row in predictions]
+    counts = Counter()
+    for row in predictions:
+        label = int(row["label"])
+        predicted = int(row["predicted_label"])
+        if label == 1 and predicted == 1:
+            counts["tp"] += 1
+        elif label == 1:
+            counts["fn"] += 1
+        elif predicted == 1:
+            counts["fp"] += 1
+        else:
+            counts["tn"] += 1
+    tp, fn = counts["tp"], counts["fn"]
+    tn, fp = counts["tn"], counts["fp"]
+    sensitivity = tp / float(tp + fn)
+    specificity = tn / float(tn + fp)
+    precision = tp / float(tp + fp) if tp + fp else 0.0
+    f1 = (
+        2.0 * precision * sensitivity / (precision + sensitivity)
+        if precision + sensitivity
+        else 0.0
+    )
+    auc = binary_metrics(labels, probabilities, 0.5)["roc_auc"]
+    return {
+        "sample_count": len(predictions),
+        "roc_auc": auc,
+        "site_stratified_roc_auc": site_stratified_roc_auc(
+            labels, probabilities, sites
+        ),
+        "accuracy": (tp + tn) / float(len(predictions)),
+        "balanced_accuracy": 0.5 * (sensitivity + specificity),
+        "f1": f1,
+        "sensitivity": sensitivity,
+        "specificity": specificity,
+        "confusion_matrix": [[tn, fp], [fn, tp]],
+    }
+
+
+def crossfit_f0_fusion(
+    short_term_oof: Mapping[str, Mapping[str, object]],
+    svg_oof: Mapping[str, Mapping[str, object]],
+    l1_weight: float = 1.0e-3,
+    optimization_steps: int = 2000,
+) -> Dict[str, object]:
+    """Fit the F0 meta-learner out of fold and predict every sample once."""
+
+    if set(short_term_oof) != set(svg_oof):
+        raise ValueError("fusion branches do not cover the same samples")
+    folds = sorted({int(row["fold"]) for row in short_term_oof.values()})
+    if len(folds) < 2:
+        raise ValueError("strict F0 cross-fit requires at least two folds")
+    predictions = []
+    fold_results = []
+    for fold in folds:
+        fit_keys = {
+            key
+            for key, row in short_term_oof.items()
+            if int(row["fold"]) != fold
+        }
+        evaluate_keys = set(short_term_oof).difference(fit_keys)
+        if not fit_keys or not evaluate_keys or fit_keys & evaluate_keys:
+            raise ValueError("invalid F0 fit/evaluation fold partition")
+        for key in set(short_term_oof):
+            if int(short_term_oof[key]["fold"]) != int(svg_oof[key]["fold"]):
+                raise ValueError("fusion branch fold identity mismatch")
+        short_fit = {key: short_term_oof[key] for key in fit_keys}
+        svg_fit = {key: svg_oof[key] for key in fit_keys}
+        short_evaluate = {key: short_term_oof[key] for key in evaluate_keys}
+        svg_evaluate = {key: svg_oof[key] for key in evaluate_keys}
+        fitted = fit_f0_fusion(
+            short_fit,
+            svg_fit,
+            l1_weight=l1_weight,
+            optimization_steps=optimization_steps,
+        )
+        evaluated = apply_f0_fusion(fitted, short_evaluate, svg_evaluate)
+        current = []
+        for row in evaluated["predictions"]:
+            enriched = dict(row)
+            enriched["fold"] = int(fold)
+            current.append(enriched)
+        predictions.extend(current)
+        fold_spec = dict(fitted)
+        fold_spec.pop("fit_sample_keys")
+        fold_spec.pop("fit_sites")
+        fold_results.append(
+            {
+                "fold": int(fold),
+                "fit_sample_count": len(fit_keys),
+                "evaluation_sample_count": len(evaluate_keys),
+                "fit_and_evaluation_disjoint": True,
+                "fitted": fold_spec,
+                "metrics": evaluated["metrics"],
+            }
+        )
+    if len(predictions) != len(short_term_oof):
+        raise RuntimeError("strict F0 did not predict every OOF sample once")
+    if len({row["sample_key"] for row in predictions}) != len(predictions):
+        raise RuntimeError("strict F0 generated duplicate OOF predictions")
+    predictions.sort(key=lambda row: (int(row["fold"]), row["sample_key"]))
+    return {
+        "folds": folds,
+        "fold_results": fold_results,
+        "metrics": _crossfit_classification_metrics(predictions),
+        "predictions": predictions,
+    }
