@@ -83,7 +83,7 @@ def build_svg_v2_fold_commands(
     device: str = "cuda",
     seed: int = 42,
     model_epochs: int = 60,
-    num_workers: int = 2,
+    num_workers: int = 0,
 ) -> List[Tuple[str, List[str], Path]]:
     """Build a leakage-safe fold plan using existing frozen hard caches."""
 

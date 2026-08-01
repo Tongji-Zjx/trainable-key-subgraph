@@ -29,7 +29,7 @@ for FOLD in 0 1; do
     --device "$DEVICE" \
     --seed 42 \
     --model-epochs 60 \
-    --num-workers 2 \
+    --num-workers 0 \
     2>&1 | tee -a "$LOG_FILE"
   echo "===== FINISH SVG-v2 screen fold=$FOLD =====" | tee -a "$LOG_FILE"
 done

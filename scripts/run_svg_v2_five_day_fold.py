@@ -38,7 +38,15 @@ def parse_args():
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--model-epochs", type=int, default=60)
-    parser.add_argument("--num-workers", type=int, default=2)
+    parser.add_argument(
+        "--num-workers",
+        type=int,
+        default=0,
+        help=(
+            "the graph cache is already memory-resident; zero avoids "
+            "file-descriptor exhaustion from sharing thousands of tensors"
+        ),
+    )
     parser.add_argument("--print-only", action="store_true")
     return parser.parse_args()
 
