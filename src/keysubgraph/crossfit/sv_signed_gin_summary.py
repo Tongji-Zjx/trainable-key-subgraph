@@ -167,6 +167,7 @@ def summarize_sv_signed_gin_crossfit(
     fold_assignments: Path,
     variant: str = "signed_gin_static_variation",
     seed: int = 42,
+    run_name: str = None,
     output_dir: Path = None,
     overwrite: bool = False,
 ) -> Dict[str, Any]:
@@ -179,6 +180,17 @@ def summarize_sv_signed_gin_crossfit(
         if output_dir is not None
         else output_root / "oof_summary" / "{}_seed{}".format(variant, seed)
     )
+    model_directory = (
+        str(run_name)
+        if run_name is not None
+        else "{}_seed{}".format(variant, seed)
+    )
+    if (
+        not model_directory
+        or "/" in model_directory
+        or "\\" in model_directory
+    ):
+        raise ValueError("SV summary run name must be one directory")
     outputs = (
         output_dir / "summary.json",
         output_dir / "oof_predictions.csv",
@@ -222,7 +234,7 @@ def summarize_sv_signed_gin_crossfit(
             output_root
             / "fold_{}".format(fold)
             / "models"
-            / "{}_seed{}".format(variant, seed)
+            / model_directory
             / "outer_test_evaluation.json"
         )
         if not path.is_file():
@@ -336,6 +348,7 @@ def summarize_sv_signed_gin_crossfit(
     payload = {
         "artifact_type": "sv_signed_gin_crossfit_oof_summary",
         "variant": variant,
+        "run_name": model_directory,
         "seed": int(seed),
         "num_outer_folds": num_folds,
         "threshold_policy": (

@@ -18,6 +18,13 @@ from keysubgraph.features.sv_theory_geometry import (
     SV_DIFFUSION_GEOMETRY_DIM,
     SV_SPECTRAL_DIRECTION_DIM,
 )
+from keysubgraph.features.sv_spectral_diffusion import (
+    SV_DIFFUSION_MESSAGE_TIME_SCALES,
+    SV_HKS_DIM,
+    SV_HKS_TIME_SCALES,
+    SV_SPECTRAL_STATE_DIM,
+    exact_heat_diffusion_message,
+)
 
 
 SV_SIGNED_GIN_VARIANTS = (
@@ -32,6 +39,12 @@ SV_SIGNED_GIN_VARIANTS = (
     "signed_gin_multibranch_theory_geometry",
     "signed_gin_static_anchor_residual",
     "signed_gin_static_anchor_residual_attention",
+    "svg_v2_b1_hks",
+    "svg_v2_c1_diffusion",
+    "svg_v2_c3_hks_diffusion",
+    "svg_v2_g2_signed_delta_q",
+    "svg_v2_c3_f1_residual",
+    "svg_v2_c3_g2",
 )
 SV_DEFAULT_VARIANT = "signed_gin_multibranch_late_fusion"
 SV_SIGNED_GIN_MESSAGE_MODES = (
@@ -71,6 +84,11 @@ class SVSignedGINConfig:
     gin_batch_normalization: Optional[bool] = None
     gin_residual_attention: bool = False
     residual_gate_initial_logit: float = -6.0
+    hks_dim: int = SV_HKS_DIM
+    hks_time_scales: Tuple[float, ...] = SV_HKS_TIME_SCALES
+    diffusion_message_time_scales: Tuple[float, ...] = (
+        SV_DIFFUSION_MESSAGE_TIME_SCALES
+    )
 
     def __post_init__(self) -> None:
         if self.variant not in SV_SIGNED_GIN_VARIANTS:
@@ -80,6 +98,12 @@ class SVSignedGINConfig:
             "signed_gin_multibranch_spectral_direction",
             "signed_gin_multibranch_diffusion_geometry",
             "signed_gin_multibranch_theory_geometry",
+            "svg_v2_b1_hks",
+            "svg_v2_c1_diffusion",
+            "svg_v2_c3_hks_diffusion",
+            "svg_v2_g2_signed_delta_q",
+            "svg_v2_c3_f1_residual",
+            "svg_v2_c3_g2",
         )
         defaults = {
             "message_mode": (
@@ -128,6 +152,21 @@ class SVSignedGINConfig:
             raise ValueError(
                 "SV residual gate initial logit must lie in [-20,0]"
             )
+        object.__setattr__(
+            self, "hks_time_scales", tuple(self.hks_time_scales)
+        )
+        object.__setattr__(
+            self,
+            "diffusion_message_time_scales",
+            tuple(self.diffusion_message_time_scales),
+        )
+        if (
+            self.hks_dim != SV_HKS_DIM
+            or self.hks_time_scales != tuple(SV_HKS_TIME_SCALES)
+            or self.diffusion_message_time_scales
+            != tuple(SV_DIFFUSION_MESSAGE_TIME_SCALES)
+        ):
+            raise ValueError("SVG-v2 spectral-diffusion grid is frozen")
         if self.message_mode not in SV_SIGNED_GIN_MESSAGE_MODES:
             raise ValueError("unsupported SV Signed-GIN message mode")
         if self.pooling not in SV_SIGNED_GIN_POOLING_MODES:
@@ -178,6 +217,12 @@ class SVSignedGINConfig:
             "signed_gin_multibranch_theory_geometry",
             "signed_gin_static_anchor_residual",
             "signed_gin_static_anchor_residual_attention",
+            "svg_v2_b1_hks",
+            "svg_v2_c1_diffusion",
+            "svg_v2_c3_hks_diffusion",
+            "svg_v2_g2_signed_delta_q",
+            "svg_v2_c3_f1_residual",
+            "svg_v2_c3_g2",
         )
 
     @property
@@ -206,6 +251,46 @@ class SVSignedGINConfig:
         return self.variant in (
             "signed_gin_static_anchor_residual",
             "signed_gin_static_anchor_residual_attention",
+            "svg_v2_c3_f1_residual",
+        )
+
+    @property
+    def uses_hks(self) -> bool:
+        return self.variant in (
+            "svg_v2_b1_hks",
+            "svg_v2_c3_hks_diffusion",
+            "svg_v2_c3_f1_residual",
+            "svg_v2_c3_g2",
+        )
+
+    @property
+    def uses_diffusion_messages(self) -> bool:
+        return self.variant in (
+            "svg_v2_c1_diffusion",
+            "svg_v2_c3_hks_diffusion",
+            "svg_v2_c3_f1_residual",
+            "svg_v2_c3_g2",
+        )
+
+    @property
+    def uses_signed_delta_q_auxiliary(self) -> bool:
+        return self.variant in (
+            "svg_v2_g2_signed_delta_q",
+            "svg_v2_c3_g2",
+        )
+
+    @property
+    def uses_spectral_diffusion_sidecar(self) -> bool:
+        return (
+            self.uses_hks
+            or self.uses_diffusion_messages
+            or self.uses_signed_delta_q_auxiliary
+        )
+
+    @property
+    def effective_node_feature_dim(self) -> int:
+        return self.node_feature_dim + (
+            self.hks_dim if self.uses_hks else 0
         )
 
     @property
@@ -259,11 +344,33 @@ class SVSignedGINConfig:
 class SVSignedGINWindowInput:
     node_features: torch.Tensor
     adjacency: torch.Tensor
+    time_position: int = 0
+    hks: Optional[torch.Tensor] = None
+    diffusion_eigenvalues: Optional[torch.Tensor] = None
+    diffusion_eigenvectors: Optional[torch.Tensor] = None
+    spectral_delta_to_next: Optional[torch.Tensor] = None
 
     def to(self, device) -> "SVSignedGINWindowInput":
         return SVSignedGINWindowInput(
             node_features=self.node_features.to(device),
             adjacency=self.adjacency.to(device),
+            time_position=int(self.time_position),
+            hks=self.hks.to(device) if self.hks is not None else None,
+            diffusion_eigenvalues=(
+                self.diffusion_eigenvalues.to(device)
+                if self.diffusion_eigenvalues is not None
+                else None
+            ),
+            diffusion_eigenvectors=(
+                self.diffusion_eigenvectors.to(device)
+                if self.diffusion_eigenvectors is not None
+                else None
+            ),
+            spectral_delta_to_next=(
+                self.spectral_delta_to_next.to(device)
+                if self.spectral_delta_to_next is not None
+                else None
+            ),
         )
 
 
@@ -328,6 +435,7 @@ class SVSignedGINEncoderOutput:
     representation: torch.Tensor
     window_embeddings: Tuple[torch.Tensor, ...]
     node_attention: Tuple[torch.Tensor, ...]
+    window_positions: Tuple[int, ...]
 
 
 @dataclass(frozen=True)
@@ -346,6 +454,8 @@ class SVSignedGINOutput:
     fusion_weights: Optional[torch.Tensor] = None
     residual_gates: Optional[Dict[str, torch.Tensor]] = None
     gin_normalized_representation: Optional[torch.Tensor] = None
+    signed_delta_q_predictions: Optional[torch.Tensor] = None
+    signed_delta_q_targets: Optional[torch.Tensor] = None
 
 
 class SignedGINLayer(nn.Module):
@@ -418,6 +528,88 @@ class SignedGINLayer(nn.Module):
         return self.mlp(self.signed_aggregate(node_states, adjacency))
 
 
+class SpectralDiffusionGINLayer(nn.Module):
+    """Residual local signed message plus exact multi-scale heat messages."""
+
+    def __init__(
+        self,
+        hidden_dim: int,
+        dropout: float,
+        time_scales: Tuple[float, ...],
+        learnable_epsilon: bool = True,
+        message_mode: str = "signed_normalized",
+    ) -> None:
+        super().__init__()
+        if message_mode not in (
+            "signed_weighted",
+            "signed_normalized",
+            "unsigned_weighted",
+            "unsigned_binary",
+        ):
+            raise ValueError("unsupported spectral-diffusion message mode")
+        self.message_mode = str(message_mode)
+        epsilon = torch.zeros((), dtype=torch.float32)
+        if learnable_epsilon:
+            self.epsilon = nn.Parameter(epsilon)
+        else:
+            self.register_buffer("epsilon", epsilon)
+        self.time_scales = tuple(float(value) for value in time_scales)
+        self.update = nn.Sequential(
+            nn.Linear(hidden_dim * (2 + len(self.time_scales)), hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+        )
+
+    def local_aggregate(
+        self, node_states: torch.Tensor, adjacency: torch.Tensor
+    ) -> torch.Tensor:
+        if self.message_mode == "signed_weighted":
+            positive = adjacency.clamp_min(0.0)
+            negative_magnitude = -adjacency.clamp_max(0.0)
+            message = positive.matmul(node_states) - (
+                negative_magnitude.matmul(node_states)
+            )
+        elif self.message_mode == "signed_normalized":
+            absolute_degree = adjacency.abs().sum(dim=-1).clamp_min(
+                1.0e-8
+            )
+            inverse_sqrt = absolute_degree.rsqrt()
+            normalized = (
+                inverse_sqrt[:, None]
+                * adjacency
+                * inverse_sqrt[None, :]
+            )
+            message = normalized.matmul(node_states)
+        elif self.message_mode == "unsigned_weighted":
+            message = adjacency.abs().matmul(node_states)
+        else:
+            message = (adjacency != 0.0).to(
+                node_states.dtype
+            ).matmul(node_states)
+        return (1.0 + self.epsilon.to(node_states)) * node_states + message
+
+    def forward(
+        self,
+        node_states: torch.Tensor,
+        adjacency: torch.Tensor,
+        eigenvalues: torch.Tensor,
+        eigenvectors: torch.Tensor,
+    ) -> torch.Tensor:
+        local = self.local_aggregate(node_states, adjacency)
+        diffusion = [
+            exact_heat_diffusion_message(
+                node_states,
+                eigenvalues,
+                eigenvectors,
+                time_scale,
+            )
+            for time_scale in self.time_scales
+        ]
+        return self.update(torch.cat((node_states, local, *diffusion), dim=-1))
+
+
 class SignedGINKeySubgraphEncoder(nn.Module):
     """Encode each hard window, then mean-pool valid windows."""
 
@@ -428,23 +620,35 @@ class SignedGINKeySubgraphEncoder(nn.Module):
         self.config = config or SVSignedGINConfig()
         self.node_projection = nn.Sequential(
             nn.Linear(
-                self.config.node_feature_dim,
+                self.config.effective_node_feature_dim,
                 self.config.gin_hidden_dim,
             ),
             nn.GELU(),
             nn.LayerNorm(self.config.gin_hidden_dim),
         )
-        self.layers = nn.ModuleList(
-            [
-                SignedGINLayer(
+        layer_type = (
+            SpectralDiffusionGINLayer
+            if self.config.uses_diffusion_messages
+            else SignedGINLayer
+        )
+        self.layers = nn.ModuleList()
+        for _ in range(self.config.gin_layers):
+            if layer_type is SpectralDiffusionGINLayer:
+                layer = layer_type(
+                    self.config.gin_hidden_dim,
+                    self.config.dropout,
+                    self.config.diffusion_message_time_scales,
+                    self.config.learnable_epsilon,
+                    self.config.message_mode,
+                )
+            else:
+                layer = layer_type(
                     self.config.gin_hidden_dim,
                     self.config.dropout,
                     self.config.learnable_epsilon,
                     self.config.message_mode,
                 )
-                for _ in range(self.config.gin_layers)
-            ]
-        )
+            self.layers.append(layer)
         self.residual_norms = (
             nn.ModuleList(
                 [
@@ -532,10 +736,30 @@ class SignedGINKeySubgraphEncoder(nn.Module):
             node_features.shape[0],
         ):
             raise ValueError("Signed GIN window adjacency is misaligned")
+        if self.config.uses_hks:
+            if window.hks is None or tuple(window.hks.shape) != (
+                node_features.shape[0],
+                self.config.hks_dim,
+            ):
+                raise ValueError("HKS variant requires aligned 6-D node HKS")
+            node_features = torch.cat((node_features, window.hks), dim=-1)
+        if self.config.uses_diffusion_messages and (
+            window.diffusion_eigenvalues is None
+            or window.diffusion_eigenvectors is None
+        ):
+            raise ValueError("diffusion variant requires a cached eigenbasis")
         states = self.node_projection(node_features)
         history = [states]
         for layer_index, layer in enumerate(self.layers):
-            updated = layer(states, adjacency)
+            if self.config.uses_diffusion_messages:
+                updated = layer(
+                    states,
+                    adjacency,
+                    window.diffusion_eigenvalues,
+                    window.diffusion_eigenvectors,
+                )
+            else:
+                updated = layer(states, adjacency)
             states = (
                 self.residual_norms[layer_index](states + updated)
                 if self.config.gin_residual
@@ -617,6 +841,9 @@ class SignedGINKeySubgraphEncoder(nn.Module):
             representation=representation,
             window_embeddings=tuple(embeddings),
             node_attention=tuple(attention),
+            window_positions=tuple(
+                int(window.time_position) for window in sample.windows
+            ),
         )
 
 
@@ -722,6 +949,22 @@ class SVSignedGINClassifier(nn.Module):
                 self.config.channel_projection_dim,
             )
             if self.config.uses_diffusion_geometry
+            else None
+        )
+        self.signed_delta_q_head = (
+            nn.Sequential(
+                nn.Linear(
+                    4 * self.config.gin_window_output_dim,
+                    self.config.gin_hidden_dim,
+                ),
+                nn.GELU(),
+                nn.Dropout(self.config.dropout),
+                nn.Linear(
+                    self.config.gin_hidden_dim,
+                    SV_SPECTRAL_STATE_DIM,
+                ),
+            )
+            if self.config.uses_signed_delta_q_auxiliary
             else None
         )
         if self.config.uses_late_fusion:
@@ -1002,6 +1245,40 @@ class SVSignedGINClassifier(nn.Module):
             )
             channels.append(diffusion_geometry_projected)
         final = torch.cat(channels, dim=-1)
+        signed_delta_q_predictions = None
+        signed_delta_q_targets = None
+        if self.config.uses_signed_delta_q_auxiliary:
+            prediction_inputs = []
+            target_values = []
+            for sample, encoded in zip(batch, encoder_outputs):
+                for left_index in range(len(sample.windows) - 1):
+                    left_window = sample.windows[left_index]
+                    right_window = sample.windows[left_index + 1]
+                    if (
+                        int(right_window.time_position)
+                        != int(left_window.time_position) + 1
+                        or left_window.spectral_delta_to_next is None
+                    ):
+                        continue
+                    left = encoded.window_embeddings[left_index]
+                    right = encoded.window_embeddings[left_index + 1]
+                    difference = right - left
+                    prediction_inputs.append(
+                        torch.cat(
+                            (left, right, difference, difference.abs()),
+                            dim=-1,
+                        )
+                    )
+                    target_values.append(
+                        left_window.spectral_delta_to_next
+                    )
+            if prediction_inputs:
+                signed_delta_q_predictions = self.signed_delta_q_head(
+                    torch.stack(prediction_inputs, dim=0)
+                )
+                signed_delta_q_targets = torch.stack(
+                    target_values, dim=0
+                )
         branch_logits = None
         fusion_weights = None
         residual_gates = None
@@ -1109,6 +1386,17 @@ class SVSignedGINClassifier(nn.Module):
                 "uses_multiscale_diffusion_geometry": (
                     self.config.uses_diffusion_geometry
                 ),
+                "uses_hks_node_features": self.config.uses_hks,
+                "uses_exact_heat_diffusion_messages": (
+                    self.config.uses_diffusion_messages
+                ),
+                "uses_signed_delta_q_auxiliary": (
+                    self.config.uses_signed_delta_q_auxiliary
+                ),
+                "hks_time_scales": self.config.hks_time_scales,
+                "diffusion_message_time_scales": (
+                    self.config.diffusion_message_time_scales
+                ),
             },
             branch_logits=branch_logits,
             fusion_weights=fusion_weights,
@@ -1116,4 +1404,6 @@ class SVSignedGINClassifier(nn.Module):
             gin_normalized_representation=(
                 gin_normalized_representation
             ),
+            signed_delta_q_predictions=signed_delta_q_predictions,
+            signed_delta_q_targets=signed_delta_q_targets,
         )

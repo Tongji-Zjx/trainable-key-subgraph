@@ -15,6 +15,7 @@ from keysubgraph.data.sv_signed_gin_artifact import (
     save_sv_signed_gin_record,
 )
 from keysubgraph.data.sv_signed_gin_dataset import (
+    SVBalancedBatchSampler,
     SVSignedGINDataset,
     create_sv_signed_gin_loader,
 )
@@ -209,6 +210,16 @@ class SVSignedGINDataTest(unittest.TestCase):
                 summary.samples[0].variation,
             )
         )
+
+    def test_balanced_sampler_is_reproducible_and_balances_each_batch(self):
+        labels = (0, 0, 0, 0, 0, 1, 1)
+        first = list(SVBalancedBatchSampler(labels, batch_size=4, seed=17))
+        replay = list(SVBalancedBatchSampler(labels, batch_size=4, seed=17))
+        self.assertEqual(first, replay)
+        for batch in first:
+            observed = [labels[index] for index in batch]
+            self.assertEqual(observed.count(0), 2)
+            self.assertEqual(observed.count(1), 2)
 
 
 if __name__ == "__main__":

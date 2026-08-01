@@ -42,6 +42,11 @@ class SVSignedGINTrainingConfig:
     selection_metric: str = "composite_auc"
     auxiliary_loss_weight: float = 0.0
     residual_gate_penalty_weight: float = 0.01
+    signed_delta_q_weight: float = 0.0
+    label_smoothing: float = 0.0
+    scheduler_mode: str = "plateau"
+    minimum_epochs: int = 0
+    use_class_weights: bool = True
     seed: int = 42
     max_train_batches: Optional[int] = None
     max_validation_batches: Optional[int] = None
@@ -69,6 +74,14 @@ class SVSignedGINTrainingConfig:
             raise ValueError(
                 "SV residual gate penalty weight cannot be negative"
             )
+        if self.signed_delta_q_weight < 0.0:
+            raise ValueError("SV signed-delta-Q weight cannot be negative")
+        if not 0.0 <= self.label_smoothing < 1.0:
+            raise ValueError("SV label smoothing must lie in [0,1)")
+        if self.scheduler_mode not in ("plateau", "cosine"):
+            raise ValueError("unsupported SV scheduler mode")
+        if self.minimum_epochs < 0 or self.minimum_epochs > self.epochs:
+            raise ValueError("SV minimum epochs are invalid")
         if self.selection_metric not in ("roc_auc", "composite_auc"):
             raise ValueError("unsupported SV selection metric")
 
@@ -106,6 +119,7 @@ def balanced_classification_loss(
     logits: torch.Tensor,
     labels: torch.Tensor,
     class_weights: torch.Tensor,
+    label_smoothing: float = 0.0,
 ) -> torch.Tensor:
     """Balanced empirical risk whose weights do not cancel at batch size 1."""
     if logits.ndim != 2 or logits.shape[-1] != 2:
@@ -115,7 +129,10 @@ def balanced_classification_loss(
     if tuple(class_weights.shape) != (2,):
         raise ValueError("SV class weights must have shape [2]")
     per_sample = torch.nn.functional.cross_entropy(
-        logits, labels, reduction="none"
+        logits,
+        labels,
+        reduction="none",
+        label_smoothing=float(label_smoothing),
     )
     weights = class_weights.to(logits).index_select(0, labels)
     # class_weights_from_labels returns N/(2*n_c), whose expectation under the
@@ -174,6 +191,8 @@ def run_sv_signed_gin_epoch(
     include_predictions: bool = False,
     auxiliary_loss_weight: float = 0.0,
     residual_gate_penalty_weight: float = 0.0,
+    signed_delta_q_weight: float = 0.0,
+    label_smoothing: float = 0.0,
 ) -> Dict[str, Any]:
     training = optimizer is not None
     model.train(training)
@@ -190,6 +209,7 @@ def run_sv_signed_gin_epoch(
     main_loss_total = 0.0
     auxiliary_loss_total = 0.0
     gate_penalty_total = 0.0
+    signed_delta_q_loss_total = 0.0
     sample_total = 0
     gradient_norms: List[float] = []
     started = time.perf_counter()
@@ -208,7 +228,10 @@ def run_sv_signed_gin_epoch(
         with torch.set_grad_enabled(training):
             output = model(batch)
             main_loss = balanced_classification_loss(
-                output.logits, labels, class_weights.to(device)
+                output.logits,
+                labels,
+                class_weights.to(device),
+                label_smoothing=label_smoothing,
             )
             auxiliary_loss = output.logits.new_zeros(())
             if output.branch_logits:
@@ -226,6 +249,7 @@ def run_sv_signed_gin_epoch(
                         output.branch_logits[name],
                         labels,
                         class_weights.to(device),
+                        label_smoothing=label_smoothing,
                     )
                     for name in auxiliary_names
                 ]
@@ -237,10 +261,21 @@ def run_sv_signed_gin_epoch(
                 gate_penalty = torch.stack(
                     list(output.residual_gates.values())
                 ).sum()
+            signed_delta_q_loss = output.logits.new_zeros(())
+            if output.signed_delta_q_predictions is not None:
+                if output.signed_delta_q_targets is None or tuple(
+                    output.signed_delta_q_predictions.shape
+                ) != tuple(output.signed_delta_q_targets.shape):
+                    raise ValueError("signed-delta-Q predictions are misaligned")
+                signed_delta_q_loss = torch.nn.functional.smooth_l1_loss(
+                    output.signed_delta_q_predictions,
+                    output.signed_delta_q_targets,
+                )
             loss = (
                 main_loss
                 + float(auxiliary_loss_weight) * auxiliary_loss
                 + float(residual_gate_penalty_weight) * gate_penalty
+                + float(signed_delta_q_weight) * signed_delta_q_loss
             )
             if training:
                 count = int(labels.numel())
@@ -298,6 +333,9 @@ def run_sv_signed_gin_epoch(
         gate_penalty_total += (
             float(gate_penalty.detach().cpu()) * count
         )
+        signed_delta_q_loss_total += (
+            float(signed_delta_q_loss.detach().cpu()) * count
+        )
         batch_labels = [
             int(value) for value in labels.detach().cpu().tolist()
         ]
@@ -330,6 +368,9 @@ def run_sv_signed_gin_epoch(
             ),
             "residual_gate_penalty": (
                 gate_penalty_total / float(sample_total)
+            ),
+            "signed_delta_q_loss": (
+                signed_delta_q_loss_total / float(sample_total)
             ),
             "site_stratified_roc_auc": stratified,
             "composite_auc": (
@@ -470,6 +511,7 @@ def load_sv_signed_gin_checkpoint(
 def _trainable_optimizer(
     model: SVSignedGINClassifier,
     config: SVSignedGINTrainingConfig,
+    scheduler_epochs: Optional[int] = None,
 ):
     parameters = [
         parameter
@@ -483,14 +525,36 @@ def _trainable_optimizer(
         lr=config.learning_rate,
         weight_decay=config.weight_decay,
     )
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer,
-        mode="max",
-        factor=config.scheduler_factor,
-        patience=config.scheduler_patience,
-        min_lr=config.minimum_learning_rate,
-    )
+    if config.scheduler_mode == "cosine":
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer,
+            T_max=int(scheduler_epochs or config.epochs),
+            eta_min=config.minimum_learning_rate,
+        )
+    else:
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer,
+            mode="max",
+            factor=config.scheduler_factor,
+            patience=config.scheduler_patience,
+            min_lr=config.minimum_learning_rate,
+        )
     return optimizer, scheduler
+
+
+def _step_scheduler(scheduler, config, selection_value: float) -> None:
+    if config.scheduler_mode == "cosine":
+        scheduler.step()
+    else:
+        scheduler.step(selection_value)
+
+
+def _training_class_weights(
+    train_labels: Iterable[int], config: SVSignedGINTrainingConfig
+) -> torch.Tensor:
+    if config.use_class_weights:
+        return class_weights_from_labels(train_labels)
+    return torch.ones(2, dtype=torch.float32)
 
 
 def _thresholds_and_evaluation(
@@ -507,6 +571,8 @@ def _thresholds_and_evaluation(
         class_weights,
         max_batches=config.max_validation_batches,
         include_predictions=True,
+        label_smoothing=config.label_smoothing,
+        signed_delta_q_weight=config.signed_delta_q_weight,
     )
     labels = [
         int(item["label"]) for item in validation["predictions"]
@@ -546,11 +612,13 @@ def _train_static_anchor_residual_classifier(
     set_reproducible_seed(config.seed)
     model.reset_residual_fusion_parameters(config.seed)
     model.to(device)
-    class_weights = class_weights_from_labels(train_labels)
+    class_weights = _training_class_weights(train_labels, config)
     history: List[Dict[str, Any]] = []
 
     model.set_training_stage("static_anchor")
-    optimizer, scheduler = _trainable_optimizer(model, config)
+    optimizer, scheduler = _trainable_optimizer(
+        model, config, scheduler_epochs=config.static_anchor_epochs
+    )
     anchor_best_epoch = 0
     anchor_best_value = float("-inf")
     without_improvement = 0
@@ -566,6 +634,8 @@ def _train_static_anchor_residual_classifier(
                 config.gradient_accumulation_steps
             ),
             max_batches=config.max_train_batches,
+            label_smoothing=config.label_smoothing,
+            signed_delta_q_weight=config.signed_delta_q_weight,
         )
         validation = run_sv_signed_gin_epoch(
             model,
@@ -573,11 +643,13 @@ def _train_static_anchor_residual_classifier(
             device,
             class_weights,
             max_batches=config.max_validation_batches,
+            label_smoothing=config.label_smoothing,
+            signed_delta_q_weight=config.signed_delta_q_weight,
         )
         value = _selection_value(
             validation, config.selection_metric
         )
-        scheduler.step(value)
+        _step_scheduler(scheduler, config, value)
         improved = anchor_best_epoch == 0 or value > anchor_best_value
         if improved:
             anchor_best_epoch = epoch
@@ -631,6 +703,9 @@ def _train_static_anchor_residual_classifier(
         )
         if (
             config.early_stopping_patience > 0
+            and epoch >= min(
+                config.minimum_epochs, config.static_anchor_epochs
+            )
             and without_improvement >= config.early_stopping_patience
         ):
             break
@@ -661,7 +736,9 @@ def _train_static_anchor_residual_classifier(
         },
     )
 
-    optimizer, scheduler = _trainable_optimizer(model, config)
+    optimizer, scheduler = _trainable_optimizer(
+        model, config, scheduler_epochs=config.epochs
+    )
     best_epoch = 0
     best_value = _selection_value(
         anchor_validation, config.selection_metric
@@ -701,6 +778,8 @@ def _train_static_anchor_residual_classifier(
             residual_gate_penalty_weight=(
                 config.residual_gate_penalty_weight
             ),
+            label_smoothing=config.label_smoothing,
+            signed_delta_q_weight=config.signed_delta_q_weight,
         )
         validation = run_sv_signed_gin_epoch(
             model,
@@ -712,11 +791,13 @@ def _train_static_anchor_residual_classifier(
             residual_gate_penalty_weight=(
                 config.residual_gate_penalty_weight
             ),
+            label_smoothing=config.label_smoothing,
+            signed_delta_q_weight=config.signed_delta_q_weight,
         )
         value = _selection_value(
             validation, config.selection_metric
         )
-        scheduler.step(value)
+        _step_scheduler(scheduler, config, value)
         improved = value > best_value
         if improved:
             best_epoch = epoch
@@ -783,6 +864,7 @@ def _train_static_anchor_residual_classifier(
         )
         if (
             config.early_stopping_patience > 0
+            and epoch >= config.minimum_epochs
             and without_improvement >= config.early_stopping_patience
         ):
             break
@@ -929,19 +1011,8 @@ def train_sv_signed_gin_classifier(
         )
     set_reproducible_seed(config.seed)
     model.to(device)
-    class_weights = class_weights_from_labels(train_labels)
-    optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=config.learning_rate,
-        weight_decay=config.weight_decay,
-    )
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer,
-        mode="max",
-        factor=config.scheduler_factor,
-        patience=config.scheduler_patience,
-        min_lr=config.minimum_learning_rate,
-    )
+    class_weights = _training_class_weights(train_labels, config)
+    optimizer, scheduler = _trainable_optimizer(model, config)
     history: List[Dict[str, Any]] = []
     best_epoch = 0
     best_value = float("-inf")
@@ -959,6 +1030,8 @@ def train_sv_signed_gin_classifier(
             ),
             max_batches=config.max_train_batches,
             auxiliary_loss_weight=config.auxiliary_loss_weight,
+            signed_delta_q_weight=config.signed_delta_q_weight,
+            label_smoothing=config.label_smoothing,
         )
         validation = run_sv_signed_gin_epoch(
             model,
@@ -967,11 +1040,13 @@ def train_sv_signed_gin_classifier(
             class_weights,
             max_batches=config.max_validation_batches,
             auxiliary_loss_weight=config.auxiliary_loss_weight,
+            signed_delta_q_weight=config.signed_delta_q_weight,
+            label_smoothing=config.label_smoothing,
         )
         selection_value = _selection_value(
             validation, config.selection_metric
         )
-        scheduler.step(selection_value)
+        _step_scheduler(scheduler, config, selection_value)
         improved = best_epoch == 0 or selection_value > best_value
         if improved:
             best_epoch = epoch
@@ -1052,6 +1127,7 @@ def train_sv_signed_gin_classifier(
         )
         if (
             config.early_stopping_patience > 0
+            and epoch >= config.minimum_epochs
             and without_improvement >= config.early_stopping_patience
         ):
             break
@@ -1070,6 +1146,8 @@ def train_sv_signed_gin_classifier(
         max_batches=config.max_validation_batches,
         include_predictions=True,
         auxiliary_loss_weight=config.auxiliary_loss_weight,
+        signed_delta_q_weight=config.signed_delta_q_weight,
+        label_smoothing=config.label_smoothing,
     )
     labels = [
         int(item["label"]) for item in validation["predictions"]

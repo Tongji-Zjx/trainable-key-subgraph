@@ -3,11 +3,12 @@
 from __future__ import absolute_import, division, print_function
 
 import random
+import math
 from pathlib import Path
 
 import numpy as np
 import torch
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, Sampler
 
 from keysubgraph.data.data_split import file_sha256
 from keysubgraph.models.sv_signed_gin import (
@@ -76,8 +77,9 @@ class SVSignedGINDataset(Dataset):
                         adjacency=window.adjacency.to(
                             torch.float32
                         ).detach().clone(),
+                        time_position=int(position),
                     )
-                    for window in record.windows
+                    for position, window in enumerate(record.windows)
                     if window is not None
                 )
                 if self.include_windows
@@ -133,6 +135,49 @@ def _seed_worker(worker_id):
     np.random.seed(worker_seed)
 
 
+class SVBalancedBatchSampler(Sampler):
+    """Deterministic balanced batches without also weighting the loss."""
+
+    def __init__(self, labels, batch_size: int, seed: int) -> None:
+        self.labels = [int(value) for value in labels]
+        self.batch_size = int(batch_size)
+        if self.batch_size < 2:
+            raise ValueError("balanced SV batches require batch size >= 2")
+        self.by_class = {
+            label: [
+                index
+                for index, value in enumerate(self.labels)
+                if value == label
+            ]
+            for label in (0, 1)
+        }
+        if not self.by_class[0] or not self.by_class[1]:
+            raise ValueError("balanced SV sampler requires both classes")
+        self.num_batches = int(
+            math.ceil(len(self.labels) / float(self.batch_size))
+        )
+        self.random = random.Random(int(seed))
+
+    def __iter__(self):
+        for _ in range(self.num_batches):
+            positive_count = self.batch_size // 2
+            negative_count = self.batch_size - positive_count
+            batch = self._draw(1, positive_count) + self._draw(
+                0, negative_count
+            )
+            self.random.shuffle(batch)
+            yield batch
+
+    def _draw(self, label: int, count: int):
+        population = self.by_class[int(label)]
+        if len(population) >= int(count):
+            return self.random.sample(population, int(count))
+        return [self.random.choice(population) for _ in range(int(count))]
+
+    def __len__(self):
+        return self.num_batches
+
+
 def create_sv_signed_gin_loader(
     dataset: SVSignedGINDataset,
     batch_size: int,
@@ -140,20 +185,35 @@ def create_sv_signed_gin_loader(
     shuffle: bool,
     num_workers: int = 0,
     pin_memory: bool = False,
+    balanced_batch_sampler: bool = False,
 ) -> DataLoader:
     if batch_size < 1 or num_workers < 0:
         raise ValueError("invalid SV Signed-GIN loader configuration")
     if dataset.split != "train" and shuffle:
         raise ValueError("SV validation/test loaders cannot shuffle")
+    if balanced_batch_sampler and dataset.split != "train":
+        raise ValueError("balanced SV batches are train-only")
+    if balanced_batch_sampler and shuffle:
+        raise ValueError("balanced SV sampler owns the training order")
     generator = torch.Generator()
     generator.manual_seed(int(seed))
+    common = {
+        "dataset": dataset,
+        "num_workers": int(num_workers),
+        "pin_memory": bool(pin_memory),
+        "collate_fn": collate_sv_signed_gin,
+        "worker_init_fn": _seed_worker if num_workers else None,
+    }
+    if balanced_batch_sampler:
+        return DataLoader(
+            batch_sampler=SVBalancedBatchSampler(
+                dataset.labels, int(batch_size), int(seed)
+            ),
+            **common
+        )
     return DataLoader(
-        dataset,
         batch_size=int(batch_size),
         shuffle=bool(shuffle),
-        num_workers=int(num_workers),
-        pin_memory=bool(pin_memory),
-        collate_fn=collate_sv_signed_gin,
-        worker_init_fn=_seed_worker if num_workers else None,
         generator=generator,
+        **common
     )

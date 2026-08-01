@@ -26,6 +26,10 @@ def parse_args():
         "--variant", default="signed_gin_static_variation"
     )
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--run-name",
+        help="optional model directory name, e.g. C3_G2_seed42",
+    )
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--overwrite", action="store_true")
     return parser.parse_args()
@@ -45,6 +49,7 @@ def main():
         assignments,
         variant=args.variant,
         seed=args.seed,
+        run_name=args.run_name,
         output_dir=args.output_dir,
         overwrite=args.overwrite,
     )

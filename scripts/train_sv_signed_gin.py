@@ -23,6 +23,9 @@ from keysubgraph.data.sv_signed_gin_dataset import (  # noqa: E402
 from keysubgraph.data.sv_theory_geometry import (  # noqa: E402
     SVTheoryAugmentedDataset,
 )
+from keysubgraph.data.sv_spectral_diffusion import (  # noqa: E402
+    SVSpectralDiffusionAugmentedDataset,
+)
 from keysubgraph.models.sv_signed_gin import (  # noqa: E402
     SV_DEFAULT_VARIANT,
     SV_SIGNED_GIN_MESSAGE_MODES,
@@ -45,6 +48,9 @@ def parse_args():
     parser.add_argument("--theory-train-cache", type=Path)
     parser.add_argument("--theory-validation-cache", type=Path)
     parser.add_argument("--theory-scaler", type=Path)
+    parser.add_argument("--spectral-train-manifest", type=Path)
+    parser.add_argument("--spectral-validation-manifest", type=Path)
+    parser.add_argument("--spectral-scaler", type=Path)
     parser.add_argument(
         "--variant",
         choices=SV_SIGNED_GIN_VARIANTS,
@@ -135,6 +141,14 @@ def parse_args():
         "--auxiliary-loss-weight", type=float, default=None
     )
     parser.add_argument(
+        "--signed-delta-q-weight", type=float, default=None
+    )
+    parser.add_argument(
+        "--training-recipe",
+        choices=("current", "author_a1"),
+        default="current",
+    )
+    parser.add_argument(
         "--residual-gate-penalty-weight", type=float, default=0.01
     )
     parser.add_argument("--smoke", action="store_true")
@@ -157,6 +171,12 @@ def _resolve_architecture_defaults(args):
         "signed_gin_multibranch_spectral_direction",
         "signed_gin_multibranch_diffusion_geometry",
         "signed_gin_multibranch_theory_geometry",
+        "svg_v2_b1_hks",
+        "svg_v2_c1_diffusion",
+        "svg_v2_c3_hks_diffusion",
+        "svg_v2_g2_signed_delta_q",
+        "svg_v2_c3_f1_residual",
+        "svg_v2_c3_g2",
     )
     if args.message_mode is None:
         args.message_mode = (
@@ -174,6 +194,35 @@ def _resolve_architecture_defaults(args):
             setattr(args, name, bool(is_default_svg))
     if args.auxiliary_loss_weight is None:
         args.auxiliary_loss_weight = 0.25 if is_default_svg else 0.0
+    if args.signed_delta_q_weight is None:
+        args.signed_delta_q_weight = (
+            0.05
+            if args.variant in (
+                "svg_v2_g2_signed_delta_q",
+                "svg_v2_c3_g2",
+            )
+            else 0.0
+        )
+    args.label_smoothing = 0.0
+    args.scheduler_mode = "plateau"
+    args.minimum_epochs = 0
+    args.balanced_batch_sampler = False
+    args.use_class_weights = True
+    if args.training_recipe == "author_a1":
+        # Frozen five-day A1 profile; no hyperparameter grid is opened here.
+        args.epochs = 60
+        args.static_anchor_epochs = 60
+        args.learning_rate = 1.0e-4
+        args.weight_decay = 5.0e-5
+        args.gradient_clip = 5.0
+        args.early_stopping_patience = 10
+        args.batch_size = 4
+        args.gradient_accumulation_steps = 8
+        args.label_smoothing = 0.10
+        args.scheduler_mode = "cosine"
+        args.minimum_epochs = 30
+        args.balanced_batch_sampler = True
+        args.use_class_weights = False
     return args
 
 
@@ -229,7 +278,14 @@ def main():
         args.theory_validation_cache,
         args.theory_scaler,
     )
+    spectral_arguments = (
+        args.spectral_train_manifest,
+        args.spectral_validation_manifest,
+        args.spectral_scaler,
+    )
     if model_config.uses_theory_geometry:
+        if model_config.uses_spectral_diffusion_sidecar:
+            raise ValueError("legacy and SVG-v2 sidecars cannot be combined")
         if any(value is None for value in theory_arguments):
             raise ValueError(
                 "theory-geometry variants require train/validation "
@@ -254,10 +310,41 @@ def main():
             args.theory_scaler,
             include_windows=model_config.uses_gin,
         )
+    elif model_config.uses_spectral_diffusion_sidecar:
+        if any(value is None for value in spectral_arguments):
+            raise ValueError(
+                "SVG-v2 spectral variants require train/validation "
+                "spectral manifests and a train-only scaler"
+            )
+        if any(value is not None for value in theory_arguments):
+            raise ValueError("legacy theory sidecars were supplied to SVG-v2")
+        validation_spectral_manifest = (
+            args.spectral_train_manifest
+            if args.overfit_samples is not None
+            else args.spectral_validation_manifest
+        )
+        train = SVSpectralDiffusionAugmentedDataset(
+            args.train_manifest,
+            args.scaler,
+            args.spectral_train_manifest,
+            args.spectral_scaler,
+            include_windows=True,
+        )
+        validation = SVSpectralDiffusionAugmentedDataset(
+            validation_manifest,
+            args.scaler,
+            validation_spectral_manifest,
+            args.spectral_scaler,
+            include_windows=True,
+        )
     else:
         if any(value is not None for value in theory_arguments):
             raise ValueError(
                 "theory sidecars were supplied to a non-theory variant"
+            )
+        if any(value is not None for value in spectral_arguments):
+            raise ValueError(
+                "spectral-diffusion sidecars were supplied to a base variant"
             )
         train = SVSignedGINDataset(
             args.train_manifest,
@@ -283,9 +370,10 @@ def main():
         train,
         batch_size=args.batch_size,
         seed=args.seed,
-        shuffle=True,
+        shuffle=not args.balanced_batch_sampler,
         num_workers=args.num_workers,
         pin_memory=args.device.startswith("cuda"),
+        balanced_batch_sampler=args.balanced_batch_sampler,
     )
     validation_loader = create_sv_signed_gin_loader(
         validation,
@@ -325,6 +413,11 @@ def main():
         residual_gate_penalty_weight=(
             args.residual_gate_penalty_weight
         ),
+        signed_delta_q_weight=args.signed_delta_q_weight,
+        label_smoothing=args.label_smoothing,
+        scheduler_mode=args.scheduler_mode,
+        minimum_epochs=(0 if args.smoke else args.minimum_epochs),
+        use_class_weights=args.use_class_weights,
         seed=args.seed,
         max_train_batches=2 if args.smoke else None,
         max_validation_batches=2 if args.smoke else None,
@@ -357,6 +450,20 @@ def main():
                 ),
             }
         )
+    if model_config.uses_spectral_diffusion_sidecar:
+        provenance.update(
+            {
+                "spectral_train_manifest_sha256": file_sha256(
+                    args.spectral_train_manifest
+                ),
+                "spectral_validation_manifest_sha256": file_sha256(
+                    validation_spectral_manifest
+                ),
+                "spectral_scaler_sha256": file_sha256(
+                    args.spectral_scaler
+                ),
+            }
+        )
     result = train_sv_signed_gin_classifier(
         model=model,
         train_loader=train_loader,
@@ -379,6 +486,10 @@ def main():
             "residual_gate_penalty_weight": (
                 args.residual_gate_penalty_weight
             ),
+            "signed_delta_q_weight": args.signed_delta_q_weight,
+            "training_recipe": args.training_recipe,
+            "balanced_batch_sampler": args.balanced_batch_sampler,
+            "label_smoothing": args.label_smoothing,
         }
     )
     print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))

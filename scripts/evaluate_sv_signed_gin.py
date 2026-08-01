@@ -24,6 +24,9 @@ from keysubgraph.data.sv_signed_gin_dataset import (  # noqa: E402
 from keysubgraph.data.sv_theory_geometry import (  # noqa: E402
     SVTheoryAugmentedDataset,
 )
+from keysubgraph.data.sv_spectral_diffusion import (  # noqa: E402
+    SVSpectralDiffusionAugmentedDataset,
+)
 from keysubgraph.models.sv_signed_gin import (  # noqa: E402
     SVSignedGINClassifier,
     SVSignedGINConfig,
@@ -40,6 +43,8 @@ def parse_args():
     parser.add_argument("--scaler", type=Path, required=True)
     parser.add_argument("--theory-cache", type=Path)
     parser.add_argument("--theory-scaler", type=Path)
+    parser.add_argument("--spectral-manifest", type=Path)
+    parser.add_argument("--spectral-scaler", type=Path)
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument(
         "--threshold-strategy",
@@ -99,11 +104,27 @@ def main():
             args.theory_scaler,
             include_windows=model.config.uses_gin,
         )
+    elif model.config.uses_spectral_diffusion_sidecar:
+        if args.spectral_manifest is None or args.spectral_scaler is None:
+            raise ValueError(
+                "SVG-v2 evaluation requires its spectral manifest/scaler"
+            )
+        if args.theory_cache is not None or args.theory_scaler is not None:
+            raise ValueError("legacy theory sidecars were supplied to SVG-v2")
+        dataset = SVSpectralDiffusionAugmentedDataset(
+            args.manifest,
+            args.scaler,
+            args.spectral_manifest,
+            args.spectral_scaler,
+            include_windows=True,
+        )
     else:
         if args.theory_cache is not None or args.theory_scaler is not None:
             raise ValueError(
                 "theory sidecars were supplied to a non-theory model"
             )
+        if args.spectral_manifest is not None or args.spectral_scaler is not None:
+            raise ValueError("spectral sidecars were supplied to a base model")
         dataset = SVSignedGINDataset(
             args.manifest,
             args.scaler,
@@ -143,6 +164,24 @@ def main():
             raise ValueError(
                 "SV theory evaluation provenance mismatch"
             )
+    if model.config.uses_spectral_diffusion_sidecar:
+        cache_hash_matches = True
+        if dataset.split == "train":
+            cache_hash_matches = (
+                expected["spectral_train_manifest_sha256"]
+                == file_sha256(args.spectral_manifest)
+            )
+        elif dataset.split == "validation":
+            cache_hash_matches = (
+                expected["spectral_validation_manifest_sha256"]
+                == file_sha256(args.spectral_manifest)
+            )
+        if (
+            expected["spectral_scaler_sha256"]
+            != file_sha256(args.spectral_scaler)
+            or not cache_hash_matches
+        ):
+            raise ValueError("SV spectral evaluation provenance mismatch")
     loader = create_sv_signed_gin_loader(
         dataset,
         batch_size=args.batch_size,
@@ -159,6 +198,14 @@ def main():
         checkpoint["class_weights"],
         threshold=threshold,
         include_predictions=True,
+        signed_delta_q_weight=float(
+            checkpoint["training_config"].get(
+                "signed_delta_q_weight", 0.0
+            )
+        ),
+        label_smoothing=float(
+            checkpoint["training_config"].get("label_smoothing", 0.0)
+        ),
     )
     result = {
         "artifact_type": "sv_hard_sgw_signed_gin_evaluation",
@@ -194,6 +241,13 @@ def main():
         )
         result["theory_scaler_sha256"] = file_sha256(
             args.theory_scaler
+        )
+    if model.config.uses_spectral_diffusion_sidecar:
+        result["spectral_manifest_sha256"] = file_sha256(
+            args.spectral_manifest
+        )
+        result["spectral_scaler_sha256"] = file_sha256(
+            args.spectral_scaler
         )
     _atomic_json(args.output, result)
     print(

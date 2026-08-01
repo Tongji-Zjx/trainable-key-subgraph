@@ -34,8 +34,23 @@ def _sample(key="sample", label=0, permutation=None):
             1, permutation
         )
     windows = (
-        SVSignedGINWindowInput(features, adjacency),
-        SVSignedGINWindowInput(features + 0.1, adjacency * 0.9),
+        SVSignedGINWindowInput(
+            features,
+            adjacency,
+            time_position=0,
+            hks=torch.linspace(0.1, 0.9, 18).reshape(3, 6),
+            diffusion_eigenvalues=torch.tensor((0.1, 0.8, 1.4)),
+            diffusion_eigenvectors=torch.eye(3),
+            spectral_delta_to_next=torch.linspace(-0.5, 0.5, 16),
+        ),
+        SVSignedGINWindowInput(
+            features + 0.1,
+            adjacency * 0.9,
+            time_position=1,
+            hks=torch.linspace(0.2, 1.0, 18).reshape(3, 6),
+            diffusion_eigenvalues=torch.tensor((0.1, 0.7, 1.3)),
+            diffusion_eigenvectors=torch.eye(3),
+        ),
     )
     return SVSignedGINSampleInput(
         sample_key=key,
