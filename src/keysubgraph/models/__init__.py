@@ -72,6 +72,16 @@ from .structured_short_term import (
     is_paper_aligned_variant,
     variant_uses_pst,
 )
+from .author_short_term import (
+    AUTHOR_SHORT_TERM_MODEL_NAME,
+    AUTHOR_SHORT_TERM_PROFILES,
+    AuthorBrainFunctionMemory,
+    AuthorNoCoordinateShortTermClassifier,
+    AuthorNoCoordinateWindowEncoder,
+    AuthorShortTermConfig,
+    AuthorShortTermOutput,
+    author_short_term_config,
+)
 from .dual_stse_hard_sgw_types import (
     DUAL_EXPERIMENT_VARIANTS,
     DUAL_TRAINING_STAGES,
@@ -190,4 +200,12 @@ __all__ = [
     "StructuredWindowEncoder",
     "is_paper_aligned_variant",
     "variant_uses_pst",
+    "AUTHOR_SHORT_TERM_MODEL_NAME",
+    "AUTHOR_SHORT_TERM_PROFILES",
+    "AuthorBrainFunctionMemory",
+    "AuthorNoCoordinateShortTermClassifier",
+    "AuthorNoCoordinateWindowEncoder",
+    "AuthorShortTermConfig",
+    "AuthorShortTermOutput",
+    "author_short_term_config",
 ]
