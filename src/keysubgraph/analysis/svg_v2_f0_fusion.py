@@ -259,7 +259,7 @@ def apply_f0_fusion(
     return {"metrics": metrics, "predictions": predictions}
 
 
-def _crossfit_classification_metrics(predictions):
+def crossfit_classification_metrics(predictions):
     labels = [int(row["label"]) for row in predictions]
     probabilities = [float(row["positive_probability"]) for row in predictions]
     sites = [str(row["site"]) for row in predictions]
@@ -371,6 +371,6 @@ def crossfit_oof_f0_fusion(
     return {
         "folds": folds,
         "fold_results": fold_results,
-        "metrics": _crossfit_classification_metrics(predictions),
+        "metrics": crossfit_classification_metrics(predictions),
         "predictions": predictions,
     }
