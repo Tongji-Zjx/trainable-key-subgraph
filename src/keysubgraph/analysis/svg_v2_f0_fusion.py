@@ -314,6 +314,175 @@ def apply_multi_f0_fusion(
     return {"metrics": metrics, "predictions": predictions}
 
 
+def _initial_gate_logit(initial_gate: float) -> float:
+    if not 0.0 < float(initial_gate) < 1.0:
+        raise ValueError("residual initial gate must be between zero and one")
+    return math.log(float(initial_gate) / (1.0 - float(initial_gate)))
+
+
+def _calibrated_expert_logits(
+    logits: torch.Tensor,
+    names: Sequence[str],
+    calibrators: Mapping[str, Mapping[str, float]],
+) -> Dict[str, torch.Tensor]:
+    return {
+        name: float(calibrators[name]["intercept"])
+        + float(calibrators[name]["slope"]) * logits[:, column]
+        for column, name in enumerate(names)
+    }
+
+
+def fit_residual_logit_fusion(
+    anchor_name: str,
+    anchor_fit: Mapping[str, Mapping[str, object]],
+    residual_name: str,
+    residual_fit: Mapping[str, Mapping[str, object]],
+    initial_gate: float = 0.01,
+    auxiliary_weight: float = 0.25,
+    l2_weight: float = 1.0e-3,
+    optimization_steps: int = 2000,
+) -> Dict[str, object]:
+    """Fit a cheap frozen-logit approximation of F1 or F2.
+
+    The anchor and residual expert are independently Platt calibrated.  The
+    fused logit is ``anchor + gate * residual_affine``.  A zero-initialized
+    residual makes the initial model exactly equal to the anchor, while the
+    sigmoid gate starts near 0.01.  This is intentionally a decision-level
+    screening model; it does not claim to replace a representation-level
+    residual network when a mode is later promoted.
+    """
+
+    anchor_name = str(anchor_name)
+    residual_name = str(residual_name)
+    if not anchor_name or not residual_name or anchor_name == residual_name:
+        raise ValueError("residual fusion requires distinct expert names")
+    if auxiliary_weight < 0.0 or l2_weight < 0.0:
+        raise ValueError("residual fusion penalties must be nonnegative")
+    if optimization_steps < 1:
+        raise ValueError("residual fusion optimization steps must be positive")
+    gate_logit = _initial_gate_logit(initial_gate)
+    experts = {
+        anchor_name: anchor_fit,
+        residual_name: residual_fit,
+    }
+    keys, names, logits, labels, sites = align_multi_fusion_predictions(
+        experts
+    )
+    if set(int(value) for value in labels.tolist()) != {0, 1}:
+        raise ValueError("residual fusion fit set requires both classes")
+    calibrators = {}
+    for column, name in enumerate(names):
+        intercept, slope = _fit_platt(
+            logits[:, column], labels, optimization_steps
+        )
+        calibrators[name] = {"intercept": intercept, "slope": slope}
+    calibrated = _calibrated_expert_logits(logits, names, calibrators)
+    anchor_logits = calibrated[anchor_name].detach()
+    residual_inputs = calibrated[residual_name].detach()
+
+    raw_gate = torch.tensor(
+        gate_logit, dtype=torch.float64, requires_grad=True
+    )
+    residual_intercept = torch.zeros(
+        (), dtype=torch.float64, requires_grad=True
+    )
+    residual_slope = torch.zeros((), dtype=torch.float64, requires_grad=True)
+    optimizer = torch.optim.Adam(
+        (raw_gate, residual_intercept, residual_slope), lr=0.03
+    )
+    anchor_probability = torch.sigmoid(anchor_logits)
+    residual_target = labels - anchor_probability
+    for _ in range(int(optimization_steps)):
+        optimizer.zero_grad()
+        gate = torch.sigmoid(raw_gate)
+        residual_logits = residual_intercept + residual_slope * residual_inputs
+        fused_logits = anchor_logits + gate * residual_logits
+        probability_delta = torch.sigmoid(fused_logits) - anchor_probability
+        loss = F.binary_cross_entropy_with_logits(fused_logits, labels)
+        loss = loss + float(auxiliary_weight) * F.mse_loss(
+            probability_delta, residual_target
+        )
+        loss = loss + float(l2_weight) * (
+            residual_intercept.pow(2) + residual_slope.pow(2)
+        )
+        loss.backward()
+        optimizer.step()
+
+    gate = float(torch.sigmoid(raw_gate).detach())
+    fitted_intercept = float(residual_intercept.detach())
+    fitted_slope = float(residual_slope.detach())
+    probabilities = torch.sigmoid(
+        anchor_logits
+        + gate * (fitted_intercept + fitted_slope * residual_inputs)
+    ).tolist()
+    threshold = fit_binary_threshold(
+        [int(value) for value in labels.tolist()],
+        probabilities,
+        "balanced_accuracy",
+    )
+    return {
+        "fit_sample_keys": list(keys),
+        "fit_sites": list(sites),
+        "fusion_family": "decision_level_residual_screen",
+        "anchor_name": anchor_name,
+        "residual_name": residual_name,
+        "expert_names": list(names),
+        "calibrators": calibrators,
+        "initial_gate": float(initial_gate),
+        "gate": gate,
+        "residual_intercept": fitted_intercept,
+        "residual_slope": fitted_slope,
+        "auxiliary_weight": float(auxiliary_weight),
+        "l2_weight": float(l2_weight),
+        "optimization_steps": int(optimization_steps),
+        "threshold": float(threshold),
+    }
+
+
+def apply_residual_logit_fusion(
+    fitted: Mapping[str, object],
+    anchor: Mapping[str, Mapping[str, object]],
+    residual: Mapping[str, Mapping[str, object]],
+) -> Dict[str, object]:
+    """Apply a frozen F1/F2 decision-level residual screen."""
+
+    anchor_name = str(fitted["anchor_name"])
+    residual_name = str(fitted["residual_name"])
+    experts = {anchor_name: anchor, residual_name: residual}
+    keys, names, logits, labels, sites = align_multi_fusion_predictions(
+        experts
+    )
+    expected = tuple(str(name) for name in fitted["expert_names"])
+    if names != expected:
+        raise ValueError("residual fusion expert order differs from fitted model")
+    calibrated = _calibrated_expert_logits(
+        logits, names, fitted["calibrators"]
+    )
+    fused_logits = calibrated[anchor_name] + float(fitted["gate"]) * (
+        float(fitted["residual_intercept"])
+        + float(fitted["residual_slope"]) * calibrated[residual_name]
+    )
+    probabilities = torch.sigmoid(fused_logits).tolist()
+    labels_list = [int(value) for value in labels.tolist()]
+    threshold = float(fitted["threshold"])
+    metrics = binary_metrics(labels_list, probabilities, threshold)
+    metrics["site_stratified_roc_auc"] = site_stratified_roc_auc(
+        labels_list, probabilities, list(sites)
+    )
+    predictions = [
+        {
+            "sample_key": key,
+            "site": str(sites[index]),
+            "label": labels_list[index],
+            "positive_probability": float(probabilities[index]),
+            "threshold": threshold,
+            "predicted_label": int(probabilities[index] >= threshold),
+        }
+        for index, key in enumerate(keys)
+    ]
+    return {"metrics": metrics, "predictions": predictions}
+
+
 def fit_f0_fusion(
     short_term_fit: Mapping[str, Mapping[str, object]],
     svg_fit: Mapping[str, Mapping[str, object]],
