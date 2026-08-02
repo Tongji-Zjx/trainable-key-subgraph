@@ -486,6 +486,31 @@ class SVSignedGINTest(unittest.TestCase):
         self.assertEqual(tuple(output.gin_projection.shape), (1, 16))
         output.logits.sum().backward()
 
+    def test_g2_gin32_widens_only_gin_projection_and_head(self):
+        config = SVSignedGINConfig(
+            variant="svg_v2_g2_signed_delta_q_gin32",
+            dropout=0.0,
+        )
+        model = SVSignedGINClassifier(config).eval()
+        output = model(
+            SVSignedGINBatch((_sample("a", 0), _sample("b", 1)))
+        )
+        self.assertEqual(config.gin_channel_projection_dim, 32)
+        self.assertEqual(config.branch_projection_dim("static_spectral"), 16)
+        self.assertEqual(config.branch_projection_dim("variation"), 16)
+        self.assertEqual(config.fusion_input_dim, 64)
+        self.assertEqual(tuple(output.gin_projection.shape), (2, 32))
+        self.assertEqual(tuple(output.static_projection.shape), (2, 16))
+        self.assertEqual(tuple(output.variation_projection.shape), (2, 16))
+        self.assertEqual(tuple(output.final_representation.shape), (2, 64))
+        self.assertEqual(model.branch_classifiers["gin"][0].in_features, 32)
+        self.assertEqual(model.branch_classifiers["gin"][0].out_features, 32)
+        self.assertEqual(
+            model.branch_classifiers["static_spectral"][0].in_features,
+            16,
+        )
+        self.assertIsNotNone(output.signed_delta_q_predictions)
+
     def test_static_anchor_residual_starts_exactly_at_anchor(self):
         torch.manual_seed(739)
         model = SVSignedGINClassifier(

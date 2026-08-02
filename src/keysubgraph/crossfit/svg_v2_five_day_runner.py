@@ -10,7 +10,9 @@ from typing import Dict, List, Sequence, Tuple
 SVG_V2_SCREEN_CANDIDATES = ("A1", "B1", "C3", "F1", "G2")
 SVG_V2_COMBINATION_CANDIDATES = ("C3_F1", "C3_G2")
 SVG_V2_ALL_CANDIDATES = (
-    SVG_V2_SCREEN_CANDIDATES + SVG_V2_COMBINATION_CANDIDATES
+    SVG_V2_SCREEN_CANDIDATES
+    + SVG_V2_COMBINATION_CANDIDATES
+    + ("G2D32",)
 )
 
 SVG_V2_CANDIDATE_SPECS: Dict[str, Dict[str, object]] = {
@@ -36,6 +38,11 @@ SVG_V2_CANDIDATE_SPECS: Dict[str, Dict[str, object]] = {
     },
     "G2": {
         "variant": "svg_v2_g2_signed_delta_q",
+        "training_recipe": "current",
+        "spectral_sidecar": True,
+    },
+    "G2D32": {
+        "variant": "svg_v2_g2_signed_delta_q_gin32",
         "training_recipe": "current",
         "spectral_sidecar": True,
     },

@@ -34,7 +34,14 @@ def parse_args():
     return parser.parse_args()
 
 
-def _sample(key, label, offset, node_count, window_count):
+def _sample(
+    key,
+    label,
+    offset,
+    node_count,
+    window_count,
+    include_budget_views=True,
+):
     windows = []
     for time_index in range(window_count):
         node = (
@@ -51,7 +58,39 @@ def _sample(key, label, offset, node_count, window_count):
                 value = -value
             adjacency[index, index + 1] = value
             adjacency[index + 1, index] = value
-        windows.append(SVSignedGINWindowInput(node, adjacency))
+        windows.append(
+            SVSignedGINWindowInput(
+                node,
+                adjacency,
+                time_position=time_index,
+                hks=torch.linspace(
+                    0.1, 0.9, node_count * 6
+                ).reshape(node_count, 6),
+                diffusion_eigenvalues=torch.linspace(
+                    0.1, 1.0, node_count
+                ),
+                diffusion_eigenvectors=torch.eye(node_count),
+                spectral_delta_to_next=(
+                    torch.linspace(-0.5, 0.5, 16)
+                    if time_index + 1 < window_count
+                    else None
+                ),
+                communities=torch.arange(node_count, dtype=torch.long) % 2,
+            )
+        )
+    budget_views = ()
+    if include_budget_views:
+        budget_views = tuple(
+            _sample(
+                key + "-budget-{}".format(index),
+                label,
+                offset + 0.01 * index,
+                node_count,
+                window_count,
+                include_budget_views=False,
+            )
+            for index in range(3)
+        )
     return SVSignedGINSampleInput(
         sample_key=key,
         label=label,
@@ -64,6 +103,7 @@ def _sample(key, label, offset, node_count, window_count):
         diffusion_geometry=torch.linspace(
             0.0, 1.0, 28
         ) + abs(float(offset)),
+        budget_views=budget_views,
     )
 
 
@@ -79,34 +119,28 @@ def main():
     results = {}
     for variant in SV_SIGNED_GIN_VARIANTS:
         torch.manual_seed(42)
-        improved = variant in (
-            "signed_gin_multibranch_late_fusion",
-            "signed_gin_multibranch_spectral_direction",
-            "signed_gin_multibranch_diffusion_geometry",
-            "signed_gin_multibranch_theory_geometry",
-        )
         residual_attention = (
             variant
             == "signed_gin_static_anchor_residual_attention"
         )
-        compact_profile = improved or residual_attention
+        overrides = {}
+        if residual_attention:
+            overrides.update(
+                {
+                    "message_mode": "signed_normalized",
+                    "pooling": "mean_std",
+                    "gin_residual": True,
+                    "gin_jumping_knowledge": True,
+                    "gin_compact_readout": True,
+                    "gin_batch_normalization": True,
+                }
+            )
         model = SVSignedGINClassifier(
             SVSignedGINConfig(
                 variant=variant,
                 dropout=0.0,
-                message_mode=(
-                    "signed_normalized"
-                    if compact_profile
-                    else "signed_weighted"
-                ),
-                pooling=(
-                    "mean_std" if compact_profile else "attention"
-                ),
-                gin_residual=improved,
-                gin_jumping_knowledge=improved,
-                gin_compact_readout=compact_profile,
-                gin_batch_normalization=improved,
                 gin_residual_attention=residual_attention,
+                **overrides
             )
         ).to(device)
         output = model(batch)

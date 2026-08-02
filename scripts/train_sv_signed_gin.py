@@ -194,6 +194,7 @@ def _resolve_architecture_defaults(args):
         "svg_v2_c1_diffusion",
         "svg_v2_c3_hks_diffusion",
         "svg_v2_g2_signed_delta_q",
+        "svg_v2_g2_signed_delta_q_gin32",
         "svg_v2_c3_f1_residual",
         "svg_v2_c3_g2",
         "svg_v2_d1_community_pooling",
@@ -220,6 +221,7 @@ def _resolve_architecture_defaults(args):
             0.05
             if args.variant in (
                 "svg_v2_g2_signed_delta_q",
+                "svg_v2_g2_signed_delta_q_gin32",
                 "svg_v2_c3_g2",
             )
             else 0.0

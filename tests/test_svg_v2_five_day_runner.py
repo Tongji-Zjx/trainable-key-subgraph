@@ -46,6 +46,25 @@ class SVGv2FiveDayRunnerTest(unittest.TestCase):
         )
         self.assertIn("svg_v2_c3_f1_residual", train)
 
+    def test_g2d32_reuses_spectral_cache_and_uses_paired_variant(self):
+        commands = build_svg_v2_fold_commands(
+            Path("project"),
+            Path("source"),
+            Path("output"),
+            fold=2,
+            candidates=("G2D32",),
+            mode="confirmatory",
+            seed=43,
+        )
+        train = next(
+            command
+            for stage, command, _ in commands
+            if stage == "train_G2D32"
+        )
+        self.assertIn("svg_v2_g2_signed_delta_q_gin32", train)
+        self.assertIn("spectral_cache_test", [row[0] for row in commands])
+        self.assertIn("evaluate_G2D32", [row[0] for row in commands])
+
 
 if __name__ == "__main__":
     unittest.main()

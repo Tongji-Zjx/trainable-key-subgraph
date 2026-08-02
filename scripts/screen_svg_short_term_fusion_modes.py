@@ -44,6 +44,10 @@ def parse_args():
     parser.add_argument("--g2-root", type=Path, required=True)
     parser.add_argument("--short-term-seed", type=int, required=True)
     parser.add_argument("--g2-seed", type=int, default=43)
+    parser.add_argument(
+        "--g2-run-name",
+        help="optional frozen G2 model directory, e.g. G2D32_seed43",
+    )
     parser.add_argument("--modes", nargs="+", choices=MODES, default=MODES)
     parser.add_argument("--l1-weight", type=float, default=1.0e-3)
     parser.add_argument("--initial-gate", type=float, default=0.01)
@@ -78,11 +82,18 @@ def _artifacts(args, fold):
         / "author_short_term_no_coord"
         / "evaluation_seed{}".format(args.short_term_seed)
     )
+    g2_run_name = (
+        str(args.g2_run_name)
+        if args.g2_run_name is not None
+        else "G2_seed{}".format(args.g2_seed)
+    )
+    if not g2_run_name or "/" in g2_run_name or "\\" in g2_run_name:
+        raise ValueError("G2 run name must be one directory")
     g2 = (
         args.g2_root.resolve()
         / "fold_{}".format(fold)
         / "models"
-        / "G2_seed{}".format(args.g2_seed)
+        / g2_run_name
     )
     return {
         "short_term": {
@@ -243,6 +254,11 @@ def _mode_result(args, mode):
             "short_term": int(args.short_term_seed),
             "g2": int(args.g2_seed),
         },
+        "g2_run_name": (
+            str(args.g2_run_name)
+            if args.g2_run_name is not None
+            else "G2_seed{}".format(args.g2_seed)
+        ),
         "fold_results": fold_results,
         "metrics": metrics,
         "provenance": provenance,

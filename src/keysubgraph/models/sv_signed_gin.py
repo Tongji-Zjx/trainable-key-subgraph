@@ -43,6 +43,7 @@ SV_SIGNED_GIN_VARIANTS = (
     "svg_v2_c1_diffusion",
     "svg_v2_c3_hks_diffusion",
     "svg_v2_g2_signed_delta_q",
+    "svg_v2_g2_signed_delta_q_gin32",
     "svg_v2_c3_f1_residual",
     "svg_v2_c3_g2",
     "svg_v2_d1_community_pooling",
@@ -104,6 +105,7 @@ class SVSignedGINConfig:
             "svg_v2_c1_diffusion",
             "svg_v2_c3_hks_diffusion",
             "svg_v2_g2_signed_delta_q",
+            "svg_v2_g2_signed_delta_q_gin32",
             "svg_v2_c3_f1_residual",
             "svg_v2_c3_g2",
             "svg_v2_d1_community_pooling",
@@ -225,6 +227,7 @@ class SVSignedGINConfig:
             "svg_v2_c1_diffusion",
             "svg_v2_c3_hks_diffusion",
             "svg_v2_g2_signed_delta_q",
+            "svg_v2_g2_signed_delta_q_gin32",
             "svg_v2_c3_f1_residual",
             "svg_v2_c3_g2",
             "svg_v2_d1_community_pooling",
@@ -282,6 +285,7 @@ class SVSignedGINConfig:
     def uses_signed_delta_q_auxiliary(self) -> bool:
         return self.variant in (
             "svg_v2_g2_signed_delta_q",
+            "svg_v2_g2_signed_delta_q_gin32",
             "svg_v2_c3_g2",
         )
 
@@ -316,6 +320,33 @@ class SVSignedGINConfig:
         )
 
     @property
+    def gin_channel_projection_dim(self) -> int:
+        """Keep handcrafted channels at 16 while widening G2 GIN to 32."""
+
+        if self.variant == "svg_v2_g2_signed_delta_q_gin32":
+            return 32
+        return self.channel_projection_dim
+
+    def branch_projection_dim(self, name: str) -> int:
+        if name not in self.active_branch_names:
+            raise ValueError("requested projection dimension for inactive branch")
+        return (
+            self.gin_channel_projection_dim
+            if name == "gin"
+            else self.channel_projection_dim
+        )
+
+    def branch_hidden_dim(self, name: str) -> int:
+        if name not in self.active_branch_names:
+            raise ValueError("requested hidden dimension for inactive branch")
+        return (
+            32
+            if name == "gin"
+            and self.variant == "svg_v2_g2_signed_delta_q_gin32"
+            else self.fusion_hidden_dim
+        )
+
+    @property
     def gin_window_output_dim(self) -> int:
         if self.gin_compact_readout:
             return 2 * self.channel_projection_dim
@@ -331,12 +362,10 @@ class SVSignedGINConfig:
 
     @property
     def fusion_input_dim(self) -> int:
-        channel_count = int(self.uses_variation)
-        channel_count += int(self.uses_gin)
-        channel_count += int(self.uses_static)
-        channel_count += int(self.uses_spectral_direction)
-        channel_count += int(self.uses_diffusion_geometry)
-        return channel_count * self.channel_projection_dim
+        return sum(
+            self.branch_projection_dim(name)
+            for name in self.active_branch_names
+        )
 
     @property
     def active_branch_names(self) -> Tuple[str, ...]:
@@ -978,7 +1007,7 @@ def _batch_normalized_projection(
 
 
 class SVSignedGINClassifier(nn.Module):
-    """SG0/SG1/SG2 classifiers with equal-width feature channels."""
+    """SG0/SG1/SG2 classifiers with explicit per-branch widths."""
 
     model_name = "sv_hard_sgw_signed_gin"
 
@@ -1002,12 +1031,12 @@ class SVSignedGINClassifier(nn.Module):
             (
                 _batch_normalized_projection(
                     self.config.gin_output_dim,
-                    self.config.channel_projection_dim,
+                    self.config.gin_channel_projection_dim,
                 )
                 if self.config.gin_batch_normalization
                 else _projection(
                     self.config.gin_output_dim,
-                    self.config.channel_projection_dim,
+                    self.config.gin_channel_projection_dim,
                 )
             )
             if self.config.uses_gin
@@ -1066,12 +1095,12 @@ class SVSignedGINClassifier(nn.Module):
                 {
                     name: nn.Sequential(
                         nn.Linear(
-                            self.config.channel_projection_dim,
-                            self.config.fusion_hidden_dim,
+                            self.config.branch_projection_dim(name),
+                            self.config.branch_hidden_dim(name),
                         ),
                         nn.GELU(),
                         nn.Dropout(self.config.dropout),
-                        nn.Linear(self.config.fusion_hidden_dim, 2),
+                        nn.Linear(self.config.branch_hidden_dim(name), 2),
                     )
                     for name in self.config.active_branch_names
                 }
@@ -1371,7 +1400,7 @@ class SVSignedGINClassifier(nn.Module):
             encoder_outputs = outputs
         elif self.config.uses_gin:
             gin_projected = static.new_zeros(
-                (len(batch), self.config.channel_projection_dim)
+                (len(batch), self.config.gin_channel_projection_dim)
             )
             channels.append(gin_projected)
 
@@ -1570,6 +1599,10 @@ class SVSignedGINClassifier(nn.Module):
                 ),
                 "training_stage": self._training_stage,
                 "active_branches": self.config.active_branch_names,
+                "branch_projection_dims": {
+                    name: self.config.branch_projection_dim(name)
+                    for name in self.config.active_branch_names
+                },
                 "uses_spectral_direction": (
                     self.config.uses_spectral_direction
                 ),
