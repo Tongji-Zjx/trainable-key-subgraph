@@ -18,6 +18,7 @@ if str(SRC_ROOT) not in sys.path:
 
 from keysubgraph.data.data_split import file_sha256  # noqa: E402
 from keysubgraph.data.sv_signed_gin_dataset import (  # noqa: E402
+    SVMultiBudgetDataset,
     SVSignedGINDataset,
     create_sv_signed_gin_loader,
 )
@@ -45,6 +46,8 @@ def parse_args():
     parser.add_argument("--theory-scaler", type=Path)
     parser.add_argument("--spectral-manifest", type=Path)
     parser.add_argument("--spectral-scaler", type=Path)
+    parser.add_argument("--multi-budget-manifests", nargs=3, type=Path)
+    parser.add_argument("--multi-budget-scalers", nargs=3, type=Path)
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument(
         "--threshold-strategy",
@@ -92,7 +95,27 @@ def main():
     thresholds = checkpoint.get("validation_thresholds")
     if not isinstance(thresholds, dict) or args.threshold_strategy not in thresholds:
         raise ValueError("SV checkpoint has no frozen validation threshold")
-    if model.config.uses_theory_geometry:
+    if model.config.uses_multi_budget:
+        if (
+            args.multi_budget_manifests is None
+            or args.multi_budget_scalers is None
+        ):
+            raise ValueError(
+                "E1 evaluation requires three manifests and scalers"
+            )
+        dataset = SVMultiBudgetDataset(
+            args.multi_budget_manifests,
+            args.multi_budget_scalers,
+            include_windows=True,
+        )
+    elif (
+        args.multi_budget_manifests is not None
+        or args.multi_budget_scalers is not None
+    ):
+        raise ValueError(
+            "multi-budget inputs were supplied to a single-budget model"
+        )
+    elif model.config.uses_theory_geometry:
         if args.theory_cache is None or args.theory_scaler is None:
             raise ValueError(
                 "theory-geometry evaluation requires its sidecar/scaler"
@@ -182,6 +205,33 @@ def main():
             or not cache_hash_matches
         ):
             raise ValueError("SV spectral evaluation provenance mismatch")
+    if model.config.uses_multi_budget:
+        manifest_hashes = [
+            file_sha256(path) for path in dataset.manifest_paths
+        ]
+        scaler_hashes = [
+            file_sha256(path) for path in dataset.scaler_paths
+        ]
+        expected_manifest_hashes = None
+        if dataset.split == "train":
+            expected_manifest_hashes = expected.get(
+                "multi_budget_train_manifest_sha256"
+            )
+        elif dataset.split == "validation":
+            expected_manifest_hashes = expected.get(
+                "multi_budget_validation_manifest_sha256"
+            )
+        if (
+            (
+                expected_manifest_hashes is not None
+                and expected_manifest_hashes != manifest_hashes
+            )
+            or expected.get("multi_budget_scaler_sha256")
+            != scaler_hashes
+            or expected.get("multi_budget_grid")
+            != dataset.manifest["multi_budget_grid"]
+        ):
+            raise ValueError("SV multi-budget evaluation provenance mismatch")
     loader = create_sv_signed_gin_loader(
         dataset,
         batch_size=args.batch_size,
@@ -249,6 +299,16 @@ def main():
         result["spectral_scaler_sha256"] = file_sha256(
             args.spectral_scaler
         )
+    if model.config.uses_multi_budget:
+        result["multi_budget_manifest_sha256"] = [
+            file_sha256(path) for path in dataset.manifest_paths
+        ]
+        result["multi_budget_scaler_sha256"] = [
+            file_sha256(path) for path in dataset.scaler_paths
+        ]
+        result["multi_budget_grid"] = dataset.manifest[
+            "multi_budget_grid"
+        ]
     _atomic_json(args.output, result)
     print(
         json.dumps(

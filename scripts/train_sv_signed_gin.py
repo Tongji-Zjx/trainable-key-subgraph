@@ -17,6 +17,7 @@ if str(SRC_ROOT) not in sys.path:
 
 from keysubgraph.data.data_split import file_sha256  # noqa: E402
 from keysubgraph.data.sv_signed_gin_dataset import (  # noqa: E402
+    SVMultiBudgetDataset,
     SVSignedGINDataset,
     create_sv_signed_gin_loader,
 )
@@ -38,6 +39,9 @@ from keysubgraph.training.sv_signed_gin_trainer import (  # noqa: E402
     SVSignedGINTrainingConfig,
     train_sv_signed_gin_classifier,
 )
+from keysubgraph.training.trainer import (  # noqa: E402
+    set_reproducible_seed,
+)
 
 
 def parse_args():
@@ -51,6 +55,13 @@ def parse_args():
     parser.add_argument("--spectral-train-manifest", type=Path)
     parser.add_argument("--spectral-validation-manifest", type=Path)
     parser.add_argument("--spectral-scaler", type=Path)
+    parser.add_argument(
+        "--multi-budget-train-manifests", nargs=3, type=Path
+    )
+    parser.add_argument(
+        "--multi-budget-validation-manifests", nargs=3, type=Path
+    )
+    parser.add_argument("--multi-budget-scalers", nargs=3, type=Path)
     parser.add_argument(
         "--variant",
         choices=SV_SIGNED_GIN_VARIANTS,
@@ -149,6 +160,14 @@ def parse_args():
         default="current",
     )
     parser.add_argument(
+        "--site-class-balanced-sampler",
+        action="store_true",
+        help=(
+            "balance (site,class) strata in training batches; site is "
+            "never passed to the model"
+        ),
+    )
+    parser.add_argument(
         "--residual-gate-penalty-weight", type=float, default=0.01
     )
     parser.add_argument("--smoke", action="store_true")
@@ -177,6 +196,8 @@ def _resolve_architecture_defaults(args):
         "svg_v2_g2_signed_delta_q",
         "svg_v2_c3_f1_residual",
         "svg_v2_c3_g2",
+        "svg_v2_d1_community_pooling",
+        "svg_v2_e1_multi_budget",
     )
     if args.message_mode is None:
         args.message_mode = (
@@ -223,6 +244,12 @@ def _resolve_architecture_defaults(args):
         args.minimum_epochs = 30
         args.balanced_batch_sampler = True
         args.use_class_weights = False
+    if args.site_class_balanced_sampler:
+        if args.balanced_batch_sampler:
+            raise ValueError(
+                "site/class and class-only balanced samplers conflict"
+            )
+        args.use_class_weights = False
     return args
 
 
@@ -253,6 +280,9 @@ def _balanced_limit(dataset, count):
 
 def main():
     args = _resolve_architecture_defaults(parse_args())
+    # The model is instantiated below, so the CLI seed must be applied here
+    # rather than only inside the trainer after parameters already exist.
+    set_reproducible_seed(args.seed)
     if args.smoke and args.overfit_samples is not None:
         raise ValueError("SV smoke and overfit modes are mutually exclusive")
     model_config = SVSignedGINConfig(
@@ -283,7 +313,40 @@ def main():
         args.spectral_validation_manifest,
         args.spectral_scaler,
     )
-    if model_config.uses_theory_geometry:
+    multi_budget_arguments = (
+        args.multi_budget_train_manifests,
+        args.multi_budget_validation_manifests,
+        args.multi_budget_scalers,
+    )
+    if model_config.uses_multi_budget:
+        if any(value is None for value in multi_budget_arguments):
+            raise ValueError(
+                "E1 requires train/validation manifests and scalers for "
+                "all three budgets"
+            )
+        if any(value is not None for value in theory_arguments):
+            raise ValueError("E1 cannot use legacy theory sidecars")
+        if any(value is not None for value in spectral_arguments):
+            raise ValueError("E1 cannot use spectral sidecars")
+        train = SVMultiBudgetDataset(
+            args.multi_budget_train_manifests,
+            args.multi_budget_scalers,
+            include_windows=True,
+        )
+        validation = SVMultiBudgetDataset(
+            (
+                args.multi_budget_train_manifests
+                if args.overfit_samples is not None
+                else args.multi_budget_validation_manifests
+            ),
+            args.multi_budget_scalers,
+            include_windows=True,
+        )
+    elif any(value is not None for value in multi_budget_arguments):
+        raise ValueError(
+            "multi-budget inputs were supplied to a single-budget model"
+        )
+    elif model_config.uses_theory_geometry:
         if model_config.uses_spectral_diffusion_sidecar:
             raise ValueError("legacy and SVG-v2 sidecars cannot be combined")
         if any(value is None for value in theory_arguments):
@@ -370,10 +433,16 @@ def main():
         train,
         batch_size=args.batch_size,
         seed=args.seed,
-        shuffle=not args.balanced_batch_sampler,
+        shuffle=not (
+            args.balanced_batch_sampler
+            or args.site_class_balanced_sampler
+        ),
         num_workers=args.num_workers,
         pin_memory=args.device.startswith("cuda"),
         balanced_batch_sampler=args.balanced_batch_sampler,
+        site_class_balanced_sampler=(
+            args.site_class_balanced_sampler
+        ),
     )
     validation_loader = create_sv_signed_gin_loader(
         validation,
@@ -464,6 +533,25 @@ def main():
                 ),
             }
         )
+    if model_config.uses_multi_budget:
+        provenance.update(
+            {
+                "multi_budget_train_manifest_sha256": [
+                    file_sha256(path)
+                    for path in train.manifest_paths
+                ],
+                "multi_budget_validation_manifest_sha256": [
+                    file_sha256(path)
+                    for path in validation.manifest_paths
+                ],
+                "multi_budget_scaler_sha256": [
+                    file_sha256(path) for path in train.scaler_paths
+                ],
+                "multi_budget_grid": train.manifest[
+                    "multi_budget_grid"
+                ],
+            }
+        )
     result = train_sv_signed_gin_classifier(
         model=model,
         train_loader=train_loader,
@@ -489,6 +577,9 @@ def main():
             "signed_delta_q_weight": args.signed_delta_q_weight,
             "training_recipe": args.training_recipe,
             "balanced_batch_sampler": args.balanced_batch_sampler,
+            "site_class_balanced_sampler": (
+                args.site_class_balanced_sampler
+            ),
             "label_smoothing": args.label_smoothing,
         }
     )

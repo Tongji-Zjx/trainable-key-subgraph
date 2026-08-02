@@ -293,6 +293,21 @@ class SVSignedGINCrossfitSummaryTest(unittest.TestCase):
             metrics = result["metrics"]
             self.assertEqual(metrics["sample_count"], 4)
             self.assertAlmostEqual(metrics["pooled_oof_roc_auc"], 1.0)
+            summary = json.loads(
+                result["summary_json"].read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                summary["primary_metric"], "outer_fold_roc_auc_mean"
+            )
+            self.assertTrue(summary["pooled_oof_roc_auc_is_auxiliary"])
+            self.assertAlmostEqual(summary["primary_metric_value"], 1.0)
+            markdown = result["summary_markdown"].read_text(
+                encoding="utf-8"
+            )
+            self.assertLess(
+                markdown.index("| **Mean fold AUROC"),
+                markdown.index("| Pooled OOF AUROC"),
+            )
             self.assertAlmostEqual(metrics["balanced_accuracy"], 1.0)
             self.assertTrue(result["summary_markdown"].is_file())
             self.assertTrue(result["predictions_csv"].is_file())

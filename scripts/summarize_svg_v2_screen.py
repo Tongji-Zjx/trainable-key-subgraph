@@ -62,6 +62,8 @@ def build_summary(datasets, candidates, folds, baseline_variant, seed):
         raise ValueError("streamlined SVG-v2 screen requires two folds")
     result = {
         "artifact_type": "svg_v2_two_fold_validation_screen",
+        "primary_metric": "mean_inner_validation_fold_roc_auc",
+        "pooled_auc_used": False,
         "test_used": False,
         "folds": list(folds),
         "seed": int(seed),
@@ -165,10 +167,12 @@ def _markdown(result):
         "# SVG-v2 两折开发筛选",
         "",
         "- outer-test 使用：否",
+        "- 主指标：两折 inner-validation AUROC 算术平均",
+        "- pooled AUROC 使用：否",
         "- fold：{}".format(", ".join(map(str, result["folds"]))),
         "- seed：{}".format(result["seed"]),
         "",
-        "| 候选 | 数据集 | ΔAUC | ΔSite-AUC | 正向fold | 进入Round 2 |",
+        "| 候选 | 数据集 | ΔMean-fold AUC | ΔMean-fold Site-AUC | 正向fold | 进入下一轮 |",
         "|---|---|---:|---:|---:|---|",
     ]
     for candidate in result["candidates"]:
@@ -189,7 +193,7 @@ def _markdown(result):
     lines.extend(
         [
             "",
-            "进入Round 2：{}".format(
+            "进入下一轮：{}".format(
                 ", ".join(result["eligible_candidates"]) or "无"
             ),
             "",

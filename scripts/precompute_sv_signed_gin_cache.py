@@ -40,6 +40,9 @@ from keysubgraph.features.sv_hard_graph_features import (  # noqa: E402
 from keysubgraph.models.dual_stse_hard_sgw import (  # noqa: E402
     DualSTSEHardSGWClassifier,
 )
+from keysubgraph.models.dual_stse_hard_sgw_types import (  # noqa: E402
+    DualSTSEHardSGWConfig,
+)
 from keysubgraph.training.dual_stse_hard_sgw_trainer import (  # noqa: E402
     load_dual_checkpoint,
 )
@@ -67,6 +70,8 @@ def parse_args():
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--selection-seed", type=int, default=42)
+    parser.add_argument("--node-ratio", type=float, default=0.50)
+    parser.add_argument("--edge-ratio", type=float, default=0.30)
     parser.add_argument("--max-samples", type=int)
     parser.add_argument("--overwrite", action="store_true")
     return parser.parse_args()
@@ -80,6 +85,8 @@ def main():
         raise ValueError("full/random SV selection must not load a checkpoint")
     if args.max_samples is not None and args.max_samples < 1:
         raise ValueError("SV max-samples must be positive")
+    if not 0.0 < args.node_ratio <= 1.0 or not 0.0 < args.edge_ratio <= 1.0:
+        raise ValueError("SV selection ratios must lie in (0,1]")
     protocol = validate_data_protocol(args.protocol, PROJECT_ROOT)
     protocol_sha256 = file_sha256(args.protocol)
     paths = protocol["paths"]
@@ -101,7 +108,12 @@ def main():
         pin_memory=False,
     )
     device = torch.device(args.device)
-    model = DualSTSEHardSGWClassifier().to(device)
+    model = DualSTSEHardSGWClassifier(
+        DualSTSEHardSGWConfig(
+            target_node_ratio=float(args.node_ratio),
+            target_edge_ratio=float(args.edge_ratio),
+        )
+    ).to(device)
     selector_sha256 = "none"
     if args.selector_checkpoint is not None:
         selector_sha256 = file_sha256(args.selector_checkpoint)
@@ -140,6 +152,10 @@ def main():
                     record.selection_mode == args.selection_mode,
                     int(record.selection_seed)
                     == int(args.selection_seed),
+                    float(getattr(record, "node_ratio", 0.50))
+                    == float(args.node_ratio),
+                    float(getattr(record, "edge_ratio", 0.30))
+                    == float(args.edge_ratio),
                 )
                 if not all(checks):
                     raise ValueError(
@@ -183,6 +199,7 @@ def main():
                         node_features=window.node_features.detach().cpu(),
                         adjacency=window.adjacency.detach().cpu(),
                         time_start=float(window.time_start),
+                        communities=window.communities.detach().cpu(),
                     )
                     if window is not None
                     else None
@@ -205,6 +222,8 @@ def main():
                 selector_checkpoint_sha256=selector_sha256,
                 selection_mode=args.selection_mode,
                 selection_seed=args.selection_seed,
+                node_ratio=float(args.node_ratio),
+                edge_ratio=float(args.edge_ratio),
             )
             save_sv_signed_gin_record(
                 record, path, overwrite=args.overwrite
@@ -244,6 +263,8 @@ def main():
                 "sample_count": len(feature_paths),
                 "split": args.split,
                 "selection_mode": args.selection_mode,
+                "node_ratio": float(args.node_ratio),
+                "edge_ratio": float(args.edge_ratio),
                 "selector_checkpoint_sha256": selector_sha256,
             },
             ensure_ascii=False,

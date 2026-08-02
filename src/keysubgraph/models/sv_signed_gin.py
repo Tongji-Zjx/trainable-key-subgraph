@@ -45,6 +45,8 @@ SV_SIGNED_GIN_VARIANTS = (
     "svg_v2_g2_signed_delta_q",
     "svg_v2_c3_f1_residual",
     "svg_v2_c3_g2",
+    "svg_v2_d1_community_pooling",
+    "svg_v2_e1_multi_budget",
 )
 SV_DEFAULT_VARIANT = "signed_gin_multibranch_late_fusion"
 SV_SIGNED_GIN_MESSAGE_MODES = (
@@ -104,6 +106,8 @@ class SVSignedGINConfig:
             "svg_v2_g2_signed_delta_q",
             "svg_v2_c3_f1_residual",
             "svg_v2_c3_g2",
+            "svg_v2_d1_community_pooling",
+            "svg_v2_e1_multi_budget",
         )
         defaults = {
             "message_mode": (
@@ -223,6 +227,8 @@ class SVSignedGINConfig:
             "svg_v2_g2_signed_delta_q",
             "svg_v2_c3_f1_residual",
             "svg_v2_c3_g2",
+            "svg_v2_d1_community_pooling",
+            "svg_v2_e1_multi_budget",
         )
 
     @property
@@ -288,6 +294,14 @@ class SVSignedGINConfig:
         )
 
     @property
+    def uses_community_hierarchical_pooling(self) -> bool:
+        return self.variant == "svg_v2_d1_community_pooling"
+
+    @property
+    def uses_multi_budget(self) -> bool:
+        return self.variant == "svg_v2_e1_multi_budget"
+
+    @property
     def effective_node_feature_dim(self) -> int:
         return self.node_feature_dim + (
             self.hks_dim if self.uses_hks else 0
@@ -349,6 +363,7 @@ class SVSignedGINWindowInput:
     diffusion_eigenvalues: Optional[torch.Tensor] = None
     diffusion_eigenvectors: Optional[torch.Tensor] = None
     spectral_delta_to_next: Optional[torch.Tensor] = None
+    communities: Optional[torch.Tensor] = None
 
     def to(self, device) -> "SVSignedGINWindowInput":
         return SVSignedGINWindowInput(
@@ -371,6 +386,11 @@ class SVSignedGINWindowInput:
                 if self.spectral_delta_to_next is not None
                 else None
             ),
+            communities=(
+                self.communities.to(device)
+                if self.communities is not None
+                else None
+            ),
         )
 
 
@@ -383,6 +403,7 @@ class SVSignedGINSampleInput:
     variation: torch.Tensor
     spectral_direction: Optional[torch.Tensor] = None
     diffusion_geometry: Optional[torch.Tensor] = None
+    budget_views: Tuple["SVSignedGINSampleInput", ...] = ()
 
     def to(self, device) -> "SVSignedGINSampleInput":
         return SVSignedGINSampleInput(
@@ -400,6 +421,9 @@ class SVSignedGINSampleInput:
                 self.diffusion_geometry.to(device)
                 if self.diffusion_geometry is not None
                 else None
+            ),
+            budget_views=tuple(
+                view.to(device) for view in self.budget_views
             ),
         )
 
@@ -691,8 +715,29 @@ class SignedGINKeySubgraphEncoder(nn.Module):
                 nn.LayerNorm(self.config.gin_window_output_dim),
             )
             if self.config.gin_compact_readout
+            and not self.config.uses_community_hierarchical_pooling
             else None
         )
+        self.community_phi = None
+        self.community_rho = None
+        self.community_readout_projection = None
+        if self.config.uses_community_hierarchical_pooling:
+            hidden = self.config.gin_hidden_dim
+            self.community_phi = nn.Sequential(
+                nn.Linear(3 * hidden, hidden),
+                nn.GELU(),
+                nn.LayerNorm(hidden),
+            )
+            self.community_rho = nn.Sequential(
+                nn.Linear(hidden, 2 * hidden),
+                nn.GELU(),
+                nn.LayerNorm(2 * hidden),
+            )
+            self.community_readout_projection = nn.Sequential(
+                nn.Linear(4 * hidden, self.config.gin_window_output_dim),
+                nn.GELU(),
+                nn.LayerNorm(self.config.gin_window_output_dim),
+            )
         self.attention_residual_projection = None
         self.attention_residual_gate_logit = None
         if self.config.gin_residual_attention:
@@ -771,7 +816,56 @@ class SignedGINKeySubgraphEncoder(nn.Module):
                 torch.cat(history, dim=-1)
             )
         attention_embedding = None
-        if self.config.pooling == "attention":
+        if self.config.uses_community_hierarchical_pooling:
+            communities = window.communities
+            if communities is None or tuple(communities.shape) != (
+                states.shape[0],
+            ):
+                raise ValueError(
+                    "D1 community pooling requires aligned labels"
+                )
+            communities = communities.to(
+                device=states.device, dtype=torch.long
+            )
+            weights = states.new_full(
+                (states.shape[0],), 1.0 / float(states.shape[0])
+            )
+            global_mean = states.mean(dim=0)
+            global_variance = (
+                states - global_mean
+            ).square().mean(dim=0)
+            global_summary = torch.cat(
+                (
+                    global_mean,
+                    torch.sqrt(global_variance + 1.0e-8),
+                ),
+                dim=-1,
+            )
+            community_summaries = []
+            for label in torch.unique(communities, sorted=True):
+                members = states[communities == label]
+                mean = members.mean(dim=0)
+                variance = (members - mean).square().mean(dim=0)
+                community_summaries.append(
+                    torch.cat(
+                        (
+                            mean,
+                            torch.sqrt(variance + 1.0e-8),
+                            members.max(dim=0).values,
+                        ),
+                        dim=-1,
+                    )
+                )
+            encoded_communities = self.community_phi(
+                torch.stack(community_summaries, dim=0)
+            ).sum(dim=0)
+            community_summary = self.community_rho(
+                encoded_communities
+            )
+            embedding = self.community_readout_projection(
+                torch.cat((global_summary, community_summary), dim=-1)
+            )
+        elif self.config.pooling == "attention":
             scores = self.attention(states).squeeze(-1)
             weights = torch.softmax(scores, dim=0)
             embedding = (states * weights[:, None]).sum(dim=0)
@@ -1137,7 +1231,103 @@ class SVSignedGINClassifier(nn.Module):
     def config_dict(self) -> Dict[str, Any]:
         return asdict(self.config)
 
+    @staticmethod
+    def _mean_optional(outputs, name):
+        values = [getattr(output, name) for output in outputs]
+        if all(value is None for value in values):
+            return None
+        if any(value is None for value in values):
+            raise RuntimeError("E1 budget outputs are structurally inconsistent")
+        return torch.stack(values, dim=0).mean(dim=0)
+
+    def _forward_multi_budget(
+        self, batch: SVSignedGINBatch
+    ) -> SVSignedGINOutput:
+        counts = {len(sample.budget_views) for sample in batch}
+        if counts != {3}:
+            raise ValueError("E1 requires three aligned views per sample")
+        outputs = []
+        for budget_index in range(3):
+            view_batch = SVSignedGINBatch(
+                tuple(
+                    sample.budget_views[budget_index] for sample in batch
+                )
+            )
+            outputs.append(self._forward_standard(view_batch))
+        averaged = {
+            "gin": self._mean_optional(outputs, "gin_projection"),
+            "static_spectral": outputs[1].static_projection,
+            "variation": outputs[1].variation_projection,
+        }
+        if not self.config.uses_late_fusion:
+            raise RuntimeError("E1 requires the frozen SVG late-fusion head")
+        branch_logits = {
+            name: self.branch_classifiers[name](averaged[name])
+            for name in self.config.active_branch_names
+        }
+        fusion_weights = torch.softmax(self.fusion_log_weights, dim=0)
+        logits = (
+            torch.stack(
+                [
+                    branch_logits[name]
+                    for name in self.config.active_branch_names
+                ],
+                dim=0,
+            )
+            * fusion_weights[:, None, None]
+        ).sum(dim=0)
+        final_representation = torch.cat(
+            [averaged[name] for name in self.config.active_branch_names],
+            dim=-1,
+        )
+        diagnostics = dict(outputs[1].diagnostics)
+        diagnostics.update(
+            {
+                "uses_multi_budget": True,
+                "multi_budget_grid": (
+                    (0.35, 0.20),
+                    (0.50, 0.30),
+                    (0.65, 0.40),
+                ),
+                "multi_budget_fusion": "fixed_equal_mean",
+                "multi_budget_averaged_channel": "gin",
+            }
+        )
+        return SVSignedGINOutput(
+            logits=logits,
+            final_representation=final_representation,
+            gin_representation=self._mean_optional(
+                outputs, "gin_representation"
+            ),
+            static_projection=outputs[1].static_projection,
+            variation_projection=outputs[1].variation_projection,
+            gin_projection=averaged["gin"],
+            spectral_direction_projection=self._mean_optional(
+                outputs, "spectral_direction_projection"
+            ),
+            diffusion_geometry_projection=self._mean_optional(
+                outputs, "diffusion_geometry_projection"
+            ),
+            encoder_outputs=outputs[1].encoder_outputs,
+            diagnostics=diagnostics,
+            branch_logits=branch_logits,
+            fusion_weights=fusion_weights,
+            residual_gates=outputs[1].residual_gates,
+            gin_normalized_representation=self._mean_optional(
+                outputs, "gin_normalized_representation"
+            ),
+            signed_delta_q_predictions=None,
+            signed_delta_q_targets=None,
+        )
+
     def forward(self, batch: SVSignedGINBatch) -> SVSignedGINOutput:
+        if self.config.uses_multi_budget:
+            return self._forward_multi_budget(batch)
+        return self._forward_standard(batch)
+
+    def _forward_standard(
+        self, batch: SVSignedGINBatch
+    ) -> SVSignedGINOutput:
         if len(batch) < 1:
             raise ValueError("SV Signed-GIN batch cannot be empty")
         static = torch.stack(
@@ -1393,6 +1583,10 @@ class SVSignedGINClassifier(nn.Module):
                 "uses_signed_delta_q_auxiliary": (
                     self.config.uses_signed_delta_q_auxiliary
                 ),
+                "uses_community_hierarchical_pooling": (
+                    self.config.uses_community_hierarchical_pooling
+                ),
+                "uses_multi_budget": self.config.uses_multi_budget,
                 "hks_time_scales": self.config.hks_time_scales,
                 "diffusion_message_time_scales": (
                     self.config.diffusion_message_time_scales

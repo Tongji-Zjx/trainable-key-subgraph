@@ -15,7 +15,8 @@ from .sv_signed_gin_artifact import (
 )
 
 
-SV_SIGNED_GIN_MANIFEST_SCHEMA_VERSION = 1
+SV_SIGNED_GIN_MANIFEST_SCHEMA_VERSION = 2
+SV_SIGNED_GIN_MANIFEST_SUPPORTED_SCHEMA_VERSIONS = (1, 2)
 
 
 def sv_signed_gin_filename(sample_key: str) -> str:
@@ -28,6 +29,8 @@ def _provenance(record: SVSignedGINRecord) -> Dict:
         "selector_checkpoint_sha256": record.selector_checkpoint_sha256,
         "selection_mode": record.selection_mode,
         "selection_seed": int(record.selection_seed),
+        "node_ratio": float(getattr(record, "node_ratio", 0.50)),
+        "edge_ratio": float(getattr(record, "edge_ratio", 0.30)),
     }
 
 
@@ -178,8 +181,8 @@ def read_sv_signed_gin_manifest(
     path = Path(path).resolve()
     with path.open("r", encoding="utf-8") as handle:
         payload = json.load(handle)
-    if payload.get("schema_version") != (
-        SV_SIGNED_GIN_MANIFEST_SCHEMA_VERSION
+    if payload.get("schema_version") not in (
+        SV_SIGNED_GIN_MANIFEST_SUPPORTED_SCHEMA_VERSIONS
     ):
         raise ValueError("unsupported SV Signed-GIN manifest schema")
     if payload.get("artifact_type") != (
@@ -198,6 +201,16 @@ def read_sv_signed_gin_manifest(
         if file_sha256(feature_path) != row["feature_sha256"]:
             raise ValueError("SV Signed-GIN artifact hash mismatch")
         record = load_sv_signed_gin_record(feature_path)
+        payload_provenance = {
+            "protocol_sha256": payload["protocol_sha256"],
+            "selector_checkpoint_sha256": payload[
+                "selector_checkpoint_sha256"
+            ],
+            "selection_mode": payload["selection_mode"],
+            "selection_seed": int(payload["selection_seed"]),
+            "node_ratio": float(payload.get("node_ratio", 0.50)),
+            "edge_ratio": float(payload.get("edge_ratio", 0.30)),
+        }
         checks = (
             record.sample_key == row["sample_key"],
             record.sample_id == row["sample_id"],
@@ -209,15 +222,7 @@ def read_sv_signed_gin_manifest(
             == int(row["valid_window_count"]),
             record.valid_transition_count
             == int(row["valid_transition_count"]),
-            _provenance(record)
-            == {
-                "protocol_sha256": payload["protocol_sha256"],
-                "selector_checkpoint_sha256": payload[
-                    "selector_checkpoint_sha256"
-                ],
-                "selection_mode": payload["selection_mode"],
-                "selection_seed": int(payload["selection_seed"]),
-            },
+            _provenance(record) == payload_provenance,
         )
         if not all(checks):
             raise ValueError("SV Signed-GIN manifest record mismatch")

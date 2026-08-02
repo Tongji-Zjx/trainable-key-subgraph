@@ -16,7 +16,8 @@ from keysubgraph.features.sv_hard_graph_features import (
 )
 
 
-SV_SIGNED_GIN_ARTIFACT_SCHEMA_VERSION = 1
+SV_SIGNED_GIN_ARTIFACT_SCHEMA_VERSION = 2
+SV_SIGNED_GIN_ARTIFACT_SUPPORTED_SCHEMA_VERSIONS = (1, 2)
 
 
 @dataclass(frozen=True)
@@ -24,6 +25,7 @@ class SVSignedGINWindowRecord:
     node_features: torch.Tensor
     adjacency: torch.Tensor
     time_start: float
+    communities: Optional[torch.Tensor] = None
 
 
 @dataclass(frozen=True)
@@ -43,6 +45,8 @@ class SVSignedGINRecord:
     selector_checkpoint_sha256: str
     selection_mode: str
     selection_seed: int
+    node_ratio: float = 0.50
+    edge_ratio: float = 0.30
 
     @property
     def valid_window_count(self) -> int:
@@ -110,6 +114,19 @@ def validate_sv_signed_gin_record(record: SVSignedGINRecord) -> None:
             torch.isfinite(window.adjacency).all()
         ):
             raise ValueError("SV hard-window tensors are non-finite")
+        communities = getattr(window, "communities", None)
+        if communities is not None:
+            if tuple(communities.shape) != (node_count,):
+                raise ValueError(
+                    "SV hard-window communities do not align with nodes"
+                )
+            if communities.dtype not in (
+                torch.int8,
+                torch.int16,
+                torch.int32,
+                torch.int64,
+            ):
+                raise ValueError("SV community labels must be integral")
         if not torch.allclose(
             window.adjacency,
             window.adjacency.transpose(0, 1),
@@ -143,6 +160,12 @@ def validate_sv_signed_gin_record(record: SVSignedGINRecord) -> None:
         raise ValueError("SV provenance fields are required")
     if record.selection_mode not in ("learned", "full", "random"):
         raise ValueError("SV selection mode is invalid")
+    for ratio in (
+        float(getattr(record, "node_ratio", 0.50)),
+        float(getattr(record, "edge_ratio", 0.30)),
+    ):
+        if ratio <= 0.0 or ratio > 1.0:
+            raise ValueError("SV selection ratios must lie in (0,1]")
 
 
 def save_sv_signed_gin_record(
@@ -179,8 +202,8 @@ def load_sv_signed_gin_record(path: Path) -> SVSignedGINRecord:
         payload = torch.load(
             str(Path(path).resolve()), map_location="cpu"
         )
-    if payload.get("schema_version") != (
-        SV_SIGNED_GIN_ARTIFACT_SCHEMA_VERSION
+    if payload.get("schema_version") not in (
+        SV_SIGNED_GIN_ARTIFACT_SUPPORTED_SCHEMA_VERSIONS
     ):
         raise ValueError("unsupported SV Signed-GIN artifact schema")
     if payload.get("artifact_type") != "sv_hard_sgw_signed_gin_record":

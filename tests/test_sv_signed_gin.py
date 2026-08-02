@@ -28,11 +28,13 @@ def _sample(key="sample", label=0, permutation=None):
         ),
         dtype=torch.float32,
     )
+    communities = torch.tensor((11, 11, 29), dtype=torch.long)
     if permutation is not None:
         features = features.index_select(0, permutation)
         adjacency = adjacency.index_select(0, permutation).index_select(
             1, permutation
         )
+        communities = communities.index_select(0, permutation)
     windows = (
         SVSignedGINWindowInput(
             features,
@@ -42,6 +44,7 @@ def _sample(key="sample", label=0, permutation=None):
             diffusion_eigenvalues=torch.tensor((0.1, 0.8, 1.4)),
             diffusion_eigenvectors=torch.eye(3),
             spectral_delta_to_next=torch.linspace(-0.5, 0.5, 16),
+            communities=communities,
         ),
         SVSignedGINWindowInput(
             features + 0.1,
@@ -50,6 +53,7 @@ def _sample(key="sample", label=0, permutation=None):
             hks=torch.linspace(0.2, 1.0, 18).reshape(3, 6),
             diffusion_eigenvalues=torch.tensor((0.1, 0.7, 1.3)),
             diffusion_eigenvectors=torch.eye(3),
+            communities=communities,
         ),
     )
     return SVSignedGINSampleInput(
@@ -160,11 +164,56 @@ class SVSignedGINTest(unittest.TestCase):
             self.assertAlmostEqual(float(weights.sum()), 1.0, places=6)
             self.assertTrue(bool((weights >= 0.0).all()))
 
+    def test_d1_pooling_is_node_and_community_relabel_invariant(self):
+        torch.manual_seed(720)
+        model = SVSignedGINClassifier(
+            SVSignedGINConfig(
+                variant="svg_v2_d1_community_pooling",
+                dropout=0.0,
+            )
+        ).eval()
+        original = _sample("a", 0)
+        permutation = torch.tensor((2, 0, 1))
+        permuted = _sample("a", 0, permutation=permutation)
+        relabeled_windows = tuple(
+            SVSignedGINWindowInput(
+                node_features=window.node_features,
+                adjacency=window.adjacency,
+                time_position=window.time_position,
+                hks=window.hks,
+                diffusion_eigenvalues=window.diffusion_eigenvalues,
+                diffusion_eigenvectors=window.diffusion_eigenvectors,
+                spectral_delta_to_next=window.spectral_delta_to_next,
+                communities=torch.where(
+                    window.communities == 11,
+                    torch.tensor(101),
+                    torch.tensor(7),
+                ),
+            )
+            for window in original.windows
+        )
+        relabeled = SVSignedGINSampleInput(
+            sample_key=original.sample_key,
+            label=original.label,
+            windows=relabeled_windows,
+            static_features=original.static_features,
+            variation=original.variation,
+            spectral_direction=original.spectral_direction,
+            diffusion_geometry=original.diffusion_geometry,
+        )
+        first = model(SVSignedGINBatch((original,))).logits
+        second = model(SVSignedGINBatch((permuted,))).logits
+        third = model(SVSignedGINBatch((relabeled,))).logits
+        self.assertTrue(torch.allclose(first, second, atol=1.0e-6))
+        self.assertTrue(torch.allclose(first, third, atol=1.0e-6))
+
     def test_all_variants_have_expected_dimensions(self):
         batch = SVSignedGINBatch(
             (_sample("a", 0), _sample("b", 1))
         )
         for variant in SV_SIGNED_GIN_VARIANTS:
+            if variant == "svg_v2_e1_multi_budget":
+                continue
             extra = {}
             if (
                 variant
@@ -189,6 +238,72 @@ class SVSignedGINTest(unittest.TestCase):
             self.assertEqual(
                 output.diagnostics["preserves_signed_edges"], True
             )
+
+    def test_e1_is_fixed_mean_of_three_shared_budget_views(self):
+        torch.manual_seed(721)
+        model = SVSignedGINClassifier(
+            SVSignedGINConfig(
+                variant="svg_v2_e1_multi_budget", dropout=0.0
+            )
+        ).eval()
+        first = _sample("a-low", 0)
+        middle = _sample("a-middle", 0)
+        high = _sample("a-high", 0)
+        sample = SVSignedGINSampleInput(
+            sample_key="a",
+            label=0,
+            windows=middle.windows,
+            static_features=middle.static_features,
+            variation=middle.variation,
+            budget_views=(first, middle, high),
+        )
+        output = model(SVSignedGINBatch((sample,)))
+        individual = [
+            model._forward_standard(SVSignedGINBatch((view,)))
+            for view in (first, middle, high)
+        ]
+        projected = {
+            "gin": torch.stack(
+                [value.gin_projection for value in individual], dim=0
+            ).mean(dim=0),
+            "static_spectral": individual[1].static_projection,
+            "variation": individual[1].variation_projection,
+        }
+        expected_branch_logits = {
+            name: model.branch_classifiers[name](projected[name])
+            for name in model.config.active_branch_names
+        }
+        weights = torch.softmax(model.fusion_log_weights, dim=0)
+        expected_logits = (
+            torch.stack(
+                [
+                    expected_branch_logits[name]
+                    for name in model.config.active_branch_names
+                ],
+                dim=0,
+            )
+            * weights[:, None, None]
+        ).sum(dim=0)
+        self.assertTrue(
+            torch.allclose(
+                output.logits,
+                expected_logits,
+                atol=1.0e-7,
+            )
+        )
+        self.assertEqual(
+            output.diagnostics["multi_budget_fusion"],
+            "fixed_equal_mean",
+        )
+        torch.nn.functional.cross_entropy(
+            output.logits, torch.tensor((0,))
+        ).backward()
+        gradient = sum(
+            float(parameter.grad.abs().sum())
+            for parameter in model.encoder.parameters()
+            if parameter.grad is not None
+        )
+        self.assertGreater(gradient, 0.0)
 
     def test_s_and_sv_are_strict_deletion_ablations(self):
         batch = SVSignedGINBatch(

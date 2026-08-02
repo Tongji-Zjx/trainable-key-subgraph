@@ -2,6 +2,7 @@ from __future__ import absolute_import, division, print_function
 
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 import torch
@@ -15,7 +16,9 @@ from keysubgraph.data.sv_signed_gin_artifact import (
     save_sv_signed_gin_record,
 )
 from keysubgraph.data.sv_signed_gin_dataset import (
+    SVMultiBudgetDataset,
     SVBalancedBatchSampler,
+    SVSiteClassBalancedBatchSampler,
     SVSignedGINDataset,
     create_sv_signed_gin_loader,
 )
@@ -45,8 +48,18 @@ def _record(key, label, split, offset=0.0, node_count=3):
         adjacency[index, index + 1] = value
         adjacency[index + 1, index] = value
     windows = (
-        SVSignedGINWindowRecord(node, adjacency, 0.0),
-        SVSignedGINWindowRecord(node + 0.1, adjacency * 0.8, 1.0),
+        SVSignedGINWindowRecord(
+            node,
+            adjacency,
+            0.0,
+            torch.arange(node_count, dtype=torch.long) % 2,
+        ),
+        SVSignedGINWindowRecord(
+            node + 0.1,
+            adjacency * 0.8,
+            1.0,
+            torch.arange(node_count, dtype=torch.long) % 2,
+        ),
     )
     return SVSignedGINRecord(
         sample_key=key,
@@ -87,6 +100,9 @@ class SVSignedGINDataTest(unittest.TestCase):
         self.assertEqual(loaded.valid_window_count, 2)
         self.assertEqual(tuple(loaded.windows[0].node_features.shape), (2, 15))
         self.assertTrue(bool((loaded.windows[0].adjacency > 0.0).any()))
+        self.assertEqual(
+            tuple(loaded.windows[0].communities.shape), (2,)
+        )
 
     def test_streaming_manifest_from_paths_matches_saved_records(self):
         records = (
@@ -220,6 +236,70 @@ class SVSignedGINDataTest(unittest.TestCase):
             observed = [labels[index] for index in batch]
             self.assertEqual(observed.count(0), 2)
             self.assertEqual(observed.count(1), 2)
+
+    def test_site_class_sampler_is_reproducible_and_site_aware(self):
+        labels = (0, 0, 0, 0, 1, 1, 1, 1)
+        sites = ("a", "a", "b", "b", "a", "a", "c", "c")
+        first = list(
+            SVSiteClassBalancedBatchSampler(
+                labels, sites, batch_size=4, seed=19
+            )
+        )
+        replay = list(
+            SVSiteClassBalancedBatchSampler(
+                labels, sites, batch_size=4, seed=19
+            )
+        )
+        self.assertEqual(first, replay)
+        observed_sites = {0: set(), 1: set()}
+        for batch in first:
+            observed = [labels[index] for index in batch]
+            self.assertEqual(observed.count(0), 2)
+            self.assertEqual(observed.count(1), 2)
+            for index in batch:
+                observed_sites[labels[index]].add(sites[index])
+        self.assertEqual(observed_sites[0], {"a", "b"})
+        self.assertEqual(observed_sites[1], {"a", "c"})
+
+    def test_multi_budget_dataset_aligns_three_frozen_views(self):
+        budgets = ((0.35, 0.20), (0.50, 0.30), (0.65, 0.40))
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifests = []
+            scalers = []
+            for index, (node_ratio, edge_ratio) in enumerate(budgets):
+                records = tuple(
+                    replace(
+                        _record(
+                            "sample-{}".format(item),
+                            item,
+                            "train",
+                            offset=float(index),
+                        ),
+                        node_ratio=node_ratio,
+                        edge_ratio=edge_ratio,
+                    )
+                    for item in (0, 1)
+                )
+                manifest = self._manifest(
+                    root / "budget-{}".format(index),
+                    records,
+                    "index",
+                )
+                scaler = fit_sv_signed_gin_standardizers(
+                    records, file_sha256(manifest)
+                )
+                scaler_path = root / "scaler-{}.json".format(index)
+                save_sv_signed_gin_standardizers(scaler, scaler_path)
+                manifests.append(manifest)
+                scalers.append(scaler_path)
+            dataset = SVMultiBudgetDataset(manifests, scalers)
+        self.assertEqual(len(dataset), 2)
+        self.assertEqual(len(dataset[0].budget_views), 3)
+        self.assertEqual(
+            dataset.manifest["multi_budget_grid"],
+            [[0.35, 0.20], [0.50, 0.30], [0.65, 0.40]],
+        )
 
 
 if __name__ == "__main__":

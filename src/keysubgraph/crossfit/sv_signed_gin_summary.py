@@ -347,6 +347,9 @@ def summarize_sv_signed_gin_crossfit(
     }
     payload = {
         "artifact_type": "sv_signed_gin_crossfit_oof_summary",
+        "primary_metric": "outer_fold_roc_auc_mean",
+        "primary_metric_value": metrics["outer_fold_roc_auc"]["mean"],
+        "pooled_oof_roc_auc_is_auxiliary": True,
         "variant": variant,
         "run_name": model_directory,
         "seed": int(seed),
@@ -376,20 +379,22 @@ def summarize_sv_signed_gin_crossfit(
         "- OOF 样本数：{}".format(len(oof_rows)),
         "- 每个样本恰好一次外折预测：是",
         "- 阈值：各折仅由该折 inner-validation 冻结",
+        "- **主指标：outer-fold AUROC 的算术平均**",
+        "- Pooled OOF AUROC：仅作辅助诊断，不用于模型晋升",
         "",
         "## 总体结果",
         "",
         "| 指标 | 数值 |",
         "|---|---:|",
-        "| Pooled OOF AUROC | {:.6f} |".format(pooled_auc),
-        "| Site-stratified OOF AUROC | {} |".format(
+        "| **Mean fold AUROC（主指标）** | **{:.6f} ± {:.6f}** |".format(
+            metrics["outer_fold_roc_auc"]["mean"],
+            metrics["outer_fold_roc_auc"]["standard_deviation"],
+        ),
+        "| Pooled OOF AUROC（辅助） | {:.6f} |".format(pooled_auc),
+        "| Site-stratified OOF AUROC（辅助） | {} |".format(
             "N/A"
             if site_auc["roc_auc"] is None
             else "{:.6f}".format(site_auc["roc_auc"])
-        ),
-        "| Mean fold AUROC | {:.6f} ± {:.6f} |".format(
-            metrics["outer_fold_roc_auc"]["mean"],
-            metrics["outer_fold_roc_auc"]["standard_deviation"],
         ),
         "| Accuracy | {:.6f} |".format(metrics["accuracy"]),
         "| Balanced Accuracy | {:.6f} |".format(
