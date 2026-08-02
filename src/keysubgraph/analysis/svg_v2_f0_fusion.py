@@ -129,6 +129,55 @@ def align_fusion_predictions(
     )
 
 
+def align_multi_fusion_predictions(
+    experts: Mapping[str, Mapping[str, Mapping[str, object]]],
+) -> Tuple[
+    Tuple[str, ...],
+    Tuple[str, ...],
+    torch.Tensor,
+    torch.Tensor,
+    Sequence[str],
+]:
+    """Align two or more named experts without changing sample identity."""
+
+    if len(experts) < 2:
+        raise ValueError("multi-expert fusion requires at least two experts")
+    names = tuple(experts)
+    if len(set(names)) != len(names) or any(not name for name in names):
+        raise ValueError("fusion expert names must be unique and non-empty")
+    reference = experts[names[0]]
+    if not reference:
+        raise ValueError("fusion prediction set is empty")
+    reference_keys = set(reference)
+    for name in names[1:]:
+        if set(experts[name]) != reference_keys:
+            raise ValueError("fusion experts do not cover the same samples")
+    keys = tuple(sorted(reference_keys))
+    labels = []
+    sites = []
+    logits = []
+    for key in keys:
+        first = reference[key]
+        label = int(first["label"])
+        site = str(first["site"])
+        current = []
+        for name in names:
+            row = experts[name][key]
+            if int(row["label"]) != label or str(row["site"]) != site:
+                raise ValueError("fusion expert metadata mismatch")
+            current.append(_logit(row["positive_probability"]))
+        labels.append(label)
+        sites.append(site)
+        logits.append(tuple(current))
+    return (
+        keys,
+        names,
+        torch.tensor(logits, dtype=torch.float64),
+        torch.tensor(labels, dtype=torch.float64),
+        sites,
+    )
+
+
 def _fit_platt(logits: torch.Tensor, labels: torch.Tensor, steps: int):
     intercept = torch.zeros((), dtype=torch.float64, requires_grad=True)
     raw_slope = torch.zeros((), dtype=torch.float64, requires_grad=True)
@@ -151,7 +200,11 @@ def _fit_nonnegative_fusion(
     steps: int,
 ):
     intercept = torch.zeros((), dtype=torch.float64, requires_grad=True)
-    raw_weights = torch.zeros(2, dtype=torch.float64, requires_grad=True)
+    if calibrated.ndim != 2 or calibrated.shape[1] < 2:
+        raise ValueError("calibrated fusion matrix must contain two experts")
+    raw_weights = torch.zeros(
+        int(calibrated.shape[1]), dtype=torch.float64, requires_grad=True
+    )
     optimizer = torch.optim.Adam((intercept, raw_weights), lr=0.03)
     for _ in range(int(steps)):
         optimizer.zero_grad()
@@ -162,6 +215,103 @@ def _fit_nonnegative_fusion(
         loss.backward()
         optimizer.step()
     return float(intercept.detach()), F.softplus(raw_weights).detach()
+
+
+def fit_multi_f0_fusion(
+    expert_fit: Mapping[str, Mapping[str, Mapping[str, object]]],
+    l1_weight: float = 1.0e-3,
+    optimization_steps: int = 2000,
+) -> Dict[str, object]:
+    """Fit calibrated nonnegative sparse F0 over named experts."""
+
+    if l1_weight < 0.0 or optimization_steps < 1:
+        raise ValueError("invalid multi-expert F0 optimization configuration")
+    keys, names, logits, labels, sites = align_multi_fusion_predictions(
+        expert_fit
+    )
+    if set(int(value) for value in labels.tolist()) != {0, 1}:
+        raise ValueError("multi-expert F0 fit set requires both classes")
+    calibrators = {}
+    calibrated_columns = []
+    for column, name in enumerate(names):
+        intercept, slope = _fit_platt(
+            logits[:, column], labels, optimization_steps
+        )
+        calibrators[name] = {"intercept": intercept, "slope": slope}
+        calibrated_columns.append(intercept + slope * logits[:, column])
+    calibrated = torch.stack(calibrated_columns, dim=-1)
+    intercept, weights = _fit_nonnegative_fusion(
+        calibrated, labels, l1_weight, optimization_steps
+    )
+    probabilities = torch.sigmoid(
+        intercept + calibrated.matmul(weights)
+    ).tolist()
+    threshold = fit_binary_threshold(
+        [int(value) for value in labels.tolist()],
+        probabilities,
+        "balanced_accuracy",
+    )
+    return {
+        "fit_sample_keys": list(keys),
+        "fit_sites": list(sites),
+        "expert_names": list(names),
+        "calibrators": calibrators,
+        "fusion_intercept": intercept,
+        "weights": {
+            name: float(weights[index]) for index, name in enumerate(names)
+        },
+        "l1_weight": float(l1_weight),
+        "optimization_steps": int(optimization_steps),
+        "threshold": float(threshold),
+    }
+
+
+def apply_multi_f0_fusion(
+    fitted: Mapping[str, object],
+    experts: Mapping[str, Mapping[str, Mapping[str, object]]],
+) -> Dict[str, object]:
+    """Apply a frozen multi-expert F0 model and its frozen threshold."""
+
+    keys, names, logits, labels, sites = align_multi_fusion_predictions(
+        experts
+    )
+    expected = tuple(str(name) for name in fitted["expert_names"])
+    if names != expected:
+        raise ValueError("fusion expert order differs from fitted model")
+    calibrated = []
+    for column, name in enumerate(names):
+        values = fitted["calibrators"][name]
+        calibrated.append(
+            float(values["intercept"])
+            + float(values["slope"]) * logits[:, column]
+        )
+    calibrated_tensor = torch.stack(calibrated, dim=-1)
+    weights = torch.tensor(
+        [float(fitted["weights"][name]) for name in names],
+        dtype=torch.float64,
+    )
+    probabilities = torch.sigmoid(
+        float(fitted["fusion_intercept"])
+        + calibrated_tensor.matmul(weights)
+    ).tolist()
+    labels_list = [int(value) for value in labels.tolist()]
+    threshold = float(fitted["threshold"])
+    metrics = binary_metrics(labels_list, probabilities, threshold)
+    metrics["site_stratified_roc_auc"] = site_stratified_roc_auc(
+        labels_list, probabilities, list(sites)
+    )
+    predictions = [
+        {
+            "sample_key": key,
+            "site": str(sites[index]),
+            "label": labels_list[index],
+            "positive_probability": float(probabilities[index]),
+            "threshold": threshold,
+            "predicted_label": int(probabilities[index] >= threshold),
+        }
+        for index, key in enumerate(keys)
+    ]
+    return {"metrics": metrics, "predictions": predictions}
 
 
 def fit_f0_fusion(

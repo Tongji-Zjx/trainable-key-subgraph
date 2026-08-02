@@ -7,8 +7,10 @@ from pathlib import Path
 
 from keysubgraph.analysis.svg_v2_f0_fusion import (
     apply_f0_fusion,
+    apply_multi_f0_fusion,
     crossfit_oof_f0_fusion,
     fit_f0_fusion,
+    fit_multi_f0_fusion,
     read_prediction_artifact,
 )
 
@@ -44,6 +46,46 @@ class SVGv2F0FusionTest(unittest.TestCase):
         svg = _branch("other", (0.2, 0.7))
         with self.assertRaisesRegex(ValueError, "same samples"):
             fit_f0_fusion(short, svg, optimization_steps=2)
+
+    def test_multi_expert_fusion_is_nonnegative_and_aligned(self):
+        short = _branch("fit", (0.1, 0.8, 0.2, 0.9, 0.3, 0.7))
+        static = _branch("fit", (0.2, 0.7, 0.3, 0.8, 0.4, 0.6))
+        g2 = _branch("fit", (0.3, 0.9, 0.25, 0.85, 0.35, 0.75))
+        fitted = fit_multi_f0_fusion(
+            {"short_term": short, "s": static, "g2": g2},
+            optimization_steps=100,
+        )
+        self.assertEqual(
+            fitted["expert_names"], ["short_term", "s", "g2"]
+        )
+        self.assertEqual(
+            set(fitted["weights"]), {"short_term", "s", "g2"}
+        )
+        self.assertTrue(
+            all(weight >= 0.0 for weight in fitted["weights"].values())
+        )
+        evaluated = apply_multi_f0_fusion(
+            fitted, {"short_term": short, "s": static, "g2": g2}
+        )
+        self.assertEqual(len(evaluated["predictions"]), len(short))
+        self.assertGreater(evaluated["metrics"]["roc_auc"], 0.9)
+
+    def test_multi_expert_fusion_rejects_order_or_sample_changes(self):
+        short = _branch("fit", (0.1, 0.8, 0.2, 0.9))
+        static = _branch("fit", (0.2, 0.7, 0.3, 0.8))
+        fitted = fit_multi_f0_fusion(
+            {"short_term": short, "s": static}, optimization_steps=5
+        )
+        with self.assertRaisesRegex(ValueError, "order"):
+            apply_multi_f0_fusion(
+                fitted, {"s": static, "short_term": short}
+            )
+        shifted = _branch("other", (0.2, 0.7, 0.3, 0.8))
+        with self.assertRaisesRegex(ValueError, "same samples"):
+            fit_multi_f0_fusion(
+                {"short_term": short, "s": shifted},
+                optimization_steps=2,
+            )
 
     def test_outer_oof_diagnostic_predicts_each_sample_once(self):
         short = _branch(
