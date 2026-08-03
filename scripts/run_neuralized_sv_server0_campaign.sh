@@ -10,7 +10,8 @@ set -euo pipefail
 # Optional:
 #   MODEL_SEED=42, DEVICE=cuda, EPOCHS=80, BATCH_SIZE=4,
 #   GRADIENT_ACCUMULATION_STEPS=2, GPU_WAIT_MIB=22000,
-#   GPU_WAIT_SECONDS=600, PYTHON_BIN=python
+#   GPU_WAIT_SECONDS=600, PYTHON_BIN=python, TRAIN_MISSING_SELECTOR=1,
+#   SELECTOR_EPOCHS=80, SELECTOR_NUM_WORKERS=2
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$PROJECT_ROOT"
@@ -29,6 +30,9 @@ GPU_WAIT_MIB="${GPU_WAIT_MIB:-22000}"
 GPU_WAIT_SECONDS="${GPU_WAIT_SECONDS:-600}"
 GPU_INDEX="${GPU_INDEX:-0}"
 PYTHON_BIN="${PYTHON_BIN:-python}"
+TRAIN_MISSING_SELECTOR="${TRAIN_MISSING_SELECTOR:-1}"
+SELECTOR_EPOCHS="${SELECTOR_EPOCHS:-80}"
+SELECTOR_NUM_WORKERS="${SELECTOR_NUM_WORKERS:-2}"
 LOG_ROOT="${LOG_ROOT:-logs/neuralized_sv/${DATASET_NAME}_seed${MODEL_SEED}}"
 FUSION_ROOT="${FUSION_ROOT:-${OUTPUT_ROOT}/fusion}"
 
@@ -55,6 +59,34 @@ export CUDA_VISIBLE_DEVICES="$GPU_INDEX"
 export PYTHONPATH="$PROJECT_ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
 
 for fold in 0 1 2; do
+  selector_checkpoint="$SOURCE_CROSSFIT_ROOT/fold_${fold}/selector/best_checkpoint.pt"
+  if [[ ! -f "$selector_checkpoint" ]]; then
+    if [[ "$TRAIN_MISSING_SELECTOR" != "1" ]]; then
+      echo "Missing selector checkpoint: $selector_checkpoint" >&2
+      exit 1
+    fi
+    wait_for_gpu
+    echo "START selector fold ${fold}"
+    "$PYTHON_BIN" -u scripts/train_dual_selector.py \
+      --protocol "$SOURCE_CROSSFIT_ROOT/fold_${fold}/protocol/data_protocol.json" \
+      --output-dir "$SOURCE_CROSSFIT_ROOT/fold_${fold}/selector" \
+      --device "$DEVICE" \
+      --epochs "$SELECTOR_EPOCHS" \
+      --batch-size 1 \
+      --num-workers "$SELECTOR_NUM_WORKERS" \
+      --seed "$MODEL_SEED" \
+      --learning-rate 0.001 \
+      --weight-decay 0.0001 \
+      --gradient-clip 1.0 \
+      --early-stopping-patience 15 \
+      --selector-objective current \
+      2>&1 | tee "$LOG_ROOT/selector_fold_${fold}.log"
+    if [[ ! -f "$selector_checkpoint" ]]; then
+      echo "Selector training created no checkpoint: $selector_checkpoint" >&2
+      exit 1
+    fi
+    echo "FINISH selector fold ${fold}"
+  fi
   completion="$OUTPUT_ROOT/fold_${fold}/models/NSV_safe_residual_seed${MODEL_SEED}/test_evaluation.json"
   if [[ -f "$completion" ]]; then
     echo "SKIP neuralized S/V fold ${fold}: ${completion} exists"
