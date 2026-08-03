@@ -82,6 +82,12 @@ from .author_short_term import (
     AuthorShortTermOutput,
     author_short_term_config,
 )
+from .neuralized_sv import (
+    NEURALIZED_SV_MODEL_NAME,
+    NEURALIZED_SV_VARIANTS,
+    NeuralizedSVClassifier,
+    NeuralizedSVConfig,
+)
 from .dual_stse_hard_sgw_types import (
     DUAL_EXPERIMENT_VARIANTS,
     DUAL_TRAINING_STAGES,
@@ -208,4 +214,8 @@ __all__ = [
     "AuthorShortTermConfig",
     "AuthorShortTermOutput",
     "author_short_term_config",
+    "NEURALIZED_SV_MODEL_NAME",
+    "NEURALIZED_SV_VARIANTS",
+    "NeuralizedSVClassifier",
+    "NeuralizedSVConfig",
 ]

@@ -327,7 +327,7 @@ def _checkpoint_payload(model, optimizer, scheduler, epoch, history, config,
                         centers):
     return {
         "schema_version": THEORY_NEURAL_CHECKPOINT_SCHEMA_VERSION,
-        "model_name": THEORY_NEURAL_MODEL_NAME,
+        "model_name": getattr(model, "model_name", THEORY_NEURAL_MODEL_NAME),
         "epoch": int(epoch),
         "model_state_dict": model.state_dict(),
         "optimizer_state_dict": optimizer.state_dict(),
@@ -349,7 +349,8 @@ def _checkpoint_payload(model, optimizer, scheduler, epoch, history, config,
 def load_theory_neural_checkpoint(path, model, device, expected_provenance=None):
     payload = _trusted_load(path, device)
     if (payload.get("schema_version") != THEORY_NEURAL_CHECKPOINT_SCHEMA_VERSION
-            or payload.get("model_name") != THEORY_NEURAL_MODEL_NAME):
+            or payload.get("model_name")
+            != getattr(model, "model_name", THEORY_NEURAL_MODEL_NAME)):
         raise ValueError("not a Stage-1 theory-neural checkpoint")
     expected = model.config.__class__(**payload["model_config"])
     if asdict(expected) != model.config_dict():
