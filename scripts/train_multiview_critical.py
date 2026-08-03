@@ -28,6 +28,7 @@ from keysubgraph.training.multiview_critical_trainer import (  # noqa: E402
     MultiViewTrainingConfig,
     train_multiview_critical,
 )
+from keysubgraph.training.trainer import set_reproducible_seed  # noqa: E402
 
 
 def main():
@@ -54,6 +55,10 @@ def main():
     parser.add_argument("--shuffle-correspondence", action="store_true")
     parser.add_argument("--smoke", action="store_true")
     args = parser.parse_args()
+
+    # Seed before model construction so paired stage ablations share the same
+    # initialization for every common parameter, not merely loader/dropout RNG.
+    set_reproducible_seed(args.seed)
 
     train = MultiViewCriticalDataset(
         PROJECT_ROOT, args.train_manifest, args.scaler,
