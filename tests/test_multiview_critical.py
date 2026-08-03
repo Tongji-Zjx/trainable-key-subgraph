@@ -285,6 +285,22 @@ class MultiViewCriticalTest(unittest.TestCase):
             payload = load_multiview_checkpoint(checkpoint, restored, torch.device("cpu"))
             self.assertEqual(payload["epoch"], 1)
 
+            single_class_batch = MultiViewCriticalBatch((samples[0], samples[0]))
+            single_class_loader = _TinyLoader([single_class_batch], (0, 0))
+            fallback = train_multiview_critical(
+                MultiViewCriticalClassifier(config),
+                single_class_loader,
+                single_class_loader,
+                torch.device("cpu"),
+                Path(directory) / "single_class",
+                MultiViewTrainingConfig(
+                    epochs=1, early_stopping_patience=0,
+                    max_train_batches=1, max_validation_batches=1,
+                ),
+            )
+            self.assertIsNone(fallback["best_auc"])
+            self.assertTrue(Path(fallback["best_checkpoint"]).is_file())
+
 
 if __name__ == "__main__":
     unittest.main()

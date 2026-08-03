@@ -176,9 +176,16 @@ def train_multiview_critical(
         checkpoint.update(dict(checkpoint_metadata or {}))
         _atomic_torch(output_dir / "last_checkpoint.pt", checkpoint)
         _atomic_json(output_dir / "history.json", history)
-        if score > best_auc:
-            best_auc, stale = score, 0
-            _atomic_torch(output_dir / "best_checkpoint.pt", checkpoint)
+        best_path = output_dir / "best_checkpoint.pt"
+        # A tiny smoke/overfit cohort may contain only one class, so AUROC is
+        # undefined.  The training entry point still promises a loadable best
+        # checkpoint; preserve epoch 1 as the deterministic fallback and only
+        # use AUROC comparisons once the metric is defined.
+        if not best_path.is_file() or score > best_auc:
+            if score != float("-inf"):
+                best_auc = score
+            stale = 0
+            _atomic_torch(best_path, checkpoint)
             _atomic_json(output_dir / "best_evaluation.json", {"epoch": epoch, "validation": validation_metrics})
         else:
             stale += 1
@@ -191,7 +198,11 @@ def train_multiview_critical(
         )
         if config.early_stopping_patience and stale >= config.early_stopping_patience:
             break
-    return {"best_checkpoint": str(output_dir / "best_checkpoint.pt"), "epochs_completed": len(history), "best_auc": best_auc}
+    return {
+        "best_checkpoint": str(output_dir / "best_checkpoint.pt"),
+        "epochs_completed": len(history),
+        "best_auc": None if best_auc == float("-inf") else best_auc,
+    }
 
 
 def load_multiview_checkpoint(path, model, device):
