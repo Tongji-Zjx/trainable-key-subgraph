@@ -31,6 +31,21 @@ from keysubgraph.training.multiview_critical_trainer import (  # noqa: E402
 from keysubgraph.training.trainer import set_reproducible_seed  # noqa: E402
 
 
+def _artifact_dimensions(dataset):
+    sample = dataset.samples[0]
+    window = next((item for item in sample.hard_windows if item is not None), None)
+    if window is None:
+        raise ValueError("multi-view artifact cannot establish feature dimensions")
+    return {
+        "node_feature_dim": int(window.node_features.shape[-1]),
+        "edge_feature_dim": int(window.edge_features.shape[-1]),
+        "spectral_feature_dim": int(window.spectral_features.shape[-1]),
+        "stable_static_dim": int(sample.stable_static.numel()),
+        "q_dim": int(dataset.scaler.q_mean.numel()),
+        "delta_q_dim": int(dataset.scaler.delta_mean.numel()),
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--train-manifest", type=Path, required=True)
@@ -78,6 +93,9 @@ def main():
     )
     if train.manifest["protocol_sha256"] != validation.manifest["protocol_sha256"] or train.manifest["selector_checkpoint_sha256"] != validation.manifest["selector_checkpoint_sha256"] or train.manifest["feature_schema_sha256"] != validation.manifest["feature_schema_sha256"]:
         raise ValueError("multi-view train/validation provenance mismatch")
+    dimensions = _artifact_dimensions(train)
+    if dimensions != _artifact_dimensions(validation):
+        raise ValueError("multi-view train/validation feature dimensions differ")
     train_loader = create_multiview_loader(
         train, args.batch_size, args.seed, True, args.num_workers,
         pin_memory=args.device.startswith("cuda"),
@@ -87,6 +105,12 @@ def main():
         pin_memory=args.device.startswith("cuda"),
     )
     model_config = MultiViewCriticalConfig(
+        node_feature_dim=dimensions["node_feature_dim"],
+        edge_feature_dim=dimensions["edge_feature_dim"],
+        spectral_feature_dim=dimensions["spectral_feature_dim"],
+        stable_static_dim=dimensions["stable_static_dim"],
+        q_dim=dimensions["q_dim"],
+        delta_q_dim=dimensions["delta_q_dim"],
         static_mode=args.static_mode,
         enable_static_attention=not args.disable_static_attention,
         enable_v=not args.disable_v,
