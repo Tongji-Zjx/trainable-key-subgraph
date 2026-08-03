@@ -53,6 +53,8 @@ def main():
     parser.add_argument("--disable-v", action="store_true")
     parser.add_argument("--disable-g", action="store_true")
     parser.add_argument("--shuffle-correspondence", action="store_true")
+    parser.add_argument("--max-train-samples", type=int)
+    parser.add_argument("--max-validation-samples", type=int)
     parser.add_argument("--smoke", action="store_true")
     args = parser.parse_args()
 
@@ -60,13 +62,19 @@ def main():
     # initialization for every common parameter, not merely loader/dropout RNG.
     set_reproducible_seed(args.seed)
 
+    max_train = 4 if args.smoke else args.max_train_samples
+    max_validation = 4 if args.smoke else args.max_validation_samples
+    if max_train is not None and max_train < 1:
+        raise ValueError("max train samples must be positive")
+    if max_validation is not None and max_validation < 1:
+        raise ValueError("max validation samples must be positive")
     train = MultiViewCriticalDataset(
         PROJECT_ROOT, args.train_manifest, args.scaler,
-        max_samples=4 if args.smoke else None,
+        max_samples=max_train,
     )
     validation = MultiViewCriticalDataset(
         PROJECT_ROOT, args.validation_manifest, args.scaler,
-        max_samples=4 if args.smoke else None,
+        max_samples=max_validation,
     )
     if train.manifest["protocol_sha256"] != validation.manifest["protocol_sha256"] or train.manifest["selector_checkpoint_sha256"] != validation.manifest["selector_checkpoint_sha256"] or train.manifest["feature_schema_sha256"] != validation.manifest["feature_schema_sha256"]:
         raise ValueError("multi-view train/validation provenance mismatch")

@@ -10,6 +10,11 @@ from pathlib import Path
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+SRC_ROOT = PROJECT_ROOT / "src"
+if str(SRC_ROOT) not in sys.path:
+    sys.path.insert(0, str(SRC_ROOT))
+
+from keysubgraph.data.data_split import file_sha256  # noqa: E402
 
 
 def _run(name, command, done_path, print_only=False):
@@ -136,7 +141,25 @@ def main():
                 "enable_g": bool(args.enable_g),
                 "correspondence": "shuffled" if args.shuffle_correspondence else "uot",
                 "seed": int(args.seed),
+                "epochs": int(args.epochs),
+                "batch_size": int(args.batch_size),
+                "learning_rate": float(args.learning_rate),
+                "weight_decay": float(args.weight_decay),
+                "gradient_clip": float(args.gradient_clip),
+                "early_stopping_patience": int(args.early_stopping_patience),
+                "lambda_q": float(args.lambda_q),
+                "lambda_delta_q": float(args.lambda_delta_q),
+                "train_manifest": str(args.train_manifest),
+                "train_manifest_sha256": file_sha256(args.train_manifest),
+                "validation_manifest": str(args.validation_manifest),
+                "validation_manifest_sha256": file_sha256(args.validation_manifest),
+                "scaler": str(args.scaler),
+                "scaler_sha256": file_sha256(args.scaler),
                 "test_evaluated": bool(args.evaluate_test),
+                "test_manifest": str(args.test_manifest) if args.test_manifest is not None else None,
+                "test_manifest_sha256": (
+                    file_sha256(args.test_manifest) if args.test_manifest is not None else None
+                ),
             }, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
         )
