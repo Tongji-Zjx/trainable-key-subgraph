@@ -509,6 +509,8 @@ class SVSignedGINOutput:
     gin_normalized_representation: Optional[torch.Tensor] = None
     signed_delta_q_predictions: Optional[torch.Tensor] = None
     signed_delta_q_targets: Optional[torch.Tensor] = None
+    signed_delta_q_hidden: Optional[torch.Tensor] = None
+    signed_delta_q_sample_indices: Optional[torch.Tensor] = None
 
 
 class SignedGINLayer(nn.Module):
@@ -1347,6 +1349,8 @@ class SVSignedGINClassifier(nn.Module):
             ),
             signed_delta_q_predictions=None,
             signed_delta_q_targets=None,
+            signed_delta_q_hidden=None,
+            signed_delta_q_sample_indices=None,
         )
 
     def forward(self, batch: SVSignedGINBatch) -> SVSignedGINOutput:
@@ -1466,10 +1470,15 @@ class SVSignedGINClassifier(nn.Module):
         final = torch.cat(channels, dim=-1)
         signed_delta_q_predictions = None
         signed_delta_q_targets = None
+        signed_delta_q_hidden = None
+        signed_delta_q_sample_indices = None
         if self.config.uses_signed_delta_q_auxiliary:
             prediction_inputs = []
             target_values = []
-            for sample, encoded in zip(batch, encoder_outputs):
+            sample_indices = []
+            for sample_index, (sample, encoded) in enumerate(
+                zip(batch, encoder_outputs)
+            ):
                 for left_index in range(len(sample.windows) - 1):
                     left_window = sample.windows[left_index]
                     right_window = sample.windows[left_index + 1]
@@ -1491,12 +1500,22 @@ class SVSignedGINClassifier(nn.Module):
                     target_values.append(
                         left_window.spectral_delta_to_next
                     )
+                    sample_indices.append(sample_index)
             if prediction_inputs:
-                signed_delta_q_predictions = self.signed_delta_q_head(
-                    torch.stack(prediction_inputs, dim=0)
+                stacked_inputs = torch.stack(prediction_inputs, dim=0)
+                signed_delta_q_hidden = self.signed_delta_q_head[:3](
+                    stacked_inputs
+                )
+                signed_delta_q_predictions = self.signed_delta_q_head[3](
+                    signed_delta_q_hidden
                 )
                 signed_delta_q_targets = torch.stack(
                     target_values, dim=0
+                )
+                signed_delta_q_sample_indices = torch.tensor(
+                    sample_indices,
+                    dtype=torch.long,
+                    device=stacked_inputs.device,
                 )
         branch_logits = None
         fusion_weights = None
@@ -1633,4 +1652,8 @@ class SVSignedGINClassifier(nn.Module):
             ),
             signed_delta_q_predictions=signed_delta_q_predictions,
             signed_delta_q_targets=signed_delta_q_targets,
+            signed_delta_q_hidden=signed_delta_q_hidden,
+            signed_delta_q_sample_indices=(
+                signed_delta_q_sample_indices
+            ),
         )

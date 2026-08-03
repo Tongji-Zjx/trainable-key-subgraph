@@ -68,6 +68,35 @@ def _sample(key="sample", label=0, permutation=None):
 
 
 class SVSignedGINTest(unittest.TestCase):
+    def test_g2_exports_aligned_delta_q_hidden_without_changing_predictions(self):
+        torch.manual_seed(718)
+        model = SVSignedGINClassifier(
+            SVSignedGINConfig(
+                variant="svg_v2_g2_signed_delta_q",
+                gin_hidden_dim=8,
+                attention_hidden_dim=4,
+                channel_projection_dim=4,
+                fusion_hidden_dim=4,
+                dropout=0.0,
+            )
+        ).eval()
+        output = model(
+            SVSignedGINBatch((_sample("a", 0), _sample("b", 1)))
+        )
+        self.assertEqual(tuple(output.signed_delta_q_hidden.shape), (2, 8))
+        self.assertTrue(
+            torch.equal(
+                output.signed_delta_q_sample_indices,
+                torch.tensor((0, 1), dtype=torch.long),
+            )
+        )
+        expected = model.signed_delta_q_head[3](
+            output.signed_delta_q_hidden
+        )
+        self.assertTrue(
+            torch.equal(expected, output.signed_delta_q_predictions)
+        )
+
     def test_default_profile_is_formal_svg(self):
         config = SVSignedGINConfig()
         self.assertEqual(
