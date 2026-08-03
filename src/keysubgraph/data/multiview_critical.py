@@ -205,13 +205,16 @@ def load_multiview_record(path):
 
 
 def write_multiview_manifest(paths, output_path, project_root, overwrite=False):
-    output_path = Path(output_path).resolve()
-    project_root = Path(project_root).resolve()
+    # Keep the logical project path here.  Resolving either side would follow an
+    # ``outputs`` symlink and make an in-project artifact appear to live outside
+    # an isolated git worktree.
+    output_path = Path(output_path).absolute()
+    project_root = Path(project_root).absolute()
     if output_path.exists() and not overwrite:
         raise FileExistsError("multi-view manifest already exists")
     records, provenance, split = [], None, None
     for path in paths:
-        path = Path(path).resolve()
+        path = Path(path).absolute()
         record = load_multiview_record(path)
         current = (
             record.protocol_sha256,

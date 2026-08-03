@@ -162,7 +162,9 @@ def main():
     builder = MultiViewCriticalFeatureBuilder(
         core_config=core, uot_iterations=args.object_uot_iterations
     )
-    output_dir = Path(args.output_dir).resolve()
+    # Preserve the logical path below PROJECT_ROOT even when the worktree shares
+    # a symlinked outputs directory with the main checkout.
+    output_dir = Path(args.output_dir).absolute()
     output_dir.mkdir(parents=True, exist_ok=True)
     paths_written = []
     selected_indices = [
