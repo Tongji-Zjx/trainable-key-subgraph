@@ -24,7 +24,7 @@ from keysubgraph.features.multiview_critical import (
 )
 
 
-MULTIVIEW_ARTIFACT_SCHEMA_VERSION = 2
+MULTIVIEW_ARTIFACT_SCHEMA_VERSION = 3
 
 
 @dataclass(frozen=True)

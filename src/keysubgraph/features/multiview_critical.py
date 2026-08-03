@@ -472,12 +472,20 @@ class MultiViewCriticalFeatureBuilder(object):
         delta_time = float(right.time_start) - float(left.time_start)
         if delta_time <= 0.0:
             raise ValueError("critical transition time must increase")
+        target_rate = target.clone()
+        # The canonical 18-D transition schema stores raw signed spectral
+        # quantile deltas in 0:16 and two already time-normalized speeds in
+        # 16:18.  D_V predicts a uniform rate target, so normalize only the raw
+        # delta block exactly once.
+        target_rate[:MULTIVIEW_Q_DIM] = (
+            target_rate[:MULTIVIEW_Q_DIM] / float(delta_time)
+        )
         return CriticalTransitionFeatures(
             source_index=index,
             target_index=index + 1,
             object_cost=cost,
             transport_plan=plan,
-            delta_q_target=target,
+            delta_q_target=target_rate,
             delta_time=delta_time,
             solver_converged=converged,
         )

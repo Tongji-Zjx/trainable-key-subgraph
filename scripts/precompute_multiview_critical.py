@@ -73,7 +73,7 @@ def _window_to(window, device):
 def _schema_hash(config, uot_iterations):
     payload = {
         "artifact": "theory_guided_multiview_critical",
-        "schema_version": 2,
+        "schema_version": 3,
         "node_dim": 15,
         "edge_dim": 6,
         "spectral_dim": 9,
@@ -155,6 +155,7 @@ def main():
                 "entropic_reg": 0.1,
                 "mass_reg": 1.0,
             },
+            "delta_q_target": "spectral_quantile_rates_plus_existing_speeds_v1",
         },
         sort_keys=True,
         separators=(",", ":"),

@@ -156,6 +156,32 @@ class MultiViewCriticalTest(unittest.TestCase):
         self.assertTrue(torch.isfinite(first.transitions[0].object_cost).all())
         self.assertGreater(float(first.transitions[0].object_cost.sum()), 0.0)
 
+    def test_delta_q_decoder_target_has_uniform_rate_units(self):
+        cache, windows = _cache()
+        delayed = (
+            windows[0],
+            _window(windows[1].adjacency, 2.0),
+        )
+        delayed_cache = HardGraphSampleCache(
+            sample_key=cache.sample_key,
+            sample_id=cache.sample_id,
+            label=cache.label,
+            split=cache.split,
+            windows=tuple(CachedHardWindow(item, None, ()) for item in delayed),
+            time_values=(0.0, 2.0),
+            time_mask=(True, True),
+            eligible_for_stage_c=True,
+            exclusion_reason=None,
+            data_protocol_sha256=cache.data_protocol_sha256,
+            teacher_checkpoint_sha256=cache.teacher_checkpoint_sha256,
+        )
+        builder = MultiViewCriticalFeatureBuilder(uot_iterations=5)
+        raw = builder.theory.build(delayed, delayed_cache.time_values).transition_features[0]
+        built = builder.build(delayed_cache, full_graph_windows=delayed)
+        target = built.transitions[0].delta_q_target
+        self.assertTrue(torch.allclose(target[:16], raw[:16] / 2.0, atol=1.0e-7))
+        self.assertTrue(torch.allclose(target[16:], raw[16:], atol=1.0e-7))
+
     def test_signed_features_and_graph_output_survive_node_permutation(self):
         cache, windows = _cache(1)
         permutation = torch.tensor([2, 0, 3, 1], dtype=torch.long)
