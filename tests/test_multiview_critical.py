@@ -286,7 +286,9 @@ class MultiViewCriticalTest(unittest.TestCase):
             self.assertEqual(payload["epoch"], 1)
 
             single_class_batch = MultiViewCriticalBatch((samples[0], samples[0]))
-            single_class_loader = _TinyLoader([single_class_batch], (0, 0))
+            # The dataset inventory remains a valid two-class training cohort,
+            # while a one-batch smoke limit may expose only one class.
+            single_class_loader = _TinyLoader([single_class_batch], (0, 1))
             fallback = train_multiview_critical(
                 MultiViewCriticalClassifier(config),
                 single_class_loader,
