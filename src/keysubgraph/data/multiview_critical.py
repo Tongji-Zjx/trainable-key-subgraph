@@ -57,6 +57,8 @@ class MultiViewCriticalScaler:
     q_scale: torch.Tensor
     delta_mean: torch.Tensor
     delta_scale: torch.Tensor
+    legacy_variation_mean: torch.Tensor
+    legacy_variation_scale: torch.Tensor
     train_manifest_sha256: str
     protocol_sha256: str
     selector_checkpoint_sha256: str
@@ -301,6 +303,23 @@ def _mean_scale(values):
     return mean, scale
 
 
+def _legacy_variation(sample):
+    """Original 16-D adjacent-window absolute spectral variation."""
+    differences = []
+    for left, right in zip(sample.hard_windows[:-1], sample.hard_windows[1:]):
+        if left is not None and right is not None:
+            differences.append((right.q_target - left.q_target).abs())
+    if differences:
+        return torch.stack(differences, dim=0).mean(dim=0).to(torch.float32)
+    reference = next(
+        (item.q_target for item in sample.hard_windows if item is not None),
+        None,
+    )
+    if reference is None:
+        raise ValueError("multi-view sample has no valid hard window")
+    return reference.new_zeros((16,), dtype=torch.float32)
+
+
 def fit_multiview_scaler(records, train_manifest_sha256):
     if not records or any(record.split != "train" for record in records):
         raise ValueError("multi-view scaler requires train records only")
@@ -310,10 +329,11 @@ def fit_multiview_scaler(records, train_manifest_sha256):
     }
     if len(provenance) != 1:
         raise ValueError("multi-view train records have incompatible provenance")
-    nodes, edges, spectral, stable, q_values, delta_values = [], [], [], [], [], []
+    nodes, edges, spectral, stable, q_values, delta_values, legacy_values = [], [], [], [], [], [], []
     for record in records:
         sample = record.features
         stable.append(sample.stable_static.reshape(1, -1))
+        legacy_values.append(_legacy_variation(sample).reshape(1, -1))
         for window in sample.hard_windows:
             if window is None:
                 continue
@@ -329,7 +349,7 @@ def fit_multiview_scaler(records, train_manifest_sha256):
         for transition in sample.transitions:
             if transition is not None:
                 delta_values.append(transition.delta_q_target.reshape(1, -1))
-    if not all((nodes, edges, spectral, stable, q_values, delta_values)):
+    if not all((nodes, edges, spectral, stable, q_values, delta_values, legacy_values)):
         raise ValueError("multi-view scaler received incomplete training features")
     node_mean, node_scale = _mean_scale(nodes)
     edge_mean, edge_scale = _mean_scale(edges)
@@ -337,10 +357,12 @@ def fit_multiview_scaler(records, train_manifest_sha256):
     stable_mean, stable_scale = _mean_scale(stable)
     q_mean, q_scale = _mean_scale(q_values)
     delta_mean, delta_scale = _mean_scale(delta_values)
+    legacy_mean, legacy_scale = _mean_scale(legacy_values)
     protocol, selector, schema = next(iter(provenance))
     return MultiViewCriticalScaler(
         node_mean, node_scale, edge_mean, edge_scale, spectral_mean, spectral_scale,
         stable_mean, stable_scale, q_mean, q_scale, delta_mean, delta_scale,
+        legacy_mean, legacy_scale,
         str(train_manifest_sha256), protocol, selector, schema,
     )
 
@@ -398,6 +420,11 @@ def _standardize_window(window, scaler, use_q=True):
 
 
 def standardize_multiview_sample(sample, scaler):
+    legacy_variation = _standardize(
+        _legacy_variation(sample),
+        scaler.legacy_variation_mean,
+        scaler.legacy_variation_scale,
+    )
     transitions = []
     for item in sample.transitions:
         if item is None:
@@ -417,6 +444,7 @@ def standardize_multiview_sample(sample, scaler):
         tuple(_standardize_window(item, scaler) if item is not None else None for item in sample.hard_windows),
         tuple(_standardize_window(item, scaler, use_q=False) if item is not None else None for item in sample.full_windows),
         tuple(transitions), sample.window_mask.clone(), sample.transition_mask.clone(),
+        legacy_variation,
     )
 
 

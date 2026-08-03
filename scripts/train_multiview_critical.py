@@ -66,12 +66,15 @@ def main():
     parser.add_argument("--static-mode", choices=("stable", "neural", "residual"), default="residual")
     parser.add_argument("--disable-static-attention", action="store_true")
     parser.add_argument("--disable-v", action="store_true")
+    parser.add_argument("--legacy-v", action="store_true")
     parser.add_argument("--disable-g", action="store_true")
     parser.add_argument("--shuffle-correspondence", action="store_true")
     parser.add_argument("--max-train-samples", type=int)
     parser.add_argument("--max-validation-samples", type=int)
     parser.add_argument("--smoke", action="store_true")
     args = parser.parse_args()
+    if args.legacy_v and not args.disable_v:
+        parser.error("--legacy-v requires --disable-v")
 
     # Seed before model construction so paired stage ablations share the same
     # initialization for every common parameter, not merely loader/dropout RNG.
@@ -114,6 +117,7 @@ def main():
         static_mode=args.static_mode,
         enable_static_attention=not args.disable_static_attention,
         enable_v=not args.disable_v,
+        enable_legacy_v=args.legacy_v,
         enable_g=not args.disable_g,
         correspondence_mode="shuffled" if args.shuffle_correspondence else "uot",
     )

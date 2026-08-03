@@ -301,6 +301,23 @@ class MultiViewCriticalTest(unittest.TestCase):
             self.assertEqual(len(dataset), 2)
             self.assertEqual(dataset.labels, (0, 1))
             self.assertTrue(torch.isfinite(dataset[0].stable_static).all())
+            self.assertEqual(tuple(dataset[0].legacy_variation.shape), (16,))
+            legacy_model = MultiViewCriticalClassifier(
+                MultiViewCriticalConfig(
+                    hidden_dim=8, static_layers=1, object_layers=1,
+                    full_layers=1, dropout=0.0, classifier_hidden_dim=4,
+                    enable_v=False, enable_legacy_v=True, enable_g=False,
+                )
+            )
+            legacy_output = legacy_model(
+                MultiViewCriticalBatch((dataset[0], dataset[1]))
+            )
+            multiview_critical_loss(
+                legacy_output, torch.tensor((0, 1), dtype=torch.long)
+            )["loss"].backward()
+            self.assertIsNotNone(
+                legacy_model.legacy_v_projection[0].weight.grad
+            )
 
     def test_checkpoint_training_and_strict_reload(self):
         builder = MultiViewCriticalFeatureBuilder(uot_iterations=5)

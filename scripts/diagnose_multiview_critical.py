@@ -160,6 +160,7 @@ def main():
             "static": float(torch.tanh(model.static_gate).cpu()),
             "temporal": float(torch.tanh(model.temporal.gate).cpu()),
             "v": float(torch.tanh(model.v_gate).cpu()),
+            "legacy_v": float(torch.tanh(model.legacy_v_gate).cpu()),
             "g": float(torch.tanh(model.g_gate).cpu()),
         },
     }

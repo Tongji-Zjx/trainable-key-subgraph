@@ -110,6 +110,10 @@ class MultiViewCriticalSampleFeatures:
     transitions: Tuple[Optional[CriticalTransitionFeatures], ...]
     window_mask: torch.Tensor
     transition_mask: torch.Tensor
+    # Derived by the train-only data adapter from the cached spectral states.
+    # It is deliberately absent from the expensive immutable record schema so
+    # the Stage-2 legacy-Variation control does not require cache regeneration.
+    legacy_variation: Optional[torch.Tensor] = None
 
     def to(self, device):
         return MultiViewCriticalSampleFeatures(
@@ -121,6 +125,7 @@ class MultiViewCriticalSampleFeatures:
             tuple(item.to(device) if item is not None else None for item in self.transitions),
             self.window_mask.to(device),
             self.transition_mask.to(device),
+            self.legacy_variation.to(device) if self.legacy_variation is not None else None,
         )
 
 

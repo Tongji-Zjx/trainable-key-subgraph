@@ -42,6 +42,7 @@ def parse_args():
     parser.add_argument("--condition-name", required=True)
     parser.add_argument("--static-mode", choices=("stable", "neural", "residual"), required=True)
     parser.add_argument("--enable-v", action="store_true")
+    parser.add_argument("--legacy-v", action="store_true")
     parser.add_argument("--enable-g", action="store_true")
     parser.add_argument("--shuffle-correspondence", action="store_true")
     parser.add_argument("--evaluate-test", action="store_true")
@@ -61,6 +62,8 @@ def parse_args():
     args = parser.parse_args()
     if args.shuffle_correspondence and not args.enable_v:
         parser.error("--shuffle-correspondence requires --enable-v")
+    if args.legacy_v and args.enable_v:
+        parser.error("--legacy-v and --enable-v are mutually exclusive")
     if args.evaluate_test and args.test_manifest is None:
         parser.error("--evaluate-test requires --test-manifest")
     return args
@@ -92,6 +95,8 @@ def main():
     ]
     if not args.enable_v:
         train.append("--disable-v")
+    if args.legacy_v:
+        train.append("--legacy-v")
     if not args.enable_g:
         train.append("--disable-g")
     if args.shuffle_correspondence:
@@ -138,8 +143,13 @@ def main():
                 "condition_name": args.condition_name,
                 "static_mode": args.static_mode,
                 "enable_v": bool(args.enable_v),
+                "legacy_v": bool(args.legacy_v),
                 "enable_g": bool(args.enable_g),
-                "correspondence": "shuffled" if args.shuffle_correspondence else "uot",
+                "correspondence": (
+                    "legacy_variation" if args.legacy_v else
+                    ("shuffled" if args.shuffle_correspondence else
+                     ("uot" if args.enable_v else "none"))
+                ),
                 "seed": int(args.seed),
                 "epochs": int(args.epochs),
                 "batch_size": int(args.batch_size),

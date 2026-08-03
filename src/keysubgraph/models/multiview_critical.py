@@ -39,6 +39,7 @@ class MultiViewCriticalConfig:
     static_mode: str = "residual"
     enable_static_attention: bool = True
     enable_v: bool = True
+    enable_legacy_v: bool = False
     enable_g: bool = True
     correspondence_mode: str = "uot"
     initial_static_gate: float = 0.01
@@ -60,6 +61,8 @@ class MultiViewCriticalConfig:
             raise ValueError("unsupported multi-view static mode")
         if self.correspondence_mode not in ("uot", "shuffled"):
             raise ValueError("unsupported object correspondence mode")
+        if self.enable_v and self.enable_legacy_v:
+            raise ValueError("new and legacy V branches are mutually exclusive")
 
     def to_dict(self):
         return asdict(self)
@@ -326,8 +329,13 @@ class MultiViewCriticalClassifier(nn.Module):
             nn.Linear(2 * self.config.hidden_dim, self.config.hidden_dim), nn.GELU(), nn.LayerNorm(self.config.hidden_dim)
         )
         self.v_projection = nn.Linear(self.config.hidden_dim, self.config.hidden_dim)
+        self.legacy_v_projection = nn.Sequential(
+            nn.Linear(16, self.config.hidden_dim), nn.GELU(),
+            nn.Dropout(self.config.dropout), nn.LayerNorm(self.config.hidden_dim)
+        )
         self.g_projection = nn.Linear(self.config.hidden_dim, self.config.hidden_dim)
         self.v_gate = nn.Parameter(torch.tensor(float(self.config.initial_v_gate)))
+        self.legacy_v_gate = nn.Parameter(torch.tensor(float(self.config.initial_v_gate)))
         self.g_gate = nn.Parameter(torch.tensor(float(self.config.initial_g_gate)))
         self.classifier = nn.Sequential(
             nn.Linear(self.config.hidden_dim, self.config.classifier_hidden_dim),
@@ -467,6 +475,12 @@ class MultiViewCriticalClassifier(nn.Module):
         representation = static
         if self.config.enable_v:
             representation = representation + torch.tanh(self.v_gate) * self.v_projection(evolution)
+        if self.config.enable_legacy_v:
+            if sample.legacy_variation is None or tuple(sample.legacy_variation.shape) != (16,):
+                raise ValueError("legacy V branch requires a standardized 16-D variation")
+            representation = representation + torch.tanh(self.legacy_v_gate) * self.legacy_v_projection(
+                sample.legacy_variation
+            )
         if self.config.enable_g:
             representation = representation + torch.tanh(self.g_gate) * self.g_projection(full)
         return MultiViewCriticalSampleOutput(
@@ -489,12 +503,14 @@ class MultiViewCriticalClassifier(nn.Module):
                 "static_and_object_encoders_share_parameters": False,
                 "uses_q_decoder": self.config.static_mode != "stable",
                 "uses_uot_correspondence": self.config.enable_v,
+                "uses_legacy_variation": self.config.enable_legacy_v,
                 "correspondence_mode": self.config.correspondence_mode,
                 "uses_unidirectional_residual_gru": self.config.enable_v,
                 "uses_g_decoder": False,
                 "static_gate": float(torch.tanh(self.static_gate).detach().cpu()),
                 "temporal_gate": float(torch.tanh(self.temporal.gate).detach().cpu()),
                 "v_gate": float(torch.tanh(self.v_gate).detach().cpu()),
+                "legacy_v_gate": float(torch.tanh(self.legacy_v_gate).detach().cpu()),
                 "g_gate": float(torch.tanh(self.g_gate).detach().cpu()),
             },
         )
