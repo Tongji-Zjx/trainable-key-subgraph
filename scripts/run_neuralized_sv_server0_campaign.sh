@@ -10,7 +10,7 @@ set -euo pipefail
 # Optional:
 #   MODEL_SEED=42, DEVICE=cuda, EPOCHS=80, BATCH_SIZE=4,
 #   GRADIENT_ACCUMULATION_STEPS=2, GPU_WAIT_MIB=22000,
-#   GPU_WAIT_SECONDS=600
+#   GPU_WAIT_SECONDS=600, PYTHON_BIN=python
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$PROJECT_ROOT"
@@ -28,6 +28,7 @@ GRADIENT_ACCUMULATION_STEPS="${GRADIENT_ACCUMULATION_STEPS:-2}"
 GPU_WAIT_MIB="${GPU_WAIT_MIB:-22000}"
 GPU_WAIT_SECONDS="${GPU_WAIT_SECONDS:-600}"
 GPU_INDEX="${GPU_INDEX:-0}"
+PYTHON_BIN="${PYTHON_BIN:-python}"
 LOG_ROOT="${LOG_ROOT:-logs/neuralized_sv/${DATASET_NAME}_seed${MODEL_SEED}}"
 FUSION_ROOT="${FUSION_ROOT:-${OUTPUT_ROOT}/fusion}"
 
@@ -60,7 +61,7 @@ for fold in 0 1 2; do
     continue
   fi
   wait_for_gpu
-  python -u scripts/run_neuralized_sv_fold.py \
+  "$PYTHON_BIN" -u scripts/run_neuralized_sv_fold.py \
     --crossfit-root "$SOURCE_CROSSFIT_ROOT" \
     --output-root "$OUTPUT_ROOT" \
     --fold "$fold" \
@@ -74,7 +75,7 @@ done
 
 for variant in NS_static_spectral NV_dynamic_evolution NSV_safe_residual; do
   for fold in 0 1 2; do
-    python -u scripts/run_neuralized_sv_short_term_fusion_fold.py \
+    "$PYTHON_BIN" -u scripts/run_neuralized_sv_short_term_fusion_fold.py \
       --source-crossfit-root "$SOURCE_CROSSFIT_ROOT" \
       --neuralized-root "$OUTPUT_ROOT" \
       --output-root "$FUSION_ROOT" \
@@ -86,7 +87,7 @@ for variant in NS_static_spectral NV_dynamic_evolution NSV_safe_residual; do
   done
 done
 
-python -u scripts/summarize_neuralized_sv_short_term.py \
+"$PYTHON_BIN" -u scripts/summarize_neuralized_sv_short_term.py \
   --source-crossfit-root "$SOURCE_CROSSFIT_ROOT" \
   --fusion-root "$FUSION_ROOT" \
   --fold-assignments "$SOURCE_CROSSFIT_ROOT/assignments/fold_assignments.json" \
