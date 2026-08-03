@@ -73,7 +73,7 @@ def _window_to(window, device):
 def _schema_hash(config, uot_iterations):
     payload = {
         "artifact": "theory_guided_multiview_critical",
-        "schema_version": 1,
+        "schema_version": 2,
         "node_dim": 15,
         "edge_dim": 6,
         "spectral_dim": 9,
@@ -81,7 +81,7 @@ def _schema_hash(config, uot_iterations):
         "q_dim": 16,
         "delta_q_dim": 18,
         "decomposition": "community_connected_components_v1",
-        "correspondence": "signed_diffusion_fgw_plus_uot_v1",
+        "correspondence": "signed_diffusion_fgw_plus_uot_v2",
         "uot_iterations": int(uot_iterations),
         "sgw_schema": config.schema_sha256(),
     }
@@ -148,6 +148,7 @@ def main():
                 "gw_max_iter": int(args.gw_max_iter),
                 "gw_sinkhorn_iter": int(args.gw_sinkhorn_iter),
                 "feature_weight": 0.25,
+                "node_attribute_cost": "structural_spectral_signed_profile_v1",
             },
             "uot": {
                 "iterations": int(args.object_uot_iterations),

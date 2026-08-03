@@ -392,6 +392,47 @@ class MultiViewCriticalFeatureBuilder(object):
         )
         return self.fgw.compute_window_state(window)
 
+    @staticmethod
+    def _object_attribute_cost(first, second, threshold, epsilon=1.0e-8):
+        """Pairwise semantic cost used inside signed diffusion-FGW.
+
+        The cost contains coordinate-free node/community structure, invariant
+        spectral features, and explicit positive/negative degree and incidence
+        profiles.  Pair-local symmetric standardization avoids fitting any
+        cohort statistic before the train-only scaler exists.
+        """
+
+        def attributes(item):
+            adjacency = item.adjacency
+            mask = adjacency.abs() > float(threshold)
+            mask = mask.clone()
+            mask.fill_diagonal_(False)
+            positive = adjacency.clamp_min(0.0) * mask.to(adjacency.dtype)
+            negative = (-adjacency.clamp_max(0.0)) * mask.to(adjacency.dtype)
+            possible = float(max(1, int(adjacency.shape[0]) - 1))
+            signed_profile = torch.stack((
+                positive.sum(dim=-1),
+                negative.sum(dim=-1),
+                (positive > 0.0).to(adjacency.dtype).sum(dim=-1) / possible,
+                (negative > 0.0).to(adjacency.dtype).sum(dim=-1) / possible,
+            ), dim=-1)
+            return torch.cat(
+                (item.node_features, item.spectral_features, signed_profile), dim=-1
+            )
+
+        first_attributes = attributes(first)
+        second_attributes = attributes(second)
+        pooled = torch.cat((first_attributes, second_attributes), dim=0)
+        mean = pooled.mean(dim=0)
+        scale = pooled.std(dim=0, unbiased=False).clamp_min(float(epsilon))
+        first_normalized = (first_attributes - mean) / scale
+        second_normalized = (second_attributes - mean) / scale
+        feature_cost = torch.cdist(first_normalized, second_normalized).square()
+        feature_cost = feature_cost / float(max(1, first_normalized.shape[1]))
+        if not bool(torch.isfinite(feature_cost).all()):
+            raise RuntimeError("object attribute cost is not finite")
+        return feature_cost
+
     def _transition(self, index, left, right, target, threshold):
         left_states = tuple(self._object_state(item, threshold) for item in left.objects)
         right_states = tuple(self._object_state(item, threshold) for item in right.objects)
@@ -400,14 +441,23 @@ class MultiViewCriticalFeatureBuilder(object):
         with torch.no_grad():
             for row, first in enumerate(left_states):
                 for column, second in enumerate(right_states):
+                    feature_cost = self._object_attribute_cost(
+                        left.objects[row], right.objects[column], threshold
+                    )
                     gw = self.fgw.gw(
                         first.diffusion_distance,
                         second.diffusion_distance,
                         first.node_measure,
                         second.node_measure,
+                        feature_cost=feature_cost,
+                        feature_weight=self.fgw_feature_weight,
                     )
+                    # The fused node cost already contains invariant multiscale
+                    # spectral features.  A small object-level spectrum term
+                    # retains global spectral differences that node coupling
+                    # alone cannot express.
                     spectral = (first.spectral_quantiles - second.spectral_quantiles).abs().mean()
-                    cost[row, column] = gw.structural_cost_sqrt + self.fgw_feature_weight * spectral
+                    cost[row, column] = gw.distance + self.fgw_feature_weight * spectral
                     converged = converged and bool(gw.converged)
             source_mass = cost.new_tensor([item.mass for item in left.objects])
             target_mass = cost.new_tensor([item.mass for item in right.objects])

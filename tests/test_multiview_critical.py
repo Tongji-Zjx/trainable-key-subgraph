@@ -40,6 +40,7 @@ from keysubgraph.training.multiview_critical_trainer import (
     load_multiview_checkpoint,
     train_multiview_critical,
 )
+from keysubgraph.theory.spectral_gw import DifferentiableGWLoss
 
 
 def _window(adjacency, time_start):
@@ -137,6 +138,23 @@ class MultiViewCriticalTest(unittest.TestCase):
         self.assertEqual(tuple(plan.shape), (2, 3))
         self.assertTrue(torch.isfinite(plan).all())
         self.assertGreater(float(plan.sum()), 0.0)
+
+    def test_fused_gw_uses_node_attributes_and_signed_profiles(self):
+        distance = torch.tensor([[0.0, 1.0], [1.0, 0.0]], dtype=torch.float32)
+        solver = DifferentiableGWLoss(max_iter=20, sinkhorn_iter=20)
+        structural = solver(distance, distance)
+        feature_cost = torch.tensor([[1.0, 2.0], [2.0, 1.0]], dtype=torch.float32)
+        fused = solver(
+            distance, distance, feature_cost=feature_cost, feature_weight=0.25
+        )
+        self.assertAlmostEqual(float(structural.distance), 0.0, places=7)
+        self.assertGreater(float(fused.distance), 0.0)
+
+        cache, full = _cache()
+        builder = MultiViewCriticalFeatureBuilder(uot_iterations=5)
+        first = builder.build(cache, full_graph_windows=full)
+        self.assertTrue(torch.isfinite(first.transitions[0].object_cost).all())
+        self.assertGreater(float(first.transitions[0].object_cost.sum()), 0.0)
 
     def test_signed_features_and_graph_output_survive_node_permutation(self):
         cache, windows = _cache(1)

@@ -417,15 +417,41 @@ class DifferentiableGWLoss(nn.Module):
         second_distance: torch.Tensor,
         first_measure: Optional[torch.Tensor] = None,
         second_measure: Optional[torch.Tensor] = None,
+        feature_cost: Optional[torch.Tensor] = None,
+        feature_weight: float = 0.0,
     ) -> GWResult:
         _validate_square(first_distance, "first_distance")
         _validate_square(second_distance, "second_distance")
         p = self._measure(first_distance.shape[0], first_distance, first_measure)
         q = self._measure(second_distance.shape[0], second_distance, second_measure)
+        feature_weight = float(feature_weight)
+        if not 0.0 <= feature_weight <= 1.0:
+            raise ValueError("FGW feature weight must lie in [0,1]")
+        if feature_cost is not None:
+            if tuple(feature_cost.shape) != (first_distance.shape[0], second_distance.shape[0]):
+                raise ValueError("FGW feature cost has the wrong shape")
+            feature_cost = feature_cost.to(
+                device=first_distance.device, dtype=first_distance.dtype
+            )
+            if bool((feature_cost < 0.0).any()) or not bool(torch.isfinite(feature_cost).all()):
+                raise ValueError("FGW feature cost must be finite and non-negative")
+        use_features = feature_cost is not None and feature_weight > 0.0
+
+        def normalized(value):
+            positive = value[value > 0.0]
+            scale = positive.median() if positive.numel() else value.new_ones(())
+            return value / scale.clamp_min(torch.finfo(value.dtype).eps)
+
+        normalized_feature = normalized(feature_cost) if use_features else None
 
         if first_distance.shape == second_distance.shape and bool(
             torch.allclose(first_distance, second_distance, atol=1.0e-10, rtol=1.0e-8)
-        ):
+        ) and (not use_features or bool(torch.allclose(
+            torch.diagonal(feature_cost),
+            torch.zeros_like(torch.diagonal(feature_cost)),
+            atol=1.0e-10,
+            rtol=1.0e-8,
+        ))):
             zero = (first_distance - second_distance).pow(2).sum()
             coupling = torch.diag(p)
             return GWResult(zero, zero, coupling, True, 0, 0.0, "entropic_gw", zero)
@@ -444,7 +470,19 @@ class DifferentiableGWLoss(nn.Module):
                     device=second_distance.device,
                 )
                 aligned = second_distance.index_select(0, permutation).index_select(1, permutation)
-                if bool(torch.allclose(first_distance, aligned, atol=1.0e-9, rtol=1.0e-7)):
+                feature_aligned = (
+                    not use_features
+                    or bool(torch.allclose(
+                        feature_cost[
+                            torch.arange(first_distance.shape[0], device=first_distance.device),
+                            permutation,
+                        ],
+                        feature_cost.new_zeros((first_distance.shape[0],)),
+                        atol=1.0e-9,
+                        rtol=1.0e-7,
+                    ))
+                )
+                if bool(torch.allclose(first_distance, aligned, atol=1.0e-9, rtol=1.0e-7)) and feature_aligned:
                     zero = (first_distance - aligned).pow(2).sum()
                     coupling = first_distance.new_zeros(first_distance.shape)
                     coupling[
@@ -461,7 +499,13 @@ class DifferentiableGWLoss(nn.Module):
             structural_cost = self._structural_cost(
                 first_distance, second_distance, coupling, p, q
             )
-            updated = self._sinkhorn(structural_cost, p, q)
+            transport_cost = structural_cost
+            if use_features:
+                transport_cost = (
+                    (1.0 - feature_weight) * normalized(structural_cost.clamp_min(0.0))
+                    + feature_weight * normalized_feature
+                )
+            updated = self._sinkhorn(transport_cost, p, q)
             residual_tensor = (updated - coupling).abs().max()
             residual = float(residual_tensor.detach().cpu())
             coupling = updated
@@ -476,6 +520,11 @@ class DifferentiableGWLoss(nn.Module):
                 )
             )
         final_cost = self._structural_cost(first_distance, second_distance, coupling, p, q)
+        if use_features:
+            final_cost = (
+                (1.0 - feature_weight) * normalized(final_cost.clamp_min(0.0))
+                + feature_weight * normalized_feature
+            )
         squared = (final_cost * coupling).sum().clamp_min(0.0)
         distance = torch.sqrt(squared + torch.finfo(squared.dtype).eps)
         entropy = (
