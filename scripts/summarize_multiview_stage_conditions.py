@@ -53,11 +53,27 @@ def main():
         })
     rows.sort(key=lambda row: row["condition"])
     eligible = [row for row in rows if row["roc_auc"] is not None]
-    best = max(eligible, key=lambda row: row["roc_auc"]) if eligible else None
-    decision = {"best_validation_condition": None if best is None else best["condition"]}
+    # A shuffled-correspondence run is a negative control.  It may diagnose
+    # leakage or correspondence irrelevance, but it must never become the
+    # deployable condition merely because its validation AUROC is highest.
+    admissible = [row for row in eligible if row["v"] != "shuffled"]
+    best_observed = max(eligible, key=lambda row: row["roc_auc"]) if eligible else None
+    best = max(admissible, key=lambda row: row["roc_auc"]) if admissible else None
+    decision = {
+        "best_validation_condition": None if best is None else best["condition"],
+        "best_admissible_validation_condition": (
+            None if best is None else best["condition"]
+        ),
+        "best_observed_condition_including_negative_control": (
+            None if best_observed is None else best_observed["condition"]
+        ),
+        "negative_control_is_not_deployable": True,
+    }
     if args.stage == "stage2":
         real = next((row for row in rows if row["v"] == "uot"), None)
         shuffled = next((row for row in rows if row["v"] == "shuffled"), None)
+        no_v = next((row for row in rows if row["v"] == "none"), None)
+        legacy = next((row for row in rows if row["v"] == "legacy"), None)
         decision["real_minus_shuffled_auc"] = (
             None if real is None or shuffled is None or
             real["roc_auc"] is None or shuffled["roc_auc"] is None
@@ -67,6 +83,24 @@ def main():
             decision["real_minus_shuffled_auc"] is not None and
             decision["real_minus_shuffled_auc"] > 0.0
         )
+        decision["real_minus_no_v_auc"] = (
+            None if real is None or no_v is None or
+            real["roc_auc"] is None or no_v["roc_auc"] is None
+            else float(real["roc_auc"] - no_v["roc_auc"])
+        )
+        decision["legacy_minus_no_v_auc"] = (
+            None if legacy is None or no_v is None or
+            legacy["roc_auc"] is None or no_v["roc_auc"] is None
+            else float(legacy["roc_auc"] - no_v["roc_auc"])
+        )
+        # This is deliberately labelled a validation screen rather than the
+        # final paired-OOF gate required by the design document.
+        decision["validation_screen_passes"] = bool(
+            decision["real_correspondence_beats_shuffled"] and
+            decision["real_minus_no_v_auc"] is not None and
+            decision["real_minus_no_v_auc"] > 0.0
+        )
+        decision["paired_oof_gate_evaluated"] = False
     if args.stage == "stage3":
         with_g = next((row for row in rows if row["g"]), None)
         without_g = next((row for row in rows if not row["g"]), None)
