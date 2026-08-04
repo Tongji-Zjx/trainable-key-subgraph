@@ -205,6 +205,7 @@ def main():
         "schema_version": 1,
         "artifact_type": "multiview_two_fold_frozen_selection",
         "stage": args.stage,
+        "test_used": False,
         "folds": fold_names,
         "source_summaries": sources,
         "official_candidates": sorted(official),
