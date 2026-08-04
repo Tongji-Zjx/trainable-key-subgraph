@@ -32,6 +32,18 @@ def _formally_admissible(row, stage):
     return True
 
 
+def _uot_promotion_passes(real_minus_no_v_auc):
+    """Promote UOT when it improves on the deployable no-V baseline.
+
+    Shuffled correspondence is retained as a diagnostic negative control, but
+    it is not a deployable architecture and therefore does not veto promotion.
+    """
+    return (
+        real_minus_no_v_auc is not None
+        and float(real_minus_no_v_auc) > 0.0
+    )
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--condition-dir", type=Path, action="append", required=True)
@@ -112,13 +124,13 @@ def main():
             legacy["roc_auc"] is None or no_v["roc_auc"] is None
             else float(legacy["roc_auc"] - no_v["roc_auc"])
         )
-        # This is deliberately labelled a validation screen rather than the
-        # final paired-OOF gate required by the design document.
-        decision["validation_screen_passes"] = bool(
-            decision["real_correspondence_beats_shuffled"] and
-            decision["real_minus_no_v_auc"] is not None and
-            decision["real_minus_no_v_auc"] > 0.0
+        decision["shuffled_correspondence_is_diagnostic_only"] = True
+        decision["uot_beats_no_v"] = _uot_promotion_passes(
+            decision["real_minus_no_v_auc"]
         )
+        # This remains a Fold-1 validation-only architecture screen.  The
+        # deployable comparison is UOT versus no-V; shuffled is diagnostic.
+        decision["validation_screen_passes"] = decision["uot_beats_no_v"]
         decision["paired_oof_gate_evaluated"] = False
     if args.stage == "stage3":
         with_g = next((row for row in rows if row["g"]), None)

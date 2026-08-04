@@ -2,7 +2,10 @@ from __future__ import absolute_import, division, print_function
 
 import unittest
 
-from scripts.summarize_multiview_stage_conditions import _formally_admissible
+from scripts.summarize_multiview_stage_conditions import (
+    _formally_admissible,
+    _uot_promotion_passes,
+)
 
 
 class MultiviewSingleFoldConstraintTest(unittest.TestCase):
@@ -36,6 +39,12 @@ class MultiviewSingleFoldConstraintTest(unittest.TestCase):
                     {"static_mode": "residual", "v": mode}, "stage2"
                 )
             )
+
+    def test_uot_promotion_compares_against_no_v(self):
+        self.assertTrue(_uot_promotion_passes(0.0036))
+        self.assertFalse(_uot_promotion_passes(0.0))
+        self.assertFalse(_uot_promotion_passes(-0.001))
+        self.assertFalse(_uot_promotion_passes(None))
 
 
 if __name__ == "__main__":
