@@ -208,10 +208,21 @@ def _stages(root, checks):
         root, "stage1", ("S_stable", "S_neural", "S_residual"), checks
     )
     if stage1 is not None:
+        selected = stage1.get("decision", {}).get(
+            "best_validation_condition"
+        )
+        selected_row = next(
+            (
+                row for row in stage1.get("conditions", ())
+                if row.get("condition") == selected
+            ),
+            {},
+        )
         _append(
             checks,
             "stage1_selection_frozen",
-            stage1.get("decision", {}).get("best_validation_condition") is not None,
+            selected is not None
+            and selected_row.get("static_mode") in ("neural", "residual"),
             stage1.get("decision", {}),
         )
 
@@ -222,17 +233,19 @@ def _stages(root, checks):
     if _check_file(checks, "stage2_frozen_selection", stage2_selection_path):
         selection = _read(stage2_selection_path)
         decision = {} if stage2 is None else stage2.get("decision", {})
+        screen_passes = decision.get("validation_screen_passes") is True
         safe_rejection = (
             decision.get("validation_screen_passes") is False
-            and selection.get("v_mode") in ("none", "legacy")
+            and selection.get("v_mode") == "none"
         )
+        validated_uot = screen_passes and selection.get("v_mode") == "uot"
         paired_gate = decision.get("paired_oof_gate_evaluated") is True
         _append(
             checks,
             "stage2_gate_respected",
             selection.get("test_used") is False
-            and selection.get("v_mode") != "shuffled"
-            and (paired_gate or safe_rejection),
+            and selection.get("v_mode") in ("none", "uot")
+            and (paired_gate or safe_rejection or validated_uot),
             {"selection": selection, "decision": decision},
         )
 

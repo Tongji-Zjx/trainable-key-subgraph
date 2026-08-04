@@ -16,6 +16,22 @@ def _number(value):
     return "N/A" if value is None else "{:.6f}".format(float(value))
 
 
+def _formally_admissible(row, stage):
+    """Return whether a validation condition may become the formal model.
+
+    Stable S and legacy V remain useful controls, but the frozen experiment
+    contract explicitly forbids promoting either one.  Shuffled
+    correspondence is likewise a negative control only.
+    """
+    if row.get("static_mode") == "stable":
+        return False
+    if stage in ("stage2", "stage3") and row.get("v") in (
+        "legacy", "shuffled"
+    ):
+        return False
+    return True
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--condition-dir", type=Path, action="append", required=True)
@@ -53,10 +69,9 @@ def main():
         })
     rows.sort(key=lambda row: row["condition"])
     eligible = [row for row in rows if row["roc_auc"] is not None]
-    # A shuffled-correspondence run is a negative control.  It may diagnose
-    # leakage or correspondence irrelevance, but it must never become the
-    # deployable condition merely because its validation AUROC is highest.
-    admissible = [row for row in eligible if row["v"] != "shuffled"]
+    admissible = [
+        row for row in eligible if _formally_admissible(row, args.stage)
+    ]
     best_observed = max(eligible, key=lambda row: row["roc_auc"]) if eligible else None
     best = max(admissible, key=lambda row: row["roc_auc"]) if admissible else None
     decision = {
@@ -68,6 +83,10 @@ def main():
             None if best_observed is None else best_observed["condition"]
         ),
         "negative_control_is_not_deployable": True,
+        "formal_static_modes": ["neural", "residual"],
+        "stable_static_is_control_only": True,
+        "formal_v_modes": ["none", "uot"],
+        "legacy_v_is_control_only": True,
     }
     if args.stage == "stage2":
         real = next((row for row in rows if row["v"] == "uot"), None)

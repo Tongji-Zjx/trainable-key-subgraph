@@ -74,7 +74,12 @@ class MultiViewStageCompletionAuditTest(unittest.TestCase):
             {
                 "test_used": False,
                 "conditions": [
-                    {"condition": name, "v": "none", "g": False}
+                    {
+                        "condition": name,
+                        "static_mode": name.split("_", 1)[1],
+                        "v": "none",
+                        "g": False,
+                    }
                     for name in ("S_stable", "S_neural", "S_residual")
                 ],
                 "decision": {"best_validation_condition": "S_residual"},
@@ -96,15 +101,15 @@ class MultiViewStageCompletionAuditTest(unittest.TestCase):
         )
         _write(
             root / "stage2" / "frozen_selection.json",
-            {"v_mode": "legacy", "test_used": False},
+            {"v_mode": "none", "test_used": False},
         )
         _write(
             root / "stage3" / "summary" / "summary.json",
             {
                 "test_used": False,
                 "conditions": [
-                    {"condition": "without_g", "v": "legacy", "g": False},
-                    {"condition": "with_g", "v": "legacy", "g": True},
+                    {"condition": "without_g", "v": "none", "g": False},
+                    {"condition": "with_g", "v": "none", "g": True},
                 ],
                 "decision": {"g_auc_delta": -0.01},
             },
