@@ -134,6 +134,7 @@ from .theory_multi_object_selector import (
     SignedSpectralGCNIILayer,
     TheoryGuidedMultiObjectScorer,
     TheoryMultiObjectScoreOutput,
+    merge_exploration_memories,
     signed_laplacian_eigenvectors,
 )
 from .dynamic_subgraph_tracking import (
@@ -224,6 +225,7 @@ __all__ = [
     "SignedSpectralGCNIILayer",
     "TheoryGuidedMultiObjectScorer",
     "TheoryMultiObjectScoreOutput",
+    "merge_exploration_memories",
     "signed_laplacian_eigenvectors",
     "DynamicSubgraphTrajectory",
     "DynamicTrackingConfig",

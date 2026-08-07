@@ -46,6 +46,13 @@ class DualSTSEHardSGWConfig:
     selector_alignment_latent_weight: float = 0.15
     selector_alignment_coordinate_weight: float = 0.10
     selector_alignment_spectral_weight: float = 0.10
+    selector_exploration_consensus_enabled: bool = True
+    selector_exploration_fraction: float = 0.12
+    selector_exploration_min_windows: int = 3
+    selector_exploration_max_windows: int = 5
+    selector_exploration_history_ramp_windows: int = 4
+    selector_exploration_retrospective_strength: float = 0.30
+    selector_confidence_gated_history: bool = True
     target_node_ratio: float = 0.50
     target_edge_ratio: float = 0.30
     node_minimum: int = 2
@@ -71,8 +78,8 @@ class DualSTSEHardSGWConfig:
     critical_edge_entry_threshold: float = 0.12
     critical_edge_retention_threshold: float = 0.08
     critical_cross_community_penalty: float = 0.08
-    critical_node_reuse_penalty: float = 0.12
-    critical_community_reuse_penalty: float = 0.08
+    critical_node_reuse_penalty: float = 0.04
+    critical_community_reuse_penalty: float = 0.03
     spectral_quantile_dim: int = 16
     sgw_core_dim: int = 18
     sgw_variation_dim: int = 16
@@ -97,6 +104,9 @@ class DualSTSEHardSGWConfig:
             self.selector_edge_hidden_dim,
             self.selector_graph_layers,
             self.selector_spectral_dim,
+            self.selector_exploration_min_windows,
+            self.selector_exploration_max_windows,
+            self.selector_exploration_history_ramp_windows,
             self.node_minimum,
             self.edge_minimum,
             self.critical_subgraph_count,
@@ -160,6 +170,17 @@ class DualSTSEHardSGWConfig:
             alignment_weights
         ) <= 0.0:
             raise ValueError("selector alignment weights are invalid")
+        if not 0.0 < self.selector_exploration_fraction <= 1.0:
+            raise ValueError("selector exploration fraction must lie in (0,1]")
+        if (
+            self.selector_exploration_min_windows
+            > self.selector_exploration_max_windows
+        ):
+            raise ValueError("selector exploration window bounds are invalid")
+        if not 0.0 <= self.selector_exploration_retrospective_strength <= 1.0:
+            raise ValueError(
+                "selector retrospective consensus strength must lie in [0,1]"
+            )
         if (
             self.selector_architecture == "theory_multi_object"
             and self.critical_subgraph_count < 2

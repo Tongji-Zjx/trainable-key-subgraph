@@ -131,6 +131,23 @@ def parse_args():
     )
     parser.add_argument("--alignment-spectral-weight", type=float, default=0.10)
     parser.add_argument(
+        "--disable-exploration-consensus",
+        action="store_true",
+        help="disable two-pass exploration consensus and retrospective hardening",
+    )
+    parser.add_argument("--exploration-fraction", type=float, default=0.12)
+    parser.add_argument("--exploration-min-windows", type=int, default=3)
+    parser.add_argument("--exploration-max-windows", type=int, default=5)
+    parser.add_argument("--exploration-history-ramp-windows", type=int, default=4)
+    parser.add_argument(
+        "--exploration-retrospective-strength", type=float, default=0.30
+    )
+    parser.add_argument(
+        "--disable-confidence-gated-history",
+        action="store_true",
+        help="do not attenuate history when slot alignment is ambiguous",
+    )
+    parser.add_argument(
         "--history-continuity-bonus", type=float, default=0.25
     )
     parser.add_argument("--history-switch-margin", type=float, default=0.05)
@@ -141,8 +158,8 @@ def parse_args():
     parser.add_argument("--edge-entry-threshold", type=float, default=0.12)
     parser.add_argument("--edge-retention-threshold", type=float, default=0.08)
     parser.add_argument("--cross-community-penalty", type=float, default=0.08)
-    parser.add_argument("--node-reuse-penalty", type=float, default=0.12)
-    parser.add_argument("--community-reuse-penalty", type=float, default=0.08)
+    parser.add_argument("--node-reuse-penalty", type=float, default=0.04)
+    parser.add_argument("--community-reuse-penalty", type=float, default=0.03)
     parser.add_argument(
         "--selector-objective",
         choices=("current", "full_soft", "full_soft_hard"),
@@ -288,6 +305,21 @@ def main():
             args.alignment_coordinate_weight
         ),
         selector_alignment_spectral_weight=args.alignment_spectral_weight,
+        selector_exploration_consensus_enabled=(
+            not args.disable_exploration_consensus
+        ),
+        selector_exploration_fraction=args.exploration_fraction,
+        selector_exploration_min_windows=args.exploration_min_windows,
+        selector_exploration_max_windows=args.exploration_max_windows,
+        selector_exploration_history_ramp_windows=(
+            args.exploration_history_ramp_windows
+        ),
+        selector_exploration_retrospective_strength=(
+            args.exploration_retrospective_strength
+        ),
+        selector_confidence_gated_history=(
+            not args.disable_confidence_gated_history
+        ),
         critical_node_ratio_per_object=args.object_node_ratio,
         critical_history_continuity_bonus=(
             args.history_continuity_bonus
@@ -407,6 +439,19 @@ def main():
                 "latent": args.alignment_latent_weight,
                 "coordinate": args.alignment_coordinate_weight,
                 "spectral": args.alignment_spectral_weight,
+            },
+            "exploration_consensus": {
+                "enabled": not args.disable_exploration_consensus,
+                "fraction": args.exploration_fraction,
+                "minimum_windows": args.exploration_min_windows,
+                "maximum_windows": args.exploration_max_windows,
+                "history_ramp_windows": args.exploration_history_ramp_windows,
+                "retrospective_strength": (
+                    args.exploration_retrospective_strength
+                ),
+                "confidence_gated_history": (
+                    not args.disable_confidence_gated_history
+                ),
             },
             "history_continuity_bonus": args.history_continuity_bonus,
             "history_switch_margin": args.history_switch_margin,

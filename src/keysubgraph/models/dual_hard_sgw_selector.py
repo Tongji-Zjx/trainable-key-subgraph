@@ -2,6 +2,7 @@
 
 from __future__ import absolute_import, division, print_function
 
+import math
 from dataclasses import dataclass, replace
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -24,6 +25,7 @@ from .dynamic_subgraph_tracking import build_dynamic_trajectories
 from .theory_multi_object_selector import (
     MultiObjectTemporalMemory,
     TheoryGuidedMultiObjectScorer,
+    merge_exploration_memories,
 )
 from .hard_stse_types import (
     HardSelectionSchedule,
@@ -153,6 +155,37 @@ def _align_hard_history(
     return nodes, edges, seeds
 
 
+def _exploration_window_count(
+    total: int,
+    minimum: int,
+    maximum: int,
+    fraction: float,
+) -> int:
+    """Choose a short burn-in without assuming a fixed scan length."""
+
+    if total < 1:
+        return 0
+    requested = int(math.ceil(float(fraction) * float(total)))
+    return min(int(total), max(int(minimum), min(int(maximum), requested)))
+
+
+def _cosine_history_strength(
+    time_index: int,
+    exploration_windows: int,
+    ramp_windows: int,
+) -> float:
+    """Smoothly turn causal history on after retrospective exploration."""
+
+    if time_index < exploration_windows:
+        return 0.0
+    progress = min(
+        1.0,
+        float(time_index - exploration_windows + 1)
+        / float(max(1, ramp_windows)),
+    )
+    return 0.5 - 0.5 * math.cos(math.pi * progress)
+
+
 class DualHardSGWSelector(nn.Module):
     """Legacy or theory-guided signed multi-object hard graph selector."""
 
@@ -231,6 +264,9 @@ class DualHardSGWSelector(nn.Module):
                 alignment_spectral_weight=(
                     self.config.selector_alignment_spectral_weight
                 ),
+                confidence_gated_history=(
+                    self.config.selector_confidence_gated_history
+                ),
                 epsilon=self.config.epsilon,
             )
         # The signed-Laplacian basis is a detached positional encoding of a
@@ -271,6 +307,165 @@ class DualHardSGWSelector(nn.Module):
             self._spectral_cache[key] = cached
         return cached
 
+    def _harden_object_fields(
+        self,
+        *,
+        global_node_probabilities: torch.Tensor,
+        global_edge_probabilities: torch.Tensor,
+        object_node_probabilities: torch.Tensor,
+        object_edge_probabilities: torch.Tensor,
+        edge_presence_mask: torch.Tensor,
+        communities: torch.Tensor,
+        current_node_ids: Tuple[str, ...],
+        previous_memory: Optional[MultiObjectTemporalMemory],
+        history_strength: float,
+        alignment_confidence: Optional[torch.Tensor],
+        edge_ratio: float,
+    ):
+        """Apply confidence- and phase-scaled hard temporal controls."""
+
+        strength = min(1.0, max(0.0, float(history_strength)))
+        previous_hard = (None, None, None)
+        if previous_memory is not None and strength > 0.0:
+            previous_hard = _align_hard_history(
+                previous_memory,
+                current_node_ids,
+                global_node_probabilities.device,
+            )
+            if (
+                previous_hard[0] is not None
+                and self.config.selector_confidence_gated_history
+                and alignment_confidence is not None
+            ):
+                keep = alignment_confidence.detach().to(
+                    device=global_node_probabilities.device
+                ) >= float(self.config.selector_temporal_confidence_threshold)
+                previous_hard = (
+                    previous_hard[0] & keep[:, None],
+                    previous_hard[1] & keep[:, None, None],
+                    torch.where(
+                        keep,
+                        previous_hard[2],
+                        torch.full_like(previous_hard[2], -1),
+                    ),
+                )
+        node_retention = self.config.critical_node_entry_threshold - strength * (
+            self.config.critical_node_entry_threshold
+            - self.config.critical_node_retention_threshold
+        )
+        edge_retention = self.config.critical_edge_entry_threshold - strength * (
+            self.config.critical_edge_entry_threshold
+            - self.config.critical_edge_retention_threshold
+        )
+        return select_object_conditioned_subgraphs(
+            global_node_probabilities=global_node_probabilities,
+            global_edge_probabilities=global_edge_probabilities,
+            object_node_probabilities=object_node_probabilities,
+            object_edge_probabilities=object_edge_probabilities,
+            edge_presence_mask=edge_presence_mask,
+            per_object_node_ratio=self.config.critical_node_ratio_per_object,
+            edge_ratio=edge_ratio,
+            node_minimum=self.config.node_minimum,
+            edge_minimum=self.config.edge_minimum,
+            candidate_multiplier=self.config.critical_candidate_multiplier,
+            overlap_penalty=self.config.critical_overlap_penalty,
+            max_node_overlap=self.config.critical_max_node_overlap,
+            max_edge_overlap=self.config.critical_max_edge_overlap,
+            previous_node_masks=previous_hard[0],
+            previous_edge_masks=previous_hard[1],
+            previous_seed_indices=previous_hard[2],
+            continuity_bonus=(
+                self.config.critical_history_continuity_bonus * strength
+            ),
+            switch_margin=self.config.critical_history_switch_margin * strength,
+            history_node_growth_bonus=(
+                self.config.critical_history_node_growth_bonus * strength
+            ),
+            history_edge_growth_bonus=(
+                self.config.critical_history_edge_growth_bonus * strength
+            ),
+            node_entry_threshold=(
+                self.config.critical_node_entry_threshold
+                if self.config.selector_structural_temporal_memory
+                else None
+            ),
+            node_retention_threshold=(
+                node_retention
+                if self.config.selector_structural_temporal_memory
+                else None
+            ),
+            edge_entry_threshold=(
+                self.config.critical_edge_entry_threshold
+                if self.config.selector_structural_temporal_memory
+                else None
+            ),
+            edge_retention_threshold=(
+                edge_retention
+                if self.config.selector_structural_temporal_memory
+                else None
+            ),
+            communities=(
+                communities
+                if self.config.selector_structural_temporal_memory
+                else None
+            ),
+            cross_community_penalty=(
+                self.config.critical_cross_community_penalty
+                if self.config.selector_structural_temporal_memory
+                else 0.0
+            ),
+            node_reuse_penalty=(
+                self.config.critical_node_reuse_penalty
+                if self.config.selector_structural_temporal_memory
+                else 0.0
+            ),
+            community_reuse_penalty=(
+                self.config.critical_community_reuse_penalty
+                if self.config.selector_structural_temporal_memory
+                else 0.0
+            ),
+        )
+
+    def _harden_exploration_consensus(
+        self,
+        memory: MultiObjectTemporalMemory,
+        communities: torch.Tensor,
+        edge_ratio: float,
+    ) -> MultiObjectTemporalMemory:
+        """Turn the soft multi-window consensus into K initial hard objects."""
+
+        object_nodes = memory.node_probabilities
+        object_edges = memory.edge_probabilities
+        global_nodes = 1.0 - torch.prod(1.0 - object_nodes, dim=0)
+        global_edges = 1.0 - torch.prod(1.0 - object_edges, dim=0)
+        valid = object_edges.max(dim=0).values > 0.0
+        valid = valid & valid.transpose(0, 1)
+        valid = valid.clone()
+        valid.fill_diagonal_(False)
+        selected = self._harden_object_fields(
+            global_node_probabilities=global_nodes,
+            global_edge_probabilities=global_edges,
+            object_node_probabilities=object_nodes,
+            object_edge_probabilities=object_edges,
+            edge_presence_mask=valid,
+            communities=communities,
+            current_node_ids=memory.node_ids,
+            previous_memory=None,
+            history_strength=0.0,
+            alignment_confidence=None,
+            edge_ratio=edge_ratio,
+        )
+        return replace(
+            memory,
+            hard_node_masks=torch.stack(
+                [item.hard_node_mask for item in selected.subgraphs]
+            ),
+            hard_edge_masks=torch.stack(
+                [item.hard_edge_mask for item in selected.subgraphs]
+            ),
+            seed_indices=selected.seed_indices,
+        )
+
     def forward(
         self,
         batch: ExactSTSEBatch,
@@ -295,6 +490,10 @@ class DualHardSGWSelector(nn.Module):
         slot_alignment_values = []
         memory_gate_values = []
         alignment_component_values: Dict[str, List[torch.Tensor]] = {}
+        exploration_window_counts: List[int] = []
+        retrospective_window_count = 0
+        history_strength_values: List[float] = []
+        exploration_consensus_confidences: List[torch.Tensor] = []
         selected_positive_edge_count = 0
         selected_negative_edge_count = 0
         fast_runtime = bool(self.config.selector_fast_runtime)
@@ -302,15 +501,124 @@ class DualHardSGWSelector(nn.Module):
             sample = exact_sample.graph
             previous_object_states = None
             previous_object_memory = None
+            exploration_features: Dict[int, Any] = {}
+            exploration_windows = 0
+            use_retrospective_exploration = bool(
+                selection_mode == "learned"
+                and self.config.selector_architecture == "theory_multi_object"
+                and self.config.selector_structural_temporal_memory
+                and self.config.selector_exploration_consensus_enabled
+                and sample.num_timepoints > 1
+            )
+            if use_retrospective_exploration:
+                exploration_windows = _exploration_window_count(
+                    sample.num_timepoints,
+                    self.config.selector_exploration_min_windows,
+                    self.config.selector_exploration_max_windows,
+                    self.config.selector_exploration_fraction,
+                )
+                consensus = None
+                for exploration_index in range(exploration_windows):
+                    exploration_adjacency = sample.adjacency[exploration_index]
+                    exploration_edge_mask = sample.edge_mask[
+                        exploration_index
+                    ].to(exploration_adjacency.device)
+                    exploration_node_ids = tuple(
+                        str(value)
+                        for value in sample.node_names[exploration_index]
+                    )
+                    exploration_coordinates = exact_sample.coordinates[
+                        exploration_index
+                    ].to(exploration_adjacency.device)
+                    exploration_feature = self.feature_builder.build_timepoint(
+                        sample, exploration_index
+                    )
+                    exploration_spectrum = self._cached_spectral_features(
+                        sample.sample_key,
+                        exploration_index,
+                        exploration_adjacency,
+                        exploration_edge_mask,
+                    )
+                    exploration_features[exploration_index] = (
+                        exploration_feature,
+                        exploration_spectrum,
+                        exploration_node_ids,
+                        exploration_coordinates,
+                    )
+                    observation = self.scorer(
+                        exploration_feature.node_features,
+                        exploration_feature.edge_base_features,
+                        exploration_feature.edge_presence_mask,
+                        exploration_adjacency,
+                        spectral_features=exploration_spectrum,
+                        previous_memory=consensus,
+                        current_node_ids=exploration_node_ids,
+                        current_coordinates=exploration_coordinates,
+                        history_strength=0.0,
+                    ).next_memory
+                    if consensus is None:
+                        consensus = replace(
+                            observation,
+                            # The first window has no alignment observation;
+                            # it must not dilute later confidence estimates.
+                            alignment_confidence=None,
+                            consensus_weight=1.0,
+                            consensus_object_weights=(
+                                observation.object_states.new_full(
+                                    (self.config.critical_subgraph_count,),
+                                    1.0
+                                    / float(self.config.critical_subgraph_count),
+                                )
+                            ),
+                        )
+                    else:
+                        consensus = merge_exploration_memories(
+                            consensus,
+                            observation,
+                            exploration_adjacency,
+                            exploration_edge_mask,
+                        )
+                reference_index = exploration_windows - 1
+                consensus = self._harden_exploration_consensus(
+                    consensus,
+                    sample.communities[reference_index].to(
+                        sample.adjacency[reference_index].device
+                    ),
+                    self.config.target_edge_ratio,
+                )
+                previous_object_memory = consensus
+                if consensus.alignment_confidence is not None:
+                    exploration_consensus_confidences.append(
+                        consensus.alignment_confidence
+                    )
+                retrospective_window_count += exploration_windows
+            exploration_window_counts.append(exploration_windows)
             windows = []
             subgraph_windows = []
             soft_windows = []
             for time_index in range(sample.num_timepoints):
                 adjacency = sample.adjacency[time_index]
                 count = int(adjacency.shape[0])
+                if use_retrospective_exploration:
+                    if time_index < exploration_windows:
+                        history_strength = float(
+                            self.config.selector_exploration_retrospective_strength
+                        )
+                    else:
+                        history_strength = _cosine_history_strength(
+                            time_index,
+                            exploration_windows,
+                            self.config.selector_exploration_history_ramp_windows,
+                        )
+                else:
+                    history_strength = 1.0
+                history_strength_values.append(history_strength)
                 if selection_mode == "learned":
-                    features = self.feature_builder.build_timepoint(
-                        sample, time_index
+                    cached_exploration = exploration_features.get(time_index)
+                    features = (
+                        cached_exploration[0]
+                        if cached_exploration is not None
+                        else self.feature_builder.build_timepoint(sample, time_index)
                     )
                     if self.config.selector_architecture == "legacy_mlp":
                         scores = self.scorer(
@@ -319,12 +627,23 @@ class DualHardSGWSelector(nn.Module):
                             features.edge_presence_mask,
                         )
                     else:
-                        current_edge_mask = sample.edge_mask[
-                            time_index
-                        ].to(adjacency.device)
-                        current_node_ids = tuple(
-                            str(value)
-                            for value in sample.node_names[time_index]
+                        current_edge_mask = sample.edge_mask[time_index].to(
+                            adjacency.device
+                        )
+                        current_node_ids = (
+                            cached_exploration[2]
+                            if cached_exploration is not None
+                            else tuple(
+                                str(value)
+                                for value in sample.node_names[time_index]
+                            )
+                        )
+                        current_coordinates = (
+                            cached_exploration[3]
+                            if cached_exploration is not None
+                            else exact_sample.coordinates[time_index].to(
+                                adjacency.device
+                            )
                         )
                         scores = self.scorer(
                             features.node_features,
@@ -340,7 +659,9 @@ class DualHardSGWSelector(nn.Module):
                                 else None
                             ),
                             spectral_features=(
-                                self._cached_spectral_features(
+                                cached_exploration[1]
+                                if cached_exploration is not None
+                                else self._cached_spectral_features(
                                     sample.sample_key,
                                     time_index,
                                     adjacency,
@@ -358,12 +679,11 @@ class DualHardSGWSelector(nn.Module):
                                 else None
                             ),
                             current_coordinates=(
-                                exact_sample.coordinates[time_index].to(
-                                    adjacency.device
-                                )
+                                current_coordinates
                                 if self.config.selector_structural_temporal_memory
                                 else None
                             ),
+                            history_strength=history_strength,
                         )
                         if not self.config.selector_structural_temporal_memory:
                             previous_object_states = scores.next_object_states
@@ -408,15 +728,7 @@ class DualHardSGWSelector(nn.Module):
                 fixed_k = None
                 if selection_mode == "learned":
                     if self.config.selector_architecture == "theory_multi_object":
-                        previous_hard = _align_hard_history(
-                            previous_object_memory,
-                            tuple(
-                                str(value)
-                                for value in sample.node_names[time_index]
-                            ),
-                            adjacency.device,
-                        )
-                        fixed_k = select_object_conditioned_subgraphs(
+                        fixed_k = self._harden_object_fields(
                             global_node_probabilities=node_probabilities,
                             global_edge_probabilities=edge_probabilities,
                             object_node_probabilities=(
@@ -428,89 +740,22 @@ class DualHardSGWSelector(nn.Module):
                             edge_presence_mask=sample.edge_mask[time_index].to(
                                 adjacency.device
                             ),
-                            per_object_node_ratio=(
-                                self.config.critical_node_ratio_per_object
+                            communities=sample.communities[time_index].to(
+                                adjacency.device
                             ),
+                            current_node_ids=current_node_ids,
+                            previous_memory=previous_object_memory,
+                            history_strength=history_strength,
+                            alignment_confidence=scores.alignment_confidence,
                             edge_ratio=edge_ratio,
-                            node_minimum=self.config.node_minimum,
-                            edge_minimum=self.config.edge_minimum,
-                            candidate_multiplier=(
-                                self.config.critical_candidate_multiplier
-                            ),
-                            overlap_penalty=(
-                                self.config.critical_overlap_penalty
-                            ),
-                            max_node_overlap=(
-                                self.config.critical_max_node_overlap
-                            ),
-                            max_edge_overlap=(
-                                self.config.critical_max_edge_overlap
-                            ),
-                            previous_node_masks=previous_hard[0],
-                            previous_edge_masks=previous_hard[1],
-                            previous_seed_indices=previous_hard[2],
-                            continuity_bonus=(
-                                self.config.critical_history_continuity_bonus
-                                if self.config.selector_structural_temporal_memory
-                                else 0.0
-                            ),
-                            switch_margin=(
-                                self.config.critical_history_switch_margin
-                                if self.config.selector_structural_temporal_memory
-                                else 0.0
-                            ),
-                            history_node_growth_bonus=(
-                                self.config.critical_history_node_growth_bonus
-                                if self.config.selector_structural_temporal_memory
-                                else 0.0
-                            ),
-                            history_edge_growth_bonus=(
-                                self.config.critical_history_edge_growth_bonus
-                                if self.config.selector_structural_temporal_memory
-                                else 0.0
-                            ),
-                            node_entry_threshold=(
-                                self.config.critical_node_entry_threshold
-                                if self.config.selector_structural_temporal_memory
-                                else None
-                            ),
-                            node_retention_threshold=(
-                                self.config.critical_node_retention_threshold
-                                if self.config.selector_structural_temporal_memory
-                                else None
-                            ),
-                            edge_entry_threshold=(
-                                self.config.critical_edge_entry_threshold
-                                if self.config.selector_structural_temporal_memory
-                                else None
-                            ),
-                            edge_retention_threshold=(
-                                self.config.critical_edge_retention_threshold
-                                if self.config.selector_structural_temporal_memory
-                                else None
-                            ),
-                            communities=(
-                                sample.communities[time_index].to(adjacency.device)
-                                if self.config.selector_structural_temporal_memory
-                                else None
-                            ),
-                            cross_community_penalty=(
-                                self.config.critical_cross_community_penalty
-                                if self.config.selector_structural_temporal_memory
-                                else 0.0
-                            ),
-                            node_reuse_penalty=(
-                                self.config.critical_node_reuse_penalty
-                                if self.config.selector_structural_temporal_memory
-                                else 0.0
-                            ),
-                            community_reuse_penalty=(
-                                self.config.critical_community_reuse_penalty
-                                if self.config.selector_structural_temporal_memory
-                                else 0.0
-                            ),
                         )
-                        if self.config.selector_structural_temporal_memory:
+                        if (
+                            self.config.selector_structural_temporal_memory
+                            and (
+                                not use_retrospective_exploration
+                                or time_index >= exploration_windows
+                            )
+                        ):
                             previous_object_memory = replace(
                                 scores.next_memory,
                                 hard_node_masks=torch.stack(
@@ -710,6 +955,22 @@ class DualHardSGWSelector(nn.Module):
             "uses_structural_temporal_memory": (
                 self.config.selector_architecture == "theory_multi_object"
                 and self.config.selector_structural_temporal_memory
+            ),
+            "uses_retrospective_exploration_consensus": (
+                self.config.selector_architecture == "theory_multi_object"
+                and self.config.selector_structural_temporal_memory
+                and self.config.selector_exploration_consensus_enabled
+            ),
+            "exploration_window_count": tuple(exploration_window_counts),
+            "retrospectively_refined_window_count": retrospective_window_count,
+            "mean_history_strength": (
+                sum(history_strength_values)
+                / float(max(1, len(history_strength_values)))
+            ),
+            "mean_exploration_consensus_confidence": (
+                torch.cat(exploration_consensus_confidences).mean()
+                if exploration_consensus_confidences
+                else node_probabilities.new_zeros(())
             ),
             "selection_mode": selection_mode,
             "detailed_diagnostics_skipped": fast_runtime,

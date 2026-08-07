@@ -208,6 +208,10 @@ class MultiObjectTemporalMemory:
     hard_node_masks: Optional[torch.Tensor] = None
     hard_edge_masks: Optional[torch.Tensor] = None
     seed_indices: Optional[torch.Tensor] = None
+    alignment_confidence: Optional[torch.Tensor] = None
+    consensus_weight: float = 1.0
+    consensus_object_weights: Optional[torch.Tensor] = None
+    alignment_observation_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -223,6 +227,7 @@ class TheoryMultiObjectScoreOutput:
     next_memory: Optional[MultiObjectTemporalMemory]
     slot_alignment: torch.Tensor
     memory_update_gate: torch.Tensor
+    alignment_confidence: torch.Tensor
     transported_node_probabilities: Optional[torch.Tensor]
     transported_edge_probabilities: Optional[torch.Tensor]
     alignment_components: Dict[str, torch.Tensor]
@@ -438,6 +443,141 @@ def _transport_temporal_memory(
     return nodes, edges, signed_edges, support
 
 
+def merge_exploration_memories(
+    previous: MultiObjectTemporalMemory,
+    observation: MultiObjectTemporalMemory,
+    adjacency: torch.Tensor,
+    edge_presence_mask: torch.Tensor,
+) -> MultiObjectTemporalMemory:
+    """Accumulate one independently scored exploration window.
+
+    ``observation`` must already be slot-aligned to ``previous``.  The previous
+    ROI field is transported into the observation's node order and then a
+    running confidence-weighted mean is formed.  Missing ROIs use the current
+    observation directly rather than treating absence as a zero-valued vote.
+    """
+
+    valid = edge_presence_mask.to(device=adjacency.device, dtype=torch.bool)
+    valid = valid & valid.transpose(0, 1)
+    valid = valid.clone()
+    valid.fill_diagonal_(False)
+    transported_nodes, transported_edges, transported_signed, support = (
+        _transport_temporal_memory(
+            previous,
+            observation.node_ids,
+            adjacency,
+            valid,
+            diffusion=0.0,
+        )
+    )
+    if transported_nodes is None:
+        return observation
+    scalar_weight = max(1.0, float(previous.consensus_weight))
+    previous_weights = (
+        previous.consensus_object_weights.to(adjacency)
+        if previous.consensus_object_weights is not None
+        else adjacency.new_full(
+            (int(previous.node_probabilities.shape[0]),), scalar_weight
+        )
+    )
+    observation_weights = (
+        observation.alignment_confidence.detach().to(adjacency).clamp_min(1.0e-6)
+        if observation.alignment_confidence is not None
+        else torch.ones_like(previous_weights)
+    )
+    denominator = (previous_weights + observation_weights).clamp_min(1.0e-8)
+    current_nodes = observation.node_probabilities.to(adjacency)
+    node_mean = (
+        previous_weights[:, None] * transported_nodes
+        + observation_weights[:, None] * current_nodes
+    ) / denominator[:, None]
+    node_mean = torch.where(support[None, :], node_mean, current_nodes)
+    edge_support = support[:, None] & support[None, :]
+    current_edges = observation.edge_probabilities.to(adjacency)
+    edge_mean = (
+        previous_weights[:, None, None] * transported_edges
+        + observation_weights[:, None, None] * current_edges
+    ) / denominator[:, None, None]
+    edge_mean = torch.where(edge_support[None, :, :], edge_mean, current_edges)
+    edge_mean = edge_mean * (
+        (transported_edges > 0.0) | valid[None, :, :]
+    ).to(edge_mean.dtype)
+
+    signed_mean = None
+    if observation.signed_edge_values is not None:
+        current_signed = observation.signed_edge_values.to(adjacency)
+        if transported_signed is None:
+            signed_mean = current_signed
+        else:
+            signed_mean = (
+                previous_weights[:, None, None] * transported_signed
+                + observation_weights[:, None, None] * current_signed
+            ) / denominator[:, None, None]
+            signed_mean = torch.where(
+                edge_support[None, :, :], signed_mean, current_signed
+            )
+
+    def mean_optional(previous_value, current_value):
+        if current_value is None:
+            return previous_value
+        if previous_value is None:
+            return current_value
+        self_dimension = int(current_value.ndim)
+        shape = (int(denominator.shape[0]),) + (1,) * (
+            self_dimension - 1
+        )
+        return (
+            previous_weights.to(current_value).reshape(shape)
+            * previous_value.to(current_value)
+            + observation_weights.to(current_value).reshape(shape) * current_value
+        ) / denominator.to(current_value).reshape(shape)
+
+    previous_confidence_count = max(
+        0, int(previous.alignment_observation_count)
+    )
+    if (
+        previous.alignment_confidence is None
+        or previous_confidence_count == 0
+    ):
+        confidence = observation.alignment_confidence
+        confidence_count = int(observation.alignment_confidence is not None)
+    elif observation.alignment_confidence is None:
+        confidence = previous.alignment_confidence
+        confidence_count = previous_confidence_count
+    else:
+        confidence_count = previous_confidence_count + 1
+        confidence = (
+            max(1, previous_confidence_count)
+            * previous.alignment_confidence.to(adjacency)
+            + observation.alignment_confidence.to(adjacency)
+        ) / float(max(1, confidence_count))
+    return MultiObjectTemporalMemory(
+        object_states=mean_optional(
+            previous.object_states, observation.object_states
+        ),
+        node_probabilities=node_mean,
+        edge_probabilities=edge_mean,
+        node_ids=observation.node_ids,
+        signed_edge_values=signed_mean,
+        object_representations=mean_optional(
+            previous.object_representations,
+            observation.object_representations,
+        ),
+        coordinate_centroids=mean_optional(
+            previous.coordinate_centroids,
+            observation.coordinate_centroids,
+        ),
+        spectral_descriptors=mean_optional(
+            previous.spectral_descriptors,
+            observation.spectral_descriptors,
+        ),
+        alignment_confidence=confidence,
+        consensus_weight=scalar_weight + 1.0,
+        consensus_object_weights=denominator,
+        alignment_observation_count=confidence_count,
+    )
+
+
 class TheoryGuidedMultiObjectScorer(nn.Module):
     """Signed graph encoder plus global and temporally conditioned object heads."""
 
@@ -464,6 +604,7 @@ class TheoryGuidedMultiObjectScorer(nn.Module):
         alignment_latent_weight: float = 0.15,
         alignment_coordinate_weight: float = 0.10,
         alignment_spectral_weight: float = 0.10,
+        confidence_gated_history: bool = True,
         epsilon: float = 1.0e-8,
     ) -> None:
         super().__init__()
@@ -499,6 +640,7 @@ class TheoryGuidedMultiObjectScorer(nn.Module):
         self.sinkhorn_temperature = float(sinkhorn_temperature)
         self.sinkhorn_iterations = int(sinkhorn_iterations)
         self.alignment_weights = alignment_weights
+        self.confidence_gated_history = bool(confidence_gated_history)
         self.epsilon = float(epsilon)
         self.encoder = SignedSpectralGCNIIEncoder(
             node_feature_dim,
@@ -558,6 +700,7 @@ class TheoryGuidedMultiObjectScorer(nn.Module):
         previous_memory: Optional[MultiObjectTemporalMemory] = None,
         current_node_ids: Optional[Sequence[str]] = None,
         current_coordinates: Optional[torch.Tensor] = None,
+        history_strength: float = 1.0,
     ) -> TheoryMultiObjectScoreOutput:
         count = int(node_features.shape[0])
         if tuple(edge_base_features.shape[:2]) != (count, count):
@@ -566,6 +709,8 @@ class TheoryGuidedMultiObjectScorer(nn.Module):
             current_coordinates.shape
         ) != (count, 3):
             raise ValueError("selector coordinates must have shape [N,3]")
+        if not 0.0 <= float(history_strength) <= 1.0:
+            raise ValueError("selector history strength must lie in [0,1]")
         valid = self._valid_edges(edge_presence_mask, node_features)
         spectrum = (
             spectral_features
@@ -596,11 +741,26 @@ class TheoryGuidedMultiObjectScorer(nn.Module):
             if previous_memory is not None
             else previous_object_states
         )
-        prior = (
-            self.initial_states(hidden)
-            if memory_states is None
-            else memory_states.to(hidden)
-        )
+        initial_prior = self.initial_states(hidden)
+        if memory_states is None:
+            prior = initial_prior
+        elif previous_memory is not None:
+            prior_strength = hidden.new_full(
+                (self.object_count,), float(history_strength)
+            )
+            if (
+                self.confidence_gated_history
+                and previous_memory.alignment_confidence is not None
+            ):
+                prior_strength = prior_strength * (
+                    previous_memory.alignment_confidence.to(hidden).clamp(0.0, 1.0)
+                )
+            prior = (
+                (1.0 - prior_strength[:, None]) * initial_prior
+                + prior_strength[:, None] * memory_states.to(hidden)
+            )
+        else:
+            prior = memory_states.to(hidden)
         if tuple(prior.shape) != (self.object_count, self.hidden_dim):
             raise ValueError("previous object states have an invalid shape")
         query = self.state_normalization(prior + self.object_queries.to(prior))
@@ -654,6 +814,7 @@ class TheoryGuidedMultiObjectScorer(nn.Module):
         )
         slot_alignment = identity
         update_gate = hidden.new_ones((self.object_count,))
+        alignment_confidence = hidden.new_ones((self.object_count,))
         transported_nodes = None
         transported_edges = None
         transported_signed_edges = None
@@ -741,9 +902,22 @@ class TheoryGuidedMultiObjectScorer(nn.Module):
                 dim=-1, keepdim=True
             ).clamp_min(self.epsilon)
             provisional = aligned_nodes @ hidden / aligned_denominator
-            update_gate = torch.sigmoid(
+            learned_update_gate = torch.sigmoid(
                 self.memory_gate(torch.cat((prior, provisional), dim=-1))
             ).squeeze(-1)
+            # Keep the raw Sinkhorn row maximum.  Existing confidence
+            # thresholds were calibrated in that scale (uniform K=3 is 1/3),
+            # and the value is also the q_{t,k} weight used by exploration
+            # consensus and retrospective refinement.
+            alignment_confidence = slot_alignment.max(dim=-1).values.clamp(
+                0.0, 1.0
+            )
+            memory_strength = hidden.new_full(
+                (self.object_count,), float(history_strength)
+            )
+            if self.confidence_gated_history:
+                memory_strength = memory_strength * alignment_confidence
+            update_gate = 1.0 - memory_strength * (1.0 - learned_update_gate)
             object_nodes = (
                 update_gate[:, None] * aligned_nodes
                 + (1.0 - update_gate[:, None]) * transported_nodes
@@ -804,6 +978,7 @@ class TheoryGuidedMultiObjectScorer(nn.Module):
             gate = (confidence >= self.temporal_confidence_threshold).to(hidden.dtype)
             distance = 1.0 - F.cosine_similarity(next_states, prior, dim=-1)
             temporal = (distance * gate).sum() / gate.sum().clamp_min(1.0)
+            temporal = temporal * float(history_strength)
         if transported_nodes is None:
             node_continuity = hidden.new_zeros(())
             edge_continuity = hidden.new_zeros(())
@@ -822,6 +997,7 @@ class TheoryGuidedMultiObjectScorer(nn.Module):
             node_continuity = (
                 (1.0 - node_similarity) * confidence
             ).sum() / confidence.sum().clamp_min(1.0)
+            node_continuity = node_continuity * float(history_strength)
             edge_support = valid & support[:, None] & support[None, :]
             if bool(edge_support.any()):
                 current_edge = object_edges[:, edge_support]
@@ -837,6 +1013,7 @@ class TheoryGuidedMultiObjectScorer(nn.Module):
                 edge_continuity = (
                     (1.0 - edge_similarity) * confidence
                 ).sum() / confidence.sum().clamp_min(1.0)
+                edge_continuity = edge_continuity * float(history_strength)
             else:
                 edge_continuity = hidden.new_zeros(())
         regularization = MultiObjectRegularization(
@@ -863,6 +1040,8 @@ class TheoryGuidedMultiObjectScorer(nn.Module):
                 object_representations=pooled,
                 coordinate_centroids=final_centroids,
                 spectral_descriptors=final_spectral,
+                alignment_confidence=alignment_confidence,
+                alignment_observation_count=int(transported_nodes is not None),
             )
         return TheoryMultiObjectScoreOutput(
             node_hidden=hidden,
@@ -876,6 +1055,7 @@ class TheoryGuidedMultiObjectScorer(nn.Module):
             next_memory=next_memory,
             slot_alignment=slot_alignment,
             memory_update_gate=update_gate,
+            alignment_confidence=alignment_confidence,
             transported_node_probabilities=transported_nodes,
             transported_edge_probabilities=transported_edges,
             alignment_components=alignment_components,

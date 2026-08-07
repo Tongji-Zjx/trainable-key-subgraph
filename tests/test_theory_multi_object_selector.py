@@ -13,6 +13,7 @@ from keysubgraph.models.fixed_k_subgraph_selector import (
 from keysubgraph.models.theory_multi_object_selector import (
     TheoryGuidedMultiObjectScorer,
     composite_slot_similarity,
+    merge_exploration_memories,
     signed_laplacian_eigenvectors,
 )
 from tests.test_exact_stse_model import _exact_sample
@@ -36,6 +37,119 @@ def _fixture(count=8):
 
 
 class TheoryMultiObjectSelectorTest(unittest.TestCase):
+    def test_zero_strength_aligns_exploration_without_copying_history(self):
+        node, edge, adjacency, mask = _fixture()
+        scorer = TheoryGuidedMultiObjectScorer(
+            hidden_dim=16,
+            edge_hidden_dim=8,
+            object_count=3,
+            spectral_dim=4,
+            graph_layers=1,
+            dropout=0.0,
+            structural_memory_enabled=True,
+            memory_diffusion=0.0,
+        ).eval()
+        names = tuple("roi_{}".format(index) for index in range(8))
+        coordinates = torch.arange(24, dtype=torch.float32).reshape(8, 3)
+        first = scorer(
+            node,
+            edge,
+            mask,
+            adjacency,
+            current_node_ids=names,
+            current_coordinates=coordinates,
+        )
+        changed_node = node + torch.linspace(0.0, 0.5, 8)[:, None]
+        independent = scorer(
+            changed_node,
+            edge,
+            mask,
+            adjacency,
+            current_node_ids=names,
+            current_coordinates=coordinates,
+        )
+        aligned = scorer(
+            changed_node,
+            edge,
+            mask,
+            adjacency,
+            previous_memory=first.next_memory,
+            current_node_ids=names,
+            current_coordinates=coordinates,
+            history_strength=0.0,
+        )
+        expected = aligned.slot_alignment @ independent.object_node_probabilities
+        self.assertTrue(
+            torch.allclose(
+                aligned.object_node_probabilities,
+                expected,
+                atol=1.0e-6,
+                rtol=1.0e-6,
+            )
+        )
+        self.assertTrue(torch.equal(aligned.memory_update_gate, torch.ones(3)))
+        self.assertEqual(float(aligned.regularization.node_continuity), 0.0)
+        self.assertEqual(float(aligned.regularization.edge_continuity), 0.0)
+
+    def test_exploration_consensus_is_confidence_weighted_mean(self):
+        node, edge, adjacency, mask = _fixture()
+        scorer = TheoryGuidedMultiObjectScorer(
+            hidden_dim=16,
+            edge_hidden_dim=8,
+            object_count=3,
+            spectral_dim=4,
+            graph_layers=1,
+            dropout=0.0,
+            structural_memory_enabled=True,
+            memory_diffusion=0.0,
+        ).eval()
+        names = tuple("roi_{}".format(index) for index in range(8))
+        coordinates = torch.arange(24, dtype=torch.float32).reshape(8, 3)
+        first = scorer(
+            node,
+            edge,
+            mask,
+            adjacency,
+            current_node_ids=names,
+            current_coordinates=coordinates,
+        )
+        second = scorer(
+            node + 0.2,
+            edge,
+            mask,
+            adjacency,
+            previous_memory=first.next_memory,
+            current_node_ids=names,
+            current_coordinates=coordinates,
+            history_strength=0.0,
+        )
+        consensus = merge_exploration_memories(
+            first.next_memory,
+            second.next_memory,
+            adjacency,
+            mask,
+        )
+        confidence = second.alignment_confidence.detach()
+        expected = (
+            second.transported_node_probabilities
+            + confidence[:, None] * second.object_node_probabilities
+        ) / (1.0 + confidence[:, None])
+        self.assertTrue(
+            torch.allclose(
+                consensus.node_probabilities,
+                expected,
+                atol=1.0e-6,
+                rtol=1.0e-6,
+            )
+        )
+        self.assertEqual(consensus.consensus_weight, 2.0)
+        self.assertTrue(
+            torch.allclose(
+                consensus.consensus_object_weights,
+                1.0 + confidence,
+            )
+        )
+
     def test_composite_alignment_uses_signed_geometry_and_latent_evidence(self):
         neutral = torch.full((3, 3), 0.5)
         signed = torch.tensor(
@@ -468,6 +582,16 @@ class TheoryMultiObjectSelectorTest(unittest.TestCase):
             bool(torch.isfinite(terms["node_continuity"]))
         )
         self.assertIn("node", output.diagnostics["mean_slot_alignment_components"])
+        self.assertTrue(
+            output.diagnostics["uses_retrospective_exploration_consensus"]
+        )
+        self.assertEqual(output.diagnostics["exploration_window_count"], (3,))
+        self.assertEqual(
+            output.diagnostics["retrospectively_refined_window_count"], 3
+        )
+        self.assertAlmostEqual(
+            output.diagnostics["mean_history_strength"], 0.30, places=7
+        )
 
     def test_dual_selector_integration_emits_three_learned_objects(self):
         torch.manual_seed(17)
