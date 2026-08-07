@@ -472,6 +472,7 @@ class DualHardSGWSelector(nn.Module):
         selection_mode: str = "learned",
         random_seed: int = 42,
         track_subgraphs: bool = False,
+        diagnostic_independent_windows: bool = False,
     ) -> DualHardSelectionOutput:
         if selection_mode not in ("full", "random", "learned"):
             raise ValueError("unsupported dual hard-selection mode")
@@ -505,6 +506,7 @@ class DualHardSGWSelector(nn.Module):
             exploration_windows = 0
             use_retrospective_exploration = bool(
                 selection_mode == "learned"
+                and not diagnostic_independent_windows
                 and self.config.selector_architecture == "theory_multi_object"
                 and self.config.selector_structural_temporal_memory
                 and self.config.selector_exploration_consensus_enabled
@@ -599,7 +601,9 @@ class DualHardSGWSelector(nn.Module):
             for time_index in range(sample.num_timepoints):
                 adjacency = sample.adjacency[time_index]
                 count = int(adjacency.shape[0])
-                if use_retrospective_exploration:
+                if diagnostic_independent_windows:
+                    history_strength = 0.0
+                elif use_retrospective_exploration:
                     if time_index < exploration_windows:
                         history_strength = float(
                             self.config.selector_exploration_retrospective_strength
@@ -655,6 +659,7 @@ class DualHardSGWSelector(nn.Module):
                                 if (
                                     self.config.selector_object_temporal_state
                                     and not self.config.selector_structural_temporal_memory
+                                    and not diagnostic_independent_windows
                                 )
                                 else None
                             ),
@@ -670,7 +675,10 @@ class DualHardSGWSelector(nn.Module):
                             ),
                             previous_memory=(
                                 previous_object_memory
-                                if self.config.selector_structural_temporal_memory
+                                if (
+                                    self.config.selector_structural_temporal_memory
+                                    and not diagnostic_independent_windows
+                                )
                                 else None
                             ),
                             current_node_ids=(
@@ -685,7 +693,10 @@ class DualHardSGWSelector(nn.Module):
                             ),
                             history_strength=history_strength,
                         )
-                        if not self.config.selector_structural_temporal_memory:
+                        if (
+                            not self.config.selector_structural_temporal_memory
+                            and not diagnostic_independent_windows
+                        ):
                             previous_object_states = scores.next_object_states
                         multi_object_regularization.append(
                             scores.regularization
@@ -744,13 +755,18 @@ class DualHardSGWSelector(nn.Module):
                                 adjacency.device
                             ),
                             current_node_ids=current_node_ids,
-                            previous_memory=previous_object_memory,
+                            previous_memory=(
+                                None
+                                if diagnostic_independent_windows
+                                else previous_object_memory
+                            ),
                             history_strength=history_strength,
                             alignment_confidence=scores.alignment_confidence,
                             edge_ratio=edge_ratio,
                         )
                         if (
                             self.config.selector_structural_temporal_memory
+                            and not diagnostic_independent_windows
                             and (
                                 not use_retrospective_exploration
                                 or time_index >= exploration_windows
@@ -973,6 +989,9 @@ class DualHardSGWSelector(nn.Module):
                 else node_probabilities.new_zeros(())
             ),
             "selection_mode": selection_mode,
+            "diagnostic_independent_windows": bool(
+                diagnostic_independent_windows
+            ),
             "detailed_diagnostics_skipped": fast_runtime,
             "selection_count": len(selections),
             "candidate_node_ratio": total_candidate_nodes

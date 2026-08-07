@@ -593,6 +593,41 @@ class TheoryMultiObjectSelectorTest(unittest.TestCase):
             output.diagnostics["mean_history_strength"], 0.30, places=7
         )
 
+    def test_diagnostic_independent_mode_carries_no_history(self):
+        torch.manual_seed(37)
+        sample = _exact_sample("diagnostic-independent", 1, 4)
+        selector = DualHardSGWSelector(
+            DualSTSEHardSGWConfig(
+                selector_architecture="theory_multi_object",
+                selector_object_temporal_state=True,
+                selector_structural_temporal_memory=True,
+                critical_subgraph_count=3,
+                critical_node_ratio_per_object=0.67,
+                node_minimum=2,
+                edge_minimum=1,
+            )
+        )
+        output = selector(
+            ExactSTSEBatch((sample,)),
+            selection_mode="learned",
+            diagnostic_independent_windows=True,
+        )
+        self.assertTrue(
+            output.diagnostics["diagnostic_independent_windows"]
+        )
+        self.assertAlmostEqual(
+            output.diagnostics["mean_history_strength"], 0.0, places=7
+        )
+        self.assertAlmostEqual(
+            float(
+                output.diagnostics[
+                    "mean_slot_alignment_confidence"
+                ]
+            ),
+            0.0,
+            places=7,
+        )
+
     def test_dual_selector_integration_emits_three_learned_objects(self):
         torch.manual_seed(17)
         sample = _exact_sample("multi-object", 1, 3)
