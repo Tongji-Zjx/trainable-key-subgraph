@@ -314,6 +314,10 @@ def run_dual_epoch(
             "soft_hard_spectral",
             "soft_hard_gw",
             "soft_hard_kd",
+            "object_overlap",
+            "object_reconstruction",
+            "object_coverage",
+            "object_temporal",
         ):
             value = getattr(loss, name)
             component_totals[name] = component_totals.get(

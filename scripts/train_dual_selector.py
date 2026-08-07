@@ -28,6 +28,10 @@ from keysubgraph.data.exact_stse_dataset import (  # noqa: E402
 from keysubgraph.models.dual_stse_hard_sgw import (  # noqa: E402
     DualSTSEHardSGWClassifier,
 )
+from keysubgraph.models.dual_stse_hard_sgw_types import (  # noqa: E402
+    DUAL_SELECTOR_ARCHITECTURES,
+    DualSTSEHardSGWConfig,
+)
 from keysubgraph.models.dual_stse_hard_sgw_loss import (  # noqa: E402
     DualSTSEHardSGWLossConfig,
 )
@@ -58,6 +62,18 @@ def parse_args():
     parser.add_argument("--gradient-clip", type=float, default=1.0)
     parser.add_argument("--early-stopping-patience", type=int, default=15)
     parser.add_argument(
+        "--selector-architecture",
+        choices=DUAL_SELECTOR_ARCHITECTURES,
+        default="legacy_mlp",
+    )
+    parser.add_argument("--critical-subgraph-count", type=int)
+    parser.add_argument("--selector-graph-layers", type=int, default=2)
+    parser.add_argument("--selector-spectral-dim", type=int, default=8)
+    parser.add_argument("--object-overlap-minimum", type=float, default=0.05)
+    parser.add_argument("--object-overlap-maximum", type=float, default=0.30)
+    parser.add_argument("--object-node-ratio", type=float, default=0.10)
+    parser.add_argument("--object-temporal-state", action="store_true")
+    parser.add_argument(
         "--selector-objective",
         choices=("current", "full_soft", "full_soft_hard"),
         default="current",
@@ -83,6 +99,12 @@ def parse_args():
     parser.add_argument(
         "--soft-hard-kd-weight", type=float, default=0.05
     )
+    parser.add_argument("--object-overlap-weight", type=float, default=0.10)
+    parser.add_argument(
+        "--object-reconstruction-weight", type=float, default=0.10
+    )
+    parser.add_argument("--object-coverage-weight", type=float, default=0.05)
+    parser.add_argument("--object-temporal-weight", type=float, default=0.05)
     parser.add_argument("--smoke", action="store_true")
     return parser.parse_args()
 
@@ -142,8 +164,25 @@ def main():
         shuffle=False,
         pin_memory=device.type == "cuda",
     )
+    critical_subgraph_count = (
+        args.critical_subgraph_count
+        if args.critical_subgraph_count is not None
+        else 3
+        if args.selector_architecture == "theory_multi_object"
+        else 5
+    )
+    model_config = DualSTSEHardSGWConfig(
+        selector_architecture=args.selector_architecture,
+        critical_subgraph_count=critical_subgraph_count,
+        selector_graph_layers=args.selector_graph_layers,
+        selector_spectral_dim=args.selector_spectral_dim,
+        selector_object_overlap_minimum=args.object_overlap_minimum,
+        selector_object_overlap_maximum=args.object_overlap_maximum,
+        selector_object_temporal_state=args.object_temporal_state,
+        critical_node_ratio_per_object=args.object_node_ratio,
+    )
     result = train_dual_stage(
-        model=DualSTSEHardSGWClassifier(),
+        model=DualSTSEHardSGWClassifier(model_config),
         train_loader=train_loader,
         validation_loader=validation_loader,
         train_labels=[item.label for item in train_dataset.assignments],
@@ -169,6 +208,12 @@ def main():
             soft_hard_gw_weight=args.soft_hard_gw_weight,
             soft_hard_kd_weight=args.soft_hard_kd_weight,
             soft_warmup_epochs=args.soft_warmup_epochs,
+            object_overlap_weight=args.object_overlap_weight,
+            object_reconstruction_weight=(
+                args.object_reconstruction_weight
+            ),
+            object_coverage_weight=args.object_coverage_weight,
+            object_temporal_weight=args.object_temporal_weight,
         ),
         output_dir=args.output_dir,
         protocol_sha256=file_sha256(args.protocol),
@@ -177,6 +222,9 @@ def main():
             "selector_checkpoint_sha256": "trained_by_this_stage",
             "sgw_scaler_sha256": "not_applicable",
             "selector_objective": args.selector_objective,
+            "selector_architecture": args.selector_architecture,
+            "critical_subgraph_count": critical_subgraph_count,
+            "object_temporal_state": args.object_temporal_state,
         },
     )
     print(

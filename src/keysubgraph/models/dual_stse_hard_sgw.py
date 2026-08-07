@@ -161,6 +161,8 @@ class DualSTSEHardSGWClassifier(nn.Module):
             raise ValueError("unsupported selector objective")
         stse = self.stse_channel(batch)
         hard_windows = None
+        hard_subgraphs = None
+        trajectory_sets = None
         proxy_logits = None
         soft_proxy_logits = None
         hard_proxy_logits = None
@@ -176,6 +178,8 @@ class DualSTSEHardSGWClassifier(nn.Module):
                 random_seed=random_seed,
             )
             hard_windows = selection.hard_windows
+            hard_subgraphs = selection.hard_subgraphs
+            trajectory_sets = selection.trajectory_sets
             selection_diagnostics = selection.diagnostics
             hard_proxy_output = self.proxy(
                 batch,
@@ -231,7 +235,10 @@ class DualSTSEHardSGWClassifier(nn.Module):
 
         diagnostics = {
             "uses_coordinates": False,
-            "uses_learned_temporal_encoder": False,
+            "uses_learned_temporal_encoder": (
+                self.config.selector_architecture == "theory_multi_object"
+                and self.config.selector_object_temporal_state
+            ),
             "stse_representation_dim": int(
                 stse.representation.shape[-1]
             ),
@@ -267,4 +274,6 @@ class DualSTSEHardSGWClassifier(nn.Module):
             diagnostics=diagnostics,
             selector_soft_proxy_logits=soft_proxy_logits,
             selector_hard_proxy_logits=hard_proxy_logits,
+            hard_subgraphs=hard_subgraphs,
+            trajectory_sets=trajectory_sets,
         )

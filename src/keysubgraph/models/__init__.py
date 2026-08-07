@@ -90,6 +90,7 @@ from .neuralized_sv import (
 )
 from .dual_stse_hard_sgw_types import (
     DUAL_EXPERIMENT_VARIANTS,
+    DUAL_SELECTOR_ARCHITECTURES,
     DUAL_TRAINING_STAGES,
     DualSTSEHardSGWConfig,
     DualSTSEHardSGWOutput,
@@ -120,6 +121,28 @@ from .dual_sgw_feature_classifier import (
     DUAL_SGW_FEATURE_CLASSIFIERS,
     DualSGWFeatureClassifier,
     DualSGWFeatureClassifierConfig,
+)
+from .fixed_k_subgraph_selector import (
+    FixedKSelectionOutput,
+    select_object_conditioned_subgraphs,
+    select_fixed_k_subgraphs,
+)
+from .theory_multi_object_selector import (
+    MultiObjectRegularization,
+    SignedSpectralGCNIIEncoder,
+    SignedSpectralGCNIILayer,
+    TheoryGuidedMultiObjectScorer,
+    TheoryMultiObjectScoreOutput,
+    signed_laplacian_eigenvectors,
+)
+from .dynamic_subgraph_tracking import (
+    DynamicSubgraphTrajectory,
+    DynamicTrackingConfig,
+    DynamicTrajectorySet,
+    SubgraphTrackDescriptor,
+    WindowTrackAssignment,
+    build_dynamic_trajectories,
+    build_dynamic_trajectories_from_costs,
 )
 
 __all__ = [
@@ -169,6 +192,7 @@ __all__ = [
     "ExactSTSEOutput",
     "ExactSTSEWindowEncoder",
     "DUAL_EXPERIMENT_VARIANTS",
+    "DUAL_SELECTOR_ARCHITECTURES",
     "DUAL_TRAINING_STAGES",
     "DualSTSEHardSGWConfig",
     "DualSTSEHardSGWOutput",
@@ -190,6 +214,22 @@ __all__ = [
     "DUAL_SGW_FEATURE_CLASSIFIERS",
     "DualSGWFeatureClassifier",
     "DualSGWFeatureClassifierConfig",
+    "FixedKSelectionOutput",
+    "select_object_conditioned_subgraphs",
+    "select_fixed_k_subgraphs",
+    "MultiObjectRegularization",
+    "SignedSpectralGCNIIEncoder",
+    "SignedSpectralGCNIILayer",
+    "TheoryGuidedMultiObjectScorer",
+    "TheoryMultiObjectScoreOutput",
+    "signed_laplacian_eigenvectors",
+    "DynamicSubgraphTrajectory",
+    "DynamicTrackingConfig",
+    "DynamicTrajectorySet",
+    "SubgraphTrackDescriptor",
+    "WindowTrackAssignment",
+    "build_dynamic_trajectories",
+    "build_dynamic_trajectories_from_costs",
     "PAPER_ALIGNED_MODEL_NAME",
     "PAPER_ALIGNED_VARIANT",
     "PAPER_ALIGNED_PST_MODEL_NAME",

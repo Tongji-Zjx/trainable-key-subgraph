@@ -27,6 +27,10 @@ class DualSTSEHardSGWLossConfig:
     soft_hard_spectral_weight: float = 0.05
     soft_hard_gw_weight: float = 0.02
     soft_hard_kd_weight: float = 0.05
+    object_overlap_weight: float = 0.10
+    object_reconstruction_weight: float = 0.10
+    object_coverage_weight: float = 0.05
+    object_temporal_weight: float = 0.05
     soft_hard_kd_temperature: float = 1.0
     soft_warmup_epochs: int = 3
     target_node_ratio: float = 0.50
@@ -53,6 +57,10 @@ class DualSTSEHardSGWLossConfig:
             self.soft_hard_spectral_weight,
             self.soft_hard_gw_weight,
             self.soft_hard_kd_weight,
+            self.object_overlap_weight,
+            self.object_reconstruction_weight,
+            self.object_coverage_weight,
+            self.object_temporal_weight,
         )
         if any(value < 0.0 for value in weights):
             raise ValueError("dual loss weights cannot be negative")
@@ -83,6 +91,10 @@ class DualSTSEHardSGWLoss:
     soft_hard_spectral: torch.Tensor
     soft_hard_gw: torch.Tensor
     soft_hard_kd: torch.Tensor
+    object_overlap: torch.Tensor
+    object_reconstruction: torch.Tensor
+    object_coverage: torch.Tensor
+    object_temporal: torch.Tensor
     stage: str
     weights: Dict[str, float]
 
@@ -138,6 +150,10 @@ class DualSTSEHardSGWCriterion(object):
         soft_hard_spectral = zero
         soft_hard_gw = zero
         soft_hard_kd = zero
+        object_overlap = zero
+        object_reconstruction = zero
+        object_coverage = zero
+        object_temporal = zero
 
         if stage == "selector_proxy":
             if output.selector_proxy_logits is None:
@@ -197,6 +213,14 @@ class DualSTSEHardSGWCriterion(object):
             selections = output.diagnostics.get("selection", {}).get(
                 "selections", ()
             )
+            object_terms = output.diagnostics.get("selection", {}).get(
+                "multi_object_regularization"
+            )
+            if object_terms is not None:
+                object_overlap = object_terms["overlap"]
+                object_reconstruction = object_terms["reconstruction"]
+                object_coverage = object_terms["coverage"]
+                object_temporal = object_terms["temporal"]
             node_values = [
                 item.node_probabilities.reshape(-1)
                 for item in selections
@@ -256,6 +280,14 @@ class DualSTSEHardSGWCriterion(object):
                         + self.config.soft_hard_kd_weight
                         * soft_hard_kd
                     )
+            total = (
+                total
+                + self.config.object_overlap_weight * object_overlap
+                + self.config.object_reconstruction_weight
+                * object_reconstruction
+                + self.config.object_coverage_weight * object_coverage
+                + self.config.object_temporal_weight * object_temporal
+            )
         elif stage == "sgw_classifier":
             if output.sgw_logits is None:
                 raise ValueError("SGW stage requires exact SGW logits")
@@ -295,6 +327,10 @@ class DualSTSEHardSGWCriterion(object):
             soft_hard_spectral=soft_hard_spectral,
             soft_hard_gw=soft_hard_gw,
             soft_hard_kd=soft_hard_kd,
+            object_overlap=object_overlap,
+            object_reconstruction=object_reconstruction,
+            object_coverage=object_coverage,
+            object_temporal=object_temporal,
             stage=stage,
             weights={
                 "fusion_ce": self.config.fusion_ce_weight,
@@ -314,5 +350,11 @@ class DualSTSEHardSGWCriterion(object):
                 ),
                 "soft_hard_gw": self.config.soft_hard_gw_weight,
                 "soft_hard_kd": self.config.soft_hard_kd_weight,
+                "object_overlap": self.config.object_overlap_weight,
+                "object_reconstruction": (
+                    self.config.object_reconstruction_weight
+                ),
+                "object_coverage": self.config.object_coverage_weight,
+                "object_temporal": self.config.object_temporal_weight,
             },
         )

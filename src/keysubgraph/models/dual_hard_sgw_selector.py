@@ -16,6 +16,12 @@ from keysubgraph.features.hard_stse_hard_graph import build_hard_stse_window
 from .dual_stse_hard_sgw_types import DualSTSEHardSGWConfig
 from .dual_stse_hard_sgw_types import DualSoftWindowOutput
 from .hard_stse_selector import HardSTSEScorer, select_hard_stse_window
+from .fixed_k_subgraph_selector import (
+    select_fixed_k_subgraphs,
+    select_object_conditioned_subgraphs,
+)
+from .dynamic_subgraph_tracking import build_dynamic_trajectories
+from .theory_multi_object_selector import TheoryGuidedMultiObjectScorer
 from .hard_stse_types import (
     HardSelectionSchedule,
     HardSTSEConfig,
@@ -26,7 +32,9 @@ from .hard_stse_types import (
 @dataclass(frozen=True)
 class DualHardSelectionOutput:
     hard_windows: Tuple[Tuple[HardWindowOutput, ...], ...]
+    hard_subgraphs: Tuple[Tuple[Tuple[Optional[HardWindowOutput], ...], ...], ...]
     soft_windows: Tuple[Tuple[DualSoftWindowOutput, ...], ...]
+    trajectory_sets: Tuple[Optional[Any], ...]
     diagnostics: Dict[str, Any]
 
 
@@ -84,7 +92,7 @@ def _build_soft_window(
 
 
 class DualHardSGWSelector(nn.Module):
-    """Score and select signed hard graphs without adding graph encoders."""
+    """Legacy or theory-guided signed multi-object hard graph selector."""
 
     def __init__(
         self, config: Optional[DualSTSEHardSGWConfig] = None
@@ -112,28 +120,61 @@ class DualHardSGWSelector(nn.Module):
         self.feature_builder = HardSTSEExtractorFeatureBuilder(
             epsilon=self.config.epsilon
         )
-        self.scorer = HardSTSEScorer(scorer_config)
+        if self.config.selector_architecture == "legacy_mlp":
+            self.scorer = HardSTSEScorer(scorer_config)
+        else:
+            self.scorer = TheoryGuidedMultiObjectScorer(
+                node_feature_dim=self.config.selector_node_feature_dim,
+                edge_feature_dim=self.config.selector_edge_base_dim,
+                hidden_dim=self.config.selector_node_hidden_dim,
+                edge_hidden_dim=self.config.selector_edge_hidden_dim,
+                object_count=self.config.critical_subgraph_count,
+                spectral_dim=self.config.selector_spectral_dim,
+                graph_layers=self.config.selector_graph_layers,
+                dropout=self.config.selector_dropout,
+                overlap_minimum=(
+                    self.config.selector_object_overlap_minimum
+                ),
+                overlap_maximum=(
+                    self.config.selector_object_overlap_maximum
+                ),
+                target_object_ratio=(
+                    self.config.critical_node_ratio_per_object
+                ),
+                temporal_confidence_threshold=(
+                    self.config.selector_temporal_confidence_threshold
+                ),
+                epsilon=self.config.epsilon,
+            )
 
     def forward(
         self,
         batch: ExactSTSEBatch,
         selection_mode: str = "learned",
         random_seed: int = 42,
+        track_subgraphs: bool = False,
     ) -> DualHardSelectionOutput:
         if selection_mode not in ("full", "random", "learned"):
             raise ValueError("unsupported dual hard-selection mode")
         sample_outputs = []
+        sample_subgraph_outputs = []
         soft_sample_outputs = []
+        trajectory_sets = []
         candidate_coverages: List[float] = []
         final_coverages: List[float] = []
         selections = []
         node_probability_values = []
         edge_probability_values = []
+        fixed_k_outputs = []
+        multi_object_regularization = []
+        multi_object_iou = []
         selected_positive_edge_count = 0
         selected_negative_edge_count = 0
         for exact_sample in batch:
             sample = exact_sample.graph
+            previous_object_states = None
             windows = []
+            subgraph_windows = []
             soft_windows = []
             for time_index in range(sample.num_timepoints):
                 adjacency = sample.adjacency[time_index]
@@ -142,11 +183,31 @@ class DualHardSGWSelector(nn.Module):
                     features = self.feature_builder.build_timepoint(
                         sample, time_index
                     )
-                    scores = self.scorer(
-                        features.node_features,
-                        features.edge_base_features,
-                        features.edge_presence_mask,
-                    )
+                    if self.config.selector_architecture == "legacy_mlp":
+                        scores = self.scorer(
+                            features.node_features,
+                            features.edge_base_features,
+                            features.edge_presence_mask,
+                        )
+                    else:
+                        scores = self.scorer(
+                            features.node_features,
+                            features.edge_base_features,
+                            features.edge_presence_mask,
+                            adjacency,
+                            (
+                                previous_object_states
+                                if self.config.selector_object_temporal_state
+                                else None
+                            ),
+                        )
+                        previous_object_states = scores.next_object_states
+                        multi_object_regularization.append(
+                            scores.regularization
+                        )
+                        multi_object_iou.append(
+                            scores.regularization.pairwise_soft_iou
+                        )
                     node_probabilities = scores.node_probabilities
                     edge_probabilities = scores.edge_probabilities
                 else:
@@ -165,27 +226,117 @@ class DualHardSGWSelector(nn.Module):
                     if selection_mode == "full"
                     else self.config.target_edge_ratio
                 )
-                selection = select_hard_stse_window(
-                    node_probabilities=node_probabilities,
-                    edge_probabilities=edge_probabilities,
-                    communities=sample.communities[time_index].to(
-                        adjacency.device
-                    ),
-                    edge_presence_mask=sample.edge_mask[time_index].to(
-                        adjacency.device
-                    ),
-                    node_ratio=node_ratio,
-                    edge_ratio=edge_ratio,
-                    node_minimum=self.config.node_minimum,
-                    edge_minimum=self.config.edge_minimum,
-                    selection_mode=selection_mode,
-                    sample_key=sample.sample_key,
-                    time_index=time_index,
-                    random_seed=random_seed,
-                )
+                fixed_k = None
+                if selection_mode == "learned":
+                    if self.config.selector_architecture == "theory_multi_object":
+                        fixed_k = select_object_conditioned_subgraphs(
+                            global_node_probabilities=node_probabilities,
+                            global_edge_probabilities=edge_probabilities,
+                            object_node_probabilities=(
+                                scores.object_node_probabilities
+                            ),
+                            object_edge_probabilities=(
+                                scores.object_edge_probabilities
+                            ),
+                            edge_presence_mask=sample.edge_mask[time_index].to(
+                                adjacency.device
+                            ),
+                            per_object_node_ratio=(
+                                self.config.critical_node_ratio_per_object
+                            ),
+                            edge_ratio=edge_ratio,
+                            node_minimum=self.config.node_minimum,
+                            edge_minimum=self.config.edge_minimum,
+                            candidate_multiplier=(
+                                self.config.critical_candidate_multiplier
+                            ),
+                            overlap_penalty=(
+                                self.config.critical_overlap_penalty
+                            ),
+                            max_node_overlap=(
+                                self.config.critical_max_node_overlap
+                            ),
+                            max_edge_overlap=(
+                                self.config.critical_max_edge_overlap
+                            ),
+                        )
+                    else:
+                        fixed_k = select_fixed_k_subgraphs(
+                        node_probabilities=node_probabilities,
+                        edge_probabilities=edge_probabilities,
+                        communities=sample.communities[time_index].to(
+                            adjacency.device
+                        ),
+                        edge_presence_mask=sample.edge_mask[time_index].to(
+                            adjacency.device
+                        ),
+                        subgraph_count=self.config.critical_subgraph_count,
+                        candidate_multiplier=self.config.critical_candidate_multiplier,
+                        total_node_ratio=node_ratio,
+                        edge_ratio=edge_ratio,
+                        node_minimum=self.config.node_minimum,
+                        edge_minimum=self.config.edge_minimum,
+                        overlap_penalty=self.config.critical_overlap_penalty,
+                        coordinates=exact_sample.coordinates[time_index].to(
+                            adjacency.device
+                        ),
+                        diversity_enabled=self.config.critical_diversity_enabled,
+                        per_object_node_ratio=(
+                            self.config.critical_node_ratio_per_object
+                        ),
+                        node_reuse_decay=self.config.critical_node_reuse_decay,
+                        edge_reuse_decay=self.config.critical_edge_reuse_decay,
+                        max_node_overlap=self.config.critical_max_node_overlap,
+                        max_edge_overlap=self.config.critical_max_edge_overlap,
+                        min_unique_node_fraction=(
+                            self.config.critical_min_unique_node_fraction
+                        ),
+                        quality_floor_ratio=(
+                            self.config.critical_quality_floor_ratio
+                        ),
+                            min_seed_distance=(
+                                self.config.critical_min_seed_distance
+                            ),
+                        )
+                    fixed_k_outputs.append(fixed_k)
+                    selection = fixed_k.union
+                else:
+                    selection = select_hard_stse_window(
+                        node_probabilities=node_probabilities,
+                        edge_probabilities=edge_probabilities,
+                        communities=sample.communities[time_index].to(
+                            adjacency.device
+                        ),
+                        edge_presence_mask=sample.edge_mask[time_index].to(
+                            adjacency.device
+                        ),
+                        node_ratio=node_ratio,
+                        edge_ratio=edge_ratio,
+                        node_minimum=self.config.node_minimum,
+                        edge_minimum=self.config.edge_minimum,
+                        selection_mode=selection_mode,
+                        sample_key=sample.sample_key,
+                        time_index=time_index,
+                        random_seed=random_seed,
+                    )
                 hard = build_hard_stse_window(
                     sample, time_index, selection
                 )
+                object_outputs: List[Optional[HardWindowOutput]] = []
+                if fixed_k is not None:
+                    for object_selection in fixed_k.subgraphs:
+                        object_outputs.append(
+                            build_hard_stse_window(
+                                sample, time_index, object_selection
+                            )
+                        )
+                else:
+                    object_outputs.append(hard)
+                while len(object_outputs) < self.config.critical_subgraph_count:
+                    object_outputs.append(None)
+                object_outputs = object_outputs[
+                    : self.config.critical_subgraph_count
+                ]
                 soft = _build_soft_window(
                     adjacency,
                     sample.edge_mask[time_index],
@@ -229,9 +380,20 @@ class DualHardSGWSelector(nn.Module):
                     (selected_weights < 0.0).sum()
                 )
                 windows.append(hard)
+                subgraph_windows.append(tuple(object_outputs))
                 soft_windows.append(soft)
             sample_outputs.append(tuple(windows))
+            sample_subgraph_outputs.append(tuple(subgraph_windows))
             soft_sample_outputs.append(tuple(soft_windows))
+            trajectory_sets.append(
+                build_dynamic_trajectories(
+                    subgraph_windows,
+                    exact_sample.coordinates,
+                    self.config.critical_subgraph_count,
+                )
+                if track_subgraphs
+                else None
+            )
         total_original_nodes = sum(
             int(item.node_probabilities.numel()) for item in selections
         )
@@ -254,6 +416,14 @@ class DualHardSGWSelector(nn.Module):
             else node_probabilities.new_zeros((0,))
         )
         diagnostics = {
+            "selector_architecture": self.config.selector_architecture,
+            "uses_signed_graph_encoder": (
+                self.config.selector_architecture == "theory_multi_object"
+            ),
+            "uses_object_temporal_state": (
+                self.config.selector_architecture == "theory_multi_object"
+                and self.config.selector_object_temporal_state
+            ),
             "selection_mode": selection_mode,
             "selection_count": len(selections),
             "candidate_node_ratio": total_candidate_nodes
@@ -297,10 +467,103 @@ class DualHardSGWSelector(nn.Module):
             "selected_negative_edge_count": (
                 selected_negative_edge_count
             ),
+            "critical_subgraph_count": self.config.critical_subgraph_count,
+            "critical_diversity_enabled": (
+                self.config.critical_diversity_enabled
+            ),
+            "mean_fixed_k_union_efficiency": (
+                sum(item.union_efficiency for item in fixed_k_outputs)
+                / float(max(1, len(fixed_k_outputs)))
+            ),
+            "diversity_relaxed_window_count": sum(
+                item.diversity_constraint_relaxed
+                for item in fixed_k_outputs
+            ),
+            "mean_fixed_k_node_overlap": (
+                sum(
+                    float(
+                        item.pairwise_node_overlap[
+                            torch.triu(
+                                torch.ones_like(
+                                    item.pairwise_node_overlap,
+                                    dtype=torch.bool,
+                                ),
+                                diagonal=1,
+                            )
+                        ].mean()
+                    )
+                    for item in fixed_k_outputs
+                )
+                / float(max(1, len(fixed_k_outputs)))
+                if fixed_k_outputs
+                else 0.0
+            ),
+            "mean_fixed_k_edge_overlap": (
+                sum(
+                    float(
+                        item.pairwise_edge_overlap[
+                            torch.triu(
+                                torch.ones_like(
+                                    item.pairwise_edge_overlap,
+                                    dtype=torch.bool,
+                                ),
+                                diagonal=1,
+                            )
+                        ].mean()
+                    )
+                    for item in fixed_k_outputs
+                )
+                / float(max(1, len(fixed_k_outputs)))
+                if fixed_k_outputs
+                else 0.0
+            ),
+            "trajectory_count": tuple(
+                item.trajectory_count if item is not None else None
+                for item in trajectory_sets
+            ),
+            "trajectory_birth_count": tuple(
+                item.total_birth_count if item is not None else None
+                for item in trajectory_sets
+            ),
+            "multi_object_regularization": (
+                {
+                    "overlap": torch.stack(
+                        [item.overlap for item in multi_object_regularization]
+                    ).mean(),
+                    "reconstruction": torch.stack(
+                        [item.reconstruction for item in multi_object_regularization]
+                    ).mean(),
+                    "coverage": torch.stack(
+                        [item.coverage for item in multi_object_regularization]
+                    ).mean(),
+                    "temporal": torch.stack(
+                        [item.temporal for item in multi_object_regularization]
+                    ).mean(),
+                }
+                if multi_object_regularization
+                else None
+            ),
+            "mean_soft_object_iou": (
+                torch.stack(
+                    [
+                        item[
+                            torch.triu(
+                                torch.ones_like(item, dtype=torch.bool),
+                                diagonal=1,
+                            )
+                        ].mean()
+                        for item in multi_object_iou
+                    ]
+                ).mean()
+                if multi_object_iou
+                else node_probabilities.new_zeros(())
+            ),
             "selections": tuple(selections),
         }
         return DualHardSelectionOutput(
             hard_windows=tuple(sample_outputs),
+            hard_subgraphs=tuple(sample_subgraph_outputs),
             soft_windows=tuple(soft_sample_outputs),
+            trajectory_sets=tuple(trajectory_sets),
             diagnostics=diagnostics,
         )
