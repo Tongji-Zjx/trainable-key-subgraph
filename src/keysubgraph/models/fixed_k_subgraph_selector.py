@@ -944,7 +944,7 @@ def select_object_conditioned_subgraphs(
         pool_limit = min(
             len(seeds), max(int(object_count), int(candidate_multiplier))
         )
-        for seed in seeds[:pool_limit]:
+        def consider_seed(seed):
             candidate = _grow_one(
                 int(seed),
                 node_scores,
@@ -958,7 +958,7 @@ def select_object_conditioned_subgraphs(
                 candidate.actual_node_count < int(node_minimum)
                 or candidate.actual_edge_count < int(edge_minimum)
             ):
-                continue
+                return
             signature = (
                 tuple(torch.nonzero(candidate.hard_node_mask).flatten().tolist()),
                 tuple(
@@ -969,7 +969,7 @@ def select_object_conditioned_subgraphs(
                 ),
             )
             if signature in signatures:
-                continue
+                return
             signatures.add(signature)
             node_overlap = 0.0
             edge_overlap = 0.0
@@ -988,6 +988,16 @@ def select_object_conditioned_subgraphs(
             candidates.append(
                 (violation, -objective, int(seed), candidate)
             )
+        for seed in seeds[:pool_limit]:
+            consider_seed(seed)
+        # Sparse or disconnected windows can place all preferred seeds on
+        # isolated nodes.  Only in that failure case, scan the deterministic
+        # remainder so the object still resolves to a valid connected graph.
+        if not candidates:
+            for seed in seeds[pool_limit:]:
+                consider_seed(seed)
+                if candidates:
+                    break
         if not candidates:
             raise ValueError("object field cannot supply a connected hard subgraph")
         candidates.sort(key=lambda item: (item[0], item[1], item[2]))

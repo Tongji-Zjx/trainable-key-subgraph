@@ -198,6 +198,32 @@ class TheoryMultiObjectSelectorTest(unittest.TestCase):
         self.assertGreater(float(objects.grad.abs().sum()), 0.0)
         self.assertGreater(float(object_edges.grad.abs().sum()), 0.0)
 
+    def test_hardening_falls_back_from_isolated_preferred_seeds(self):
+        count = 8
+        global_node = torch.full((count,), 0.6)
+        global_edge = torch.full((count, count), 0.7)
+        mask = torch.zeros(count, count, dtype=torch.bool)
+        for left, right in ((4, 5), (5, 6), (6, 7), (4, 7)):
+            mask[left, right] = True
+            mask[right, left] = True
+        objects = torch.full((3, count), 0.1)
+        objects[:, :4] = 0.99
+        object_edges = torch.full((3, count, count), 0.5)
+        selected = select_object_conditioned_subgraphs(
+            global_node,
+            global_edge,
+            objects,
+            object_edges,
+            mask,
+            per_object_node_ratio=0.25,
+            edge_ratio=0.5,
+            candidate_multiplier=4,
+        )
+        self.assertEqual(len(selected.subgraphs), 3)
+        self.assertTrue(
+            all(item.actual_edge_count >= 1 for item in selected.subgraphs)
+        )
+
     def test_dual_selector_integration_emits_three_learned_objects(self):
         torch.manual_seed(17)
         sample = _exact_sample("multi-object", 1, 3)
