@@ -88,6 +88,9 @@ class ExplorationMedoidSelectorTest(unittest.TestCase):
         }
         self.assertEqual(anchor_node_sets, {(0, 1), (2, 3), (4, 5)})
         self.assertEqual(selected.support_window_counts, (3, 3, 3))
+        self.assertEqual(selected.unsupported_anchor_count, 0)
+        self.assertLess(selected.mean_cross_window_cluster_similarity, 1.000001)
+        self.assertGreater(selected.mean_cross_window_cluster_similarity, 0.50)
         self.assertTrue(
             all(candidates[index].window_index == 2 for index in selected.recent_indices)
         )

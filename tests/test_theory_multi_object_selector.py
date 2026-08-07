@@ -575,6 +575,20 @@ class TheoryMultiObjectSelectorTest(unittest.TestCase):
         self.assertTrue(
             output.diagnostics["uses_structural_temporal_memory"]
         )
+        self.assertEqual(
+            output.diagnostics["exploration_initializer"],
+            "real_candidate_medoid",
+        )
+        self.assertEqual(
+            output.diagnostics["mean_exploration_candidate_pool_size"],
+            9.0,
+        )
+        self.assertGreaterEqual(
+            output.diagnostics[
+                "mean_exploration_nearest_cross_window_similarity"
+            ],
+            0.0,
+        )
         terms = output.diagnostics["multi_object_regularization"]
         self.assertIn("node_continuity", terms)
         self.assertIn("edge_continuity", terms)

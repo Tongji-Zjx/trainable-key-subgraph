@@ -493,6 +493,9 @@ class DualHardSGWSelector(nn.Module):
         exploration_anchor_supports: List[float] = []
         exploration_anchor_similarities: List[float] = []
         exploration_cluster_similarities: List[float] = []
+        exploration_cross_window_cluster_similarities: List[float] = []
+        exploration_nearest_cross_window_similarities: List[float] = []
+        exploration_unsupported_anchor_rates: List[float] = []
         exploration_medoid_objectives: List[float] = []
         selected_positive_edge_count = 0
         selected_negative_edge_count = 0
@@ -660,6 +663,16 @@ class DualHardSGWSelector(nn.Module):
                 )
                 exploration_cluster_similarities.append(
                     exploration_medoid_selection.mean_cluster_similarity
+                )
+                exploration_cross_window_cluster_similarities.append(
+                    exploration_medoid_selection.mean_cross_window_cluster_similarity
+                )
+                exploration_nearest_cross_window_similarities.append(
+                    exploration_medoid_selection.mean_nearest_cross_window_similarity
+                )
+                exploration_unsupported_anchor_rates.append(
+                    exploration_medoid_selection.unsupported_anchor_count
+                    / float(self.config.critical_subgraph_count)
                 )
                 exploration_medoid_objectives.append(
                     exploration_medoid_selection.objective
@@ -1123,6 +1136,28 @@ class DualHardSGWSelector(nn.Module):
             "mean_exploration_cluster_similarity": (
                 sum(exploration_cluster_similarities)
                 / float(max(1, len(exploration_cluster_similarities)))
+            ),
+            "mean_exploration_cross_window_cluster_similarity": (
+                sum(exploration_cross_window_cluster_similarities)
+                / float(
+                    max(
+                        1,
+                        len(exploration_cross_window_cluster_similarities),
+                    )
+                )
+            ),
+            "mean_exploration_nearest_cross_window_similarity": (
+                sum(exploration_nearest_cross_window_similarities)
+                / float(
+                    max(
+                        1,
+                        len(exploration_nearest_cross_window_similarities),
+                    )
+                )
+            ),
+            "mean_exploration_unsupported_anchor_rate": (
+                sum(exploration_unsupported_anchor_rates)
+                / float(max(1, len(exploration_unsupported_anchor_rates)))
             ),
             "mean_exploration_medoid_objective": (
                 sum(exploration_medoid_objectives)

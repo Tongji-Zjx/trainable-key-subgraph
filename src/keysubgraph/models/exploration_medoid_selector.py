@@ -37,6 +37,9 @@ class ExplorationMedoidSelection:
     objective: float
     mean_anchor_similarity: float
     mean_cluster_similarity: float
+    mean_cross_window_cluster_similarity: float
+    mean_nearest_cross_window_similarity: float
+    unsupported_anchor_count: int
 
 
 def stack_real_candidate_memories(
@@ -509,6 +512,7 @@ def select_exploration_medoids(
     recent = []
     selected_support = []
     cluster_similarities = []
+    cross_window_cluster_similarities = []
     for slot, anchor in enumerate(anchors):
         members = [index for index, value in enumerate(assignments) if value == slot]
         members.sort(
@@ -524,6 +528,21 @@ def select_exploration_medoids(
             len({int(candidates[index].window_index) for index in members})
         )
         cluster_similarities.extend(float(similarity[index, anchor]) for index in members)
+        cross_window_cluster_similarities.extend(
+            float(similarity[index, anchor])
+            for index in members
+            if int(candidates[index].window_index)
+            != int(candidates[anchor].window_index)
+        )
+    nearest_cross_window = []
+    for index, candidate in enumerate(candidates):
+        values = [
+            float(similarity[index, other])
+            for other, compared in enumerate(candidates)
+            if int(compared.window_index) != int(candidate.window_index)
+        ]
+        if values:
+            nearest_cross_window.append(max(values))
     pair_values = [
         float(similarity[left, right])
         for left, right in itertools.combinations(anchors, 2)
@@ -543,4 +562,16 @@ def select_exploration_medoids(
             sum(cluster_similarities) / len(cluster_similarities)
             if cluster_similarities else 0.0
         ),
+        mean_cross_window_cluster_similarity=(
+            sum(cross_window_cluster_similarities)
+            / len(cross_window_cluster_similarities)
+            if cross_window_cluster_similarities
+            else 0.0
+        ),
+        mean_nearest_cross_window_similarity=(
+            sum(nearest_cross_window) / len(nearest_cross_window)
+            if nearest_cross_window
+            else 0.0
+        ),
+        unsupported_anchor_count=sum(value <= 1 for value in selected_support),
     )
