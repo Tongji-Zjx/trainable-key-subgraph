@@ -67,6 +67,14 @@ def parse_args():
         / "data_protocol_exact_stse_no_coord_full.json",
     )
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument(
+        "--initial-checkpoint",
+        type=Path,
+        help=(
+            "trusted selector checkpoint used to initialize all compatible "
+            "parameters; newly introduced parameters retain their defaults"
+        ),
+    )
     parser.add_argument("--device", default="auto")
     parser.add_argument("--epochs", type=int, default=80)
     parser.add_argument("--batch-size", type=int, default=1)
@@ -86,6 +94,8 @@ def parse_args():
     parser.add_argument("--weight-decay", type=float, default=1.0e-4)
     parser.add_argument("--gradient-clip", type=float, default=1.0)
     parser.add_argument("--early-stopping-patience", type=int, default=15)
+    parser.add_argument("--max-train-batches", type=int)
+    parser.add_argument("--max-validation-batches", type=int)
     parser.add_argument(
         "--selector-architecture",
         choices=DUAL_SELECTOR_ARCHITECTURES,
@@ -159,6 +169,10 @@ def parse_args():
 
 def main():
     args = parse_args()
+    for name in ("max_train_batches", "max_validation_batches"):
+        value = getattr(args, name)
+        if value is not None and value < 1:
+            raise ValueError("--{} must be positive".format(name.replace("_", "-")))
     if args.cache_dataset_memory and args.num_workers != 0:
         raise ValueError(
             "in-memory selector data requires --num-workers 0"
@@ -253,8 +267,39 @@ def main():
         ),
         critical_history_switch_margin=args.history_switch_margin,
     )
+    model = DualSTSEHardSGWClassifier(model_config)
+    initialization = None
+    if args.initial_checkpoint is not None:
+        checkpoint_path = args.initial_checkpoint.resolve()
+        checkpoint = torch.load(
+            str(checkpoint_path), map_location="cpu", weights_only=False
+        )
+        source = checkpoint.get("model_state_dict")
+        if not isinstance(source, dict):
+            raise ValueError("initial checkpoint has no model_state_dict")
+        target = model.state_dict()
+        compatible = {
+            name: value
+            for name, value in source.items()
+            if name in target and tuple(value.shape) == tuple(target[name].shape)
+        }
+        incompatible = model.load_state_dict(compatible, strict=False)
+        initialization = {
+            "path": str(checkpoint_path),
+            "sha256": file_sha256(checkpoint_path),
+            "loaded_tensor_count": len(compatible),
+            "missing_keys": tuple(incompatible.missing_keys),
+            "unexpected_keys": tuple(incompatible.unexpected_keys),
+        }
+        print(
+            "initialized {} compatible tensors from {}; missing={}".format(
+                len(compatible),
+                checkpoint_path,
+                list(incompatible.missing_keys),
+            )
+        )
     result = train_dual_stage(
-        model=DualSTSEHardSGWClassifier(model_config),
+        model=model,
         train_loader=train_loader,
         validation_loader=validation_loader,
         train_labels=[item.label for item in train_dataset.assignments],
@@ -267,8 +312,12 @@ def main():
             gradient_clip_norm=args.gradient_clip,
             early_stopping_patience=args.early_stopping_patience,
             seed=args.seed,
-            max_train_batches=1 if args.smoke else None,
-            max_validation_batches=1 if args.smoke else None,
+            max_train_batches=(
+                1 if args.smoke else args.max_train_batches
+            ),
+            max_validation_batches=(
+                1 if args.smoke else args.max_validation_batches
+            ),
         ),
         loss_config=DualSTSEHardSGWLossConfig(
             selector_objective=args.selector_objective,
@@ -314,6 +363,7 @@ def main():
             "sinkhorn_iterations": args.sinkhorn_iterations,
             "history_continuity_bonus": args.history_continuity_bonus,
             "history_switch_margin": args.history_switch_margin,
+            "initialization": initialization,
         },
     )
     print(
