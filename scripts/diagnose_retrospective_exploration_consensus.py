@@ -360,20 +360,60 @@ def _screen(report: Dict[str, Any]) -> List[Dict[str, str]]:
             "code": "consensus_low_realizability",
             "evidence": "exploration objects agree with independent windows by only {:.3f}".format(realizability),
         })
-    default_union = float(overall["union_node_jaccard"]["mean"] or 0.0)
-    immediate_union = float(
-        report["conditions"]["B_consensus_immediate"]["metrics"]
-        ["overall_transitions"]["union_node_jaccard"]["mean"] or 0.0
-    )
-    stronger_union = float(
-        report["conditions"]["E_stronger_retrospective"]["metrics"]
-        ["overall_transitions"]["union_node_jaccard"]["mean"] or 0.0
-    )
-    if max(immediate_union, stronger_union) > default_union + 0.03:
+    def condition_mean(condition, metric, phase=None):
+        metrics = report["conditions"][condition]["metrics"]
+        section = (
+            metrics["overall_transitions"]
+            if phase is None
+            else metrics["phase_transitions"][phase]
+        )
+        return float(section.get(metric, {}).get("mean") or 0.0)
+
+    default_union = condition_mean("D_current_default", "union_node_jaccard")
+    legacy_union = condition_mean("A_recursive_legacy", "union_node_jaccard")
+    ungated_union = condition_mean("C_consensus_ramp", "union_node_jaccard")
+    if legacy_union > default_union + 0.03:
         flags.append({
-            "code": "history_influence_too_weak",
-            "evidence": "stronger/immediate history improves union Jaccard by {:.3f}".format(
-                max(immediate_union, stronger_union) - default_union
+            "code": "retrospective_consensus_negative_transfer",
+            "evidence": "legacy recursive memory improves union Jaccard by {:.3f}".format(
+                legacy_union - default_union
+            ),
+        })
+    if ungated_union > default_union + 0.03:
+        flags.append({
+            "code": "confidence_gate_negative_transfer",
+            "evidence": "disabling confidence gating improves union Jaccard by {:.3f}".format(
+                ungated_union - default_union
+            ),
+        })
+    immediate_boundary = condition_mean(
+        "B_consensus_immediate", "union_node_jaccard", "exploration_boundary"
+    )
+    ramp_boundary = condition_mean(
+        "C_consensus_ramp", "union_node_jaccard", "exploration_boundary"
+    )
+    if immediate_boundary > ramp_boundary + 0.03:
+        flags.append({
+            "code": "history_ramp_boundary_drop",
+            "evidence": "immediate history improves boundary union Jaccard by {:.3f}".format(
+                immediate_boundary - ramp_boundary
+            ),
+        })
+    stronger_exploration = condition_mean(
+        "E_stronger_retrospective",
+        "union_node_jaccard",
+        "exploration_internal",
+    )
+    default_exploration = condition_mean(
+        "D_current_default",
+        "union_node_jaccard",
+        "exploration_internal",
+    )
+    if stronger_exploration > default_exploration + 0.03:
+        flags.append({
+            "code": "retrospective_history_too_weak",
+            "evidence": "0.60 retrospective strength improves exploration union Jaccard by {:.3f}".format(
+                stronger_exploration - default_exploration
             ),
         })
     return flags
