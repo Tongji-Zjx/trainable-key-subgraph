@@ -216,6 +216,21 @@ class DualHardSGWSelector(nn.Module):
                 sinkhorn_iterations=(
                     self.config.selector_sinkhorn_iterations
                 ),
+                alignment_node_weight=(
+                    self.config.selector_alignment_node_weight
+                ),
+                alignment_signed_edge_weight=(
+                    self.config.selector_alignment_signed_edge_weight
+                ),
+                alignment_latent_weight=(
+                    self.config.selector_alignment_latent_weight
+                ),
+                alignment_coordinate_weight=(
+                    self.config.selector_alignment_coordinate_weight
+                ),
+                alignment_spectral_weight=(
+                    self.config.selector_alignment_spectral_weight
+                ),
                 epsilon=self.config.epsilon,
             )
         # The signed-Laplacian basis is a detached positional encoding of a
@@ -279,6 +294,7 @@ class DualHardSGWSelector(nn.Module):
         multi_object_iou = []
         slot_alignment_values = []
         memory_gate_values = []
+        alignment_component_values: Dict[str, List[torch.Tensor]] = {}
         selected_positive_edge_count = 0
         selected_negative_edge_count = 0
         fast_runtime = bool(self.config.selector_fast_runtime)
@@ -341,6 +357,13 @@ class DualHardSGWSelector(nn.Module):
                                 if self.config.selector_structural_temporal_memory
                                 else None
                             ),
+                            current_coordinates=(
+                                exact_sample.coordinates[time_index].to(
+                                    adjacency.device
+                                )
+                                if self.config.selector_structural_temporal_memory
+                                else None
+                            ),
                         )
                         if not self.config.selector_structural_temporal_memory:
                             previous_object_states = scores.next_object_states
@@ -360,6 +383,10 @@ class DualHardSGWSelector(nn.Module):
                             memory_gate_values.append(
                                 scores.memory_update_gate
                             )
+                            for name, value in scores.alignment_components.items():
+                                alignment_component_values.setdefault(
+                                    name, []
+                                ).append(value)
                     node_probabilities = scores.node_probabilities
                     edge_probabilities = scores.edge_probabilities
                 else:
@@ -429,6 +456,56 @@ class DualHardSGWSelector(nn.Module):
                             ),
                             switch_margin=(
                                 self.config.critical_history_switch_margin
+                                if self.config.selector_structural_temporal_memory
+                                else 0.0
+                            ),
+                            history_node_growth_bonus=(
+                                self.config.critical_history_node_growth_bonus
+                                if self.config.selector_structural_temporal_memory
+                                else 0.0
+                            ),
+                            history_edge_growth_bonus=(
+                                self.config.critical_history_edge_growth_bonus
+                                if self.config.selector_structural_temporal_memory
+                                else 0.0
+                            ),
+                            node_entry_threshold=(
+                                self.config.critical_node_entry_threshold
+                                if self.config.selector_structural_temporal_memory
+                                else None
+                            ),
+                            node_retention_threshold=(
+                                self.config.critical_node_retention_threshold
+                                if self.config.selector_structural_temporal_memory
+                                else None
+                            ),
+                            edge_entry_threshold=(
+                                self.config.critical_edge_entry_threshold
+                                if self.config.selector_structural_temporal_memory
+                                else None
+                            ),
+                            edge_retention_threshold=(
+                                self.config.critical_edge_retention_threshold
+                                if self.config.selector_structural_temporal_memory
+                                else None
+                            ),
+                            communities=(
+                                sample.communities[time_index].to(adjacency.device)
+                                if self.config.selector_structural_temporal_memory
+                                else None
+                            ),
+                            cross_community_penalty=(
+                                self.config.critical_cross_community_penalty
+                                if self.config.selector_structural_temporal_memory
+                                else 0.0
+                            ),
+                            node_reuse_penalty=(
+                                self.config.critical_node_reuse_penalty
+                                if self.config.selector_structural_temporal_memory
+                                else 0.0
+                            ),
+                            community_reuse_penalty=(
+                                self.config.critical_community_reuse_penalty
                                 if self.config.selector_structural_temporal_memory
                                 else 0.0
                             ),
@@ -695,6 +772,10 @@ class DualHardSGWSelector(nn.Module):
                 item.diversity_constraint_relaxed
                 for item in fixed_k_outputs
             ),
+            "hysteresis_relaxed_window_count": sum(
+                item.hysteresis_constraint_relaxed
+                for item in fixed_k_outputs
+            ),
             "mean_fixed_k_node_overlap": (
                 sum(
                     float(
@@ -783,6 +864,11 @@ class DualHardSGWSelector(nn.Module):
                 if memory_gate_values
                 else node_probabilities.new_zeros(())
             ),
+            "mean_slot_alignment_components": {
+                name: torch.stack(values).mean()
+                for name, values in alignment_component_values.items()
+                if values
+            },
             "mean_soft_object_iou": (
                 torch.stack(
                     [

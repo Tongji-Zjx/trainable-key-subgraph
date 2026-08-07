@@ -3,13 +3,14 @@
 The module deliberately separates three concerns that the legacy scalar MLP
 conflates: signed graph context, decomposition of one global soft graph into
 K objects, and propagation of object state through time.  Coordinates and ROI
-identities are intentionally absent; they remain correspondence-only metadata.
+identities never enter importance scoring; when available, they are used only
+as correspondence metadata for transporting and aligning object slots.
 """
 
 from __future__ import absolute_import, division, print_function
 
 from dataclasses import dataclass
-from typing import Optional, Sequence, Tuple
+from typing import Dict, Optional, Sequence, Tuple
 
 import torch
 from torch import nn
@@ -200,6 +201,10 @@ class MultiObjectTemporalMemory:
     node_probabilities: torch.Tensor
     edge_probabilities: torch.Tensor
     node_ids: Tuple[str, ...]
+    signed_edge_values: Optional[torch.Tensor] = None
+    object_representations: Optional[torch.Tensor] = None
+    coordinate_centroids: Optional[torch.Tensor] = None
+    spectral_descriptors: Optional[torch.Tensor] = None
     hard_node_masks: Optional[torch.Tensor] = None
     hard_edge_masks: Optional[torch.Tensor] = None
     seed_indices: Optional[torch.Tensor] = None
@@ -220,6 +225,7 @@ class TheoryMultiObjectScoreOutput:
     memory_update_gate: torch.Tensor
     transported_node_probabilities: Optional[torch.Tensor]
     transported_edge_probabilities: Optional[torch.Tensor]
+    alignment_components: Dict[str, torch.Tensor]
     regularization: MultiObjectRegularization
 
 
@@ -258,13 +264,112 @@ def _sinkhorn_assignment(
     return log_weights.exp()
 
 
+def _pairwise_cosine_similarity(
+    left: torch.Tensor,
+    right: torch.Tensor,
+    epsilon: float,
+) -> torch.Tensor:
+    """Pairwise cosine mapped to [0,1], with zero vectors treated neutrally."""
+
+    numerator = left @ right.transpose(0, 1)
+    denominator = (
+        left.norm(dim=-1)[:, None] * right.norm(dim=-1)[None, :]
+    )
+    cosine = numerator / denominator.clamp_min(float(epsilon))
+    similarity = 0.5 * (cosine.clamp(-1.0, 1.0) + 1.0)
+    neutral = denominator <= float(epsilon)
+    return torch.where(neutral, similarity.new_full((), 0.5), similarity)
+
+
+def _object_weighted_mean(
+    memberships: torch.Tensor,
+    features: torch.Tensor,
+    epsilon: float,
+) -> torch.Tensor:
+    denominator = memberships.sum(dim=-1, keepdim=True).clamp_min(
+        float(epsilon)
+    )
+    return memberships @ features / denominator
+
+
+def _coordinate_similarity(
+    previous: torch.Tensor,
+    current: torch.Tensor,
+    coordinates: torch.Tensor,
+    epsilon: float,
+) -> torch.Tensor:
+    finite = torch.isfinite(coordinates).all(dim=-1)
+    nonzero = coordinates.abs().sum(dim=-1) > 0.0
+    usable = coordinates[finite & nonzero]
+    if usable.shape[0] < 2:
+        return previous.new_ones((previous.shape[0], current.shape[0]))
+    scale = (usable.max(dim=0).values - usable.min(dim=0).values).norm()
+    scale = scale.clamp_min(float(epsilon))
+    distance = torch.cdist(previous, current)
+    return torch.exp(-distance / scale)
+
+
+def composite_slot_similarity(
+    node_similarity: torch.Tensor,
+    signed_edge_similarity: Optional[torch.Tensor] = None,
+    latent_similarity: Optional[torch.Tensor] = None,
+    coordinate_similarity: Optional[torch.Tensor] = None,
+    spectral_similarity: Optional[torch.Tensor] = None,
+    weights: Optional[Dict[str, float]] = None,
+) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+    """Combine complementary correspondence evidence before Sinkhorn.
+
+    Missing metadata simply removes that component and renormalizes the
+    remaining weights.  This keeps coordinate-free datasets valid while ROI,
+    coordinates and signed structure can strengthen correspondence when they
+    are available.
+    """
+
+    configured = {
+        "node": 0.40,
+        "signed_edge": 0.25,
+        "latent": 0.15,
+        "coordinate": 0.10,
+        "spectral": 0.10,
+    }
+    if weights is not None:
+        configured.update({key: float(value) for key, value in weights.items()})
+    components = {
+        "node": node_similarity,
+        "signed_edge": signed_edge_similarity,
+        "latent": latent_similarity,
+        "coordinate": coordinate_similarity,
+        "spectral": spectral_similarity,
+    }
+    active = {
+        key: value
+        for key, value in components.items()
+        if value is not None and configured[key] > 0.0
+    }
+    if not active:
+        raise ValueError("slot alignment requires at least one component")
+    shape = tuple(node_similarity.shape)
+    if any(tuple(value.shape) != shape for value in active.values()):
+        raise ValueError("slot-alignment component shapes do not agree")
+    denominator = sum(configured[key] for key in active)
+    combined = sum(
+        configured[key] * value for key, value in active.items()
+    ) / float(denominator)
+    return combined, active
+
+
 def _transport_temporal_memory(
     memory: MultiObjectTemporalMemory,
     current_node_ids: Sequence[str],
     adjacency: torch.Tensor,
     valid_edges: torch.Tensor,
     diffusion: float,
-) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor], torch.Tensor]:
+) -> Tuple[
+    Optional[torch.Tensor],
+    Optional[torch.Tensor],
+    Optional[torch.Tensor],
+    torch.Tensor,
+]:
     """Transport previous fields by stable ROI identity into current order."""
 
     current = tuple(str(value) for value in current_node_ids)
@@ -283,7 +388,7 @@ def _transport_temporal_memory(
         len(current), dtype=torch.bool, device=adjacency.device
     )
     if not pairs:
-        return None, None, support
+        return None, None, None, support
     current_indices = torch.tensor(
         [item[0] for item in pairs], dtype=torch.long, device=adjacency.device
     )
@@ -301,6 +406,18 @@ def _transport_temporal_memory(
         2, previous_indices
     )
     edges[:, current_indices[:, None], current_indices[None, :]] = selected
+    signed_edges = None
+    if memory.signed_edge_values is not None:
+        signed_edges = adjacency.new_zeros(
+            (object_count, len(current), len(current))
+        )
+        previous_signed = memory.signed_edge_values.to(adjacency)
+        selected_signed = previous_signed.index_select(
+            1, previous_indices
+        ).index_select(2, previous_indices)
+        signed_edges[
+            :, current_indices[:, None], current_indices[None, :]
+        ] = selected_signed
     support[current_indices] = True
 
     if float(diffusion) > 0.0:
@@ -314,7 +431,11 @@ def _transport_temporal_memory(
         diffused = (transition @ nodes.transpose(0, 1)).transpose(0, 1)
         nodes = (1.0 - float(diffusion)) * nodes + float(diffusion) * diffused
     edges = edges * valid_edges[None, :, :].to(edges.dtype)
-    return nodes, edges, support
+    if signed_edges is not None:
+        signed_edges = signed_edges * valid_edges[None, :, :].to(
+            signed_edges.dtype
+        )
+    return nodes, edges, signed_edges, support
 
 
 class TheoryGuidedMultiObjectScorer(nn.Module):
@@ -338,6 +459,11 @@ class TheoryGuidedMultiObjectScorer(nn.Module):
         memory_diffusion: float = 0.15,
         sinkhorn_temperature: float = 0.10,
         sinkhorn_iterations: int = 8,
+        alignment_node_weight: float = 0.40,
+        alignment_signed_edge_weight: float = 0.25,
+        alignment_latent_weight: float = 0.15,
+        alignment_coordinate_weight: float = 0.10,
+        alignment_spectral_weight: float = 0.10,
         epsilon: float = 1.0e-8,
     ) -> None:
         super().__init__()
@@ -351,6 +477,17 @@ class TheoryGuidedMultiObjectScorer(nn.Module):
             raise ValueError("memory diffusion must lie in [0,1]")
         if sinkhorn_temperature <= 0.0 or sinkhorn_iterations < 1:
             raise ValueError("Sinkhorn controls must be positive")
+        alignment_weights = {
+            "node": float(alignment_node_weight),
+            "signed_edge": float(alignment_signed_edge_weight),
+            "latent": float(alignment_latent_weight),
+            "coordinate": float(alignment_coordinate_weight),
+            "spectral": float(alignment_spectral_weight),
+        }
+        if any(value < 0.0 for value in alignment_weights.values()):
+            raise ValueError("slot-alignment weights cannot be negative")
+        if sum(alignment_weights.values()) <= 0.0:
+            raise ValueError("at least one slot-alignment weight is required")
         self.object_count = int(object_count)
         self.hidden_dim = int(hidden_dim)
         self.overlap_minimum = float(overlap_minimum)
@@ -361,6 +498,7 @@ class TheoryGuidedMultiObjectScorer(nn.Module):
         self.memory_diffusion = float(memory_diffusion)
         self.sinkhorn_temperature = float(sinkhorn_temperature)
         self.sinkhorn_iterations = int(sinkhorn_iterations)
+        self.alignment_weights = alignment_weights
         self.epsilon = float(epsilon)
         self.encoder = SignedSpectralGCNIIEncoder(
             node_feature_dim,
@@ -419,16 +557,26 @@ class TheoryGuidedMultiObjectScorer(nn.Module):
         spectral_features: Optional[torch.Tensor] = None,
         previous_memory: Optional[MultiObjectTemporalMemory] = None,
         current_node_ids: Optional[Sequence[str]] = None,
+        current_coordinates: Optional[torch.Tensor] = None,
     ) -> TheoryMultiObjectScoreOutput:
         count = int(node_features.shape[0])
         if tuple(edge_base_features.shape[:2]) != (count, count):
             raise ValueError("selector edge features must align with nodes")
+        if current_coordinates is not None and tuple(
+            current_coordinates.shape
+        ) != (count, 3):
+            raise ValueError("selector coordinates must have shape [N,3]")
         valid = self._valid_edges(edge_presence_mask, node_features)
+        spectrum = (
+            spectral_features
+            if spectral_features is not None
+            else self.encoder.spectral_features(adjacency, valid)
+        )
         hidden = self.encoder(
             node_features,
             adjacency,
             valid,
-            spectral_features=spectral_features,
+            spectral_features=spectrum,
         )
         global_nodes = torch.sigmoid(self.global_node_head(hidden).squeeze(-1))
         left = hidden[:, None, :].expand(-1, count, -1)
@@ -480,6 +628,26 @@ class TheoryGuidedMultiObjectScorer(nn.Module):
         raw_object_edges = raw_object_edges * valid[None, :, :].to(
             raw_object_edges.dtype
         )
+        raw_denominator = raw_object_nodes.sum(
+            dim=-1, keepdim=True
+        ).clamp_min(self.epsilon)
+        raw_representations = raw_object_nodes @ hidden / raw_denominator
+        raw_spectral = _object_weighted_mean(
+            raw_object_nodes, spectrum.to(hidden), self.epsilon
+        )
+        coordinates = (
+            torch.nan_to_num(current_coordinates.to(hidden), nan=0.0)
+            if current_coordinates is not None
+            else None
+        )
+        raw_centroids = (
+            _object_weighted_mean(
+                raw_object_nodes, coordinates, self.epsilon
+            )
+            if coordinates is not None
+            else None
+        )
+        raw_signed_edges = raw_object_edges * adjacency[None, :, :]
 
         identity = torch.eye(
             self.object_count, device=hidden.device, dtype=hidden.dtype
@@ -488,13 +656,20 @@ class TheoryGuidedMultiObjectScorer(nn.Module):
         update_gate = hidden.new_ones((self.object_count,))
         transported_nodes = None
         transported_edges = None
+        transported_signed_edges = None
+        alignment_components: Dict[str, torch.Tensor] = {}
         support = torch.zeros(count, dtype=torch.bool, device=hidden.device)
         if previous_memory is not None:
             if current_node_ids is None or len(current_node_ids) != count:
                 raise ValueError(
                     "structural memory requires one stable identity per node"
                 )
-            transported_nodes, transported_edges, support = (
+            (
+                transported_nodes,
+                transported_edges,
+                transported_signed_edges,
+                support,
+            ) = (
                 _transport_temporal_memory(
                     previous_memory,
                     current_node_ids,
@@ -504,10 +679,54 @@ class TheoryGuidedMultiObjectScorer(nn.Module):
                 )
             )
         if transported_nodes is not None:
-            slot_similarity = _soft_dice_matrix(
+            node_similarity = _soft_dice_matrix(
                 transported_nodes[:, support],
                 raw_object_nodes[:, support],
                 self.epsilon,
+            )
+            edge_support = valid & support[:, None] & support[None, :]
+            signed_edge_similarity = None
+            if (
+                transported_signed_edges is not None
+                and bool(edge_support.any())
+            ):
+                signed_edge_similarity = _pairwise_cosine_similarity(
+                    transported_signed_edges[:, edge_support],
+                    raw_signed_edges[:, edge_support],
+                    self.epsilon,
+                )
+            latent_similarity = None
+            if previous_memory.object_representations is not None:
+                latent_similarity = _pairwise_cosine_similarity(
+                    previous_memory.object_representations.to(hidden),
+                    raw_representations,
+                    self.epsilon,
+                )
+            coordinate_component = None
+            if (
+                raw_centroids is not None
+                and previous_memory.coordinate_centroids is not None
+            ):
+                coordinate_component = _coordinate_similarity(
+                    previous_memory.coordinate_centroids.to(hidden),
+                    raw_centroids,
+                    coordinates,
+                    self.epsilon,
+                )
+            spectral_similarity = None
+            if previous_memory.spectral_descriptors is not None:
+                spectral_similarity = _pairwise_cosine_similarity(
+                    previous_memory.spectral_descriptors.to(hidden),
+                    raw_spectral,
+                    self.epsilon,
+                )
+            slot_similarity, alignment_components = composite_slot_similarity(
+                node_similarity,
+                signed_edge_similarity=signed_edge_similarity,
+                latent_similarity=latent_similarity,
+                coordinate_similarity=coordinate_component,
+                spectral_similarity=spectral_similarity,
+                weights=self.alignment_weights,
             )
             slot_alignment = _sinkhorn_assignment(
                 slot_similarity,
@@ -518,10 +737,10 @@ class TheoryGuidedMultiObjectScorer(nn.Module):
             aligned_edges = torch.einsum(
                 "ij,jmn->imn", slot_alignment, raw_object_edges
             )
-            raw_denominator = aligned_nodes.sum(
+            aligned_denominator = aligned_nodes.sum(
                 dim=-1, keepdim=True
             ).clamp_min(self.epsilon)
-            provisional = aligned_nodes @ hidden / raw_denominator
+            provisional = aligned_nodes @ hidden / aligned_denominator
             update_gate = torch.sigmoid(
                 self.memory_gate(torch.cat((prior, provisional), dim=-1))
             ).squeeze(-1)
@@ -542,6 +761,14 @@ class TheoryGuidedMultiObjectScorer(nn.Module):
 
         denominator = object_nodes.sum(dim=-1, keepdim=True).clamp_min(self.epsilon)
         pooled = object_nodes @ hidden / denominator
+        final_spectral = _object_weighted_mean(
+            object_nodes, spectrum.to(hidden), self.epsilon
+        )
+        final_centroids = (
+            _object_weighted_mean(object_nodes, coordinates, self.epsilon)
+            if coordinates is not None
+            else None
+        )
         next_states = self.temporal_cell(
             pooled.reshape(-1, self.hidden_dim), prior.reshape(-1, self.hidden_dim)
         ).reshape(self.object_count, self.hidden_dim)
@@ -632,6 +859,10 @@ class TheoryGuidedMultiObjectScorer(nn.Module):
                 node_probabilities=object_nodes,
                 edge_probabilities=object_edges,
                 node_ids=tuple(str(value) for value in current_node_ids),
+                signed_edge_values=object_edges * adjacency[None, :, :],
+                object_representations=pooled,
+                coordinate_centroids=final_centroids,
+                spectral_descriptors=final_spectral,
             )
         return TheoryMultiObjectScoreOutput(
             node_hidden=hidden,
@@ -647,5 +878,6 @@ class TheoryGuidedMultiObjectScorer(nn.Module):
             memory_update_gate=update_gate,
             transported_node_probabilities=transported_nodes,
             transported_edge_probabilities=transported_edges,
+            alignment_components=alignment_components,
             regularization=regularization,
         )

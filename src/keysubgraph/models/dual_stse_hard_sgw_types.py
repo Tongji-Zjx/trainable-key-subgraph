@@ -41,6 +41,11 @@ class DualSTSEHardSGWConfig:
     selector_memory_diffusion: float = 0.15
     selector_sinkhorn_temperature: float = 0.10
     selector_sinkhorn_iterations: int = 8
+    selector_alignment_node_weight: float = 0.40
+    selector_alignment_signed_edge_weight: float = 0.25
+    selector_alignment_latent_weight: float = 0.15
+    selector_alignment_coordinate_weight: float = 0.10
+    selector_alignment_spectral_weight: float = 0.10
     target_node_ratio: float = 0.50
     target_edge_ratio: float = 0.30
     node_minimum: int = 2
@@ -59,6 +64,15 @@ class DualSTSEHardSGWConfig:
     critical_min_seed_distance: float = 0.15
     critical_history_continuity_bonus: float = 0.25
     critical_history_switch_margin: float = 0.05
+    critical_history_node_growth_bonus: float = 0.10
+    critical_history_edge_growth_bonus: float = 0.10
+    critical_node_entry_threshold: float = 0.45
+    critical_node_retention_threshold: float = 0.35
+    critical_edge_entry_threshold: float = 0.12
+    critical_edge_retention_threshold: float = 0.08
+    critical_cross_community_penalty: float = 0.08
+    critical_node_reuse_penalty: float = 0.12
+    critical_community_reuse_penalty: float = 0.08
     spectral_quantile_dim: int = 16
     sgw_core_dim: int = 18
     sgw_variation_dim: int = 16
@@ -135,6 +149,17 @@ class DualSTSEHardSGWConfig:
             or self.selector_sinkhorn_iterations < 1
         ):
             raise ValueError("selector Sinkhorn controls must be positive")
+        alignment_weights = (
+            self.selector_alignment_node_weight,
+            self.selector_alignment_signed_edge_weight,
+            self.selector_alignment_latent_weight,
+            self.selector_alignment_coordinate_weight,
+            self.selector_alignment_spectral_weight,
+        )
+        if any(value < 0.0 for value in alignment_weights) or sum(
+            alignment_weights
+        ) <= 0.0:
+            raise ValueError("selector alignment weights are invalid")
         if (
             self.selector_architecture == "theory_multi_object"
             and self.critical_subgraph_count < 2
@@ -170,6 +195,29 @@ class DualSTSEHardSGWConfig:
             or self.critical_history_switch_margin < 0.0
         ):
             raise ValueError("critical history controls cannot be negative")
+        additional_controls = (
+            self.critical_history_node_growth_bonus,
+            self.critical_history_edge_growth_bonus,
+            self.critical_cross_community_penalty,
+            self.critical_node_reuse_penalty,
+            self.critical_community_reuse_penalty,
+        )
+        if any(value < 0.0 for value in additional_controls):
+            raise ValueError("critical structural controls cannot be negative")
+        if not (
+            0.0
+            <= self.critical_node_retention_threshold
+            <= self.critical_node_entry_threshold
+            <= 1.0
+        ):
+            raise ValueError("critical node hysteresis thresholds are invalid")
+        if not (
+            0.0
+            <= self.critical_edge_retention_threshold
+            <= self.critical_edge_entry_threshold
+            <= 1.0
+        ):
+            raise ValueError("critical edge hysteresis thresholds are invalid")
         for dropout in (self.selector_dropout, self.fusion_dropout):
             if dropout < 0.0 or dropout >= 1.0:
                 raise ValueError("dropout must lie in [0,1)")

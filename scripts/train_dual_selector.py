@@ -121,10 +121,28 @@ def parse_args():
         "--sinkhorn-temperature", type=float, default=0.10
     )
     parser.add_argument("--sinkhorn-iterations", type=int, default=8)
+    parser.add_argument("--alignment-node-weight", type=float, default=0.40)
+    parser.add_argument(
+        "--alignment-signed-edge-weight", type=float, default=0.25
+    )
+    parser.add_argument("--alignment-latent-weight", type=float, default=0.15)
+    parser.add_argument(
+        "--alignment-coordinate-weight", type=float, default=0.10
+    )
+    parser.add_argument("--alignment-spectral-weight", type=float, default=0.10)
     parser.add_argument(
         "--history-continuity-bonus", type=float, default=0.25
     )
     parser.add_argument("--history-switch-margin", type=float, default=0.05)
+    parser.add_argument("--history-node-growth-bonus", type=float, default=0.10)
+    parser.add_argument("--history-edge-growth-bonus", type=float, default=0.10)
+    parser.add_argument("--node-entry-threshold", type=float, default=0.45)
+    parser.add_argument("--node-retention-threshold", type=float, default=0.35)
+    parser.add_argument("--edge-entry-threshold", type=float, default=0.12)
+    parser.add_argument("--edge-retention-threshold", type=float, default=0.08)
+    parser.add_argument("--cross-community-penalty", type=float, default=0.08)
+    parser.add_argument("--node-reuse-penalty", type=float, default=0.12)
+    parser.add_argument("--community-reuse-penalty", type=float, default=0.08)
     parser.add_argument(
         "--selector-objective",
         choices=("current", "full_soft", "full_soft_hard"),
@@ -261,11 +279,33 @@ def main():
         selector_memory_diffusion=args.memory_diffusion,
         selector_sinkhorn_temperature=args.sinkhorn_temperature,
         selector_sinkhorn_iterations=args.sinkhorn_iterations,
+        selector_alignment_node_weight=args.alignment_node_weight,
+        selector_alignment_signed_edge_weight=(
+            args.alignment_signed_edge_weight
+        ),
+        selector_alignment_latent_weight=args.alignment_latent_weight,
+        selector_alignment_coordinate_weight=(
+            args.alignment_coordinate_weight
+        ),
+        selector_alignment_spectral_weight=args.alignment_spectral_weight,
         critical_node_ratio_per_object=args.object_node_ratio,
         critical_history_continuity_bonus=(
             args.history_continuity_bonus
         ),
         critical_history_switch_margin=args.history_switch_margin,
+        critical_history_node_growth_bonus=(
+            args.history_node_growth_bonus
+        ),
+        critical_history_edge_growth_bonus=(
+            args.history_edge_growth_bonus
+        ),
+        critical_node_entry_threshold=args.node_entry_threshold,
+        critical_node_retention_threshold=args.node_retention_threshold,
+        critical_edge_entry_threshold=args.edge_entry_threshold,
+        critical_edge_retention_threshold=args.edge_retention_threshold,
+        critical_cross_community_penalty=args.cross_community_penalty,
+        critical_node_reuse_penalty=args.node_reuse_penalty,
+        critical_community_reuse_penalty=args.community_reuse_penalty,
     )
     model = DualSTSEHardSGWClassifier(model_config)
     initialization = None
@@ -361,8 +401,30 @@ def main():
             "memory_diffusion": args.memory_diffusion,
             "sinkhorn_temperature": args.sinkhorn_temperature,
             "sinkhorn_iterations": args.sinkhorn_iterations,
+            "alignment_weights": {
+                "node": args.alignment_node_weight,
+                "signed_edge": args.alignment_signed_edge_weight,
+                "latent": args.alignment_latent_weight,
+                "coordinate": args.alignment_coordinate_weight,
+                "spectral": args.alignment_spectral_weight,
+            },
             "history_continuity_bonus": args.history_continuity_bonus,
             "history_switch_margin": args.history_switch_margin,
+            "history_node_growth_bonus": args.history_node_growth_bonus,
+            "history_edge_growth_bonus": args.history_edge_growth_bonus,
+            "node_hysteresis": {
+                "entry": args.node_entry_threshold,
+                "retention": args.node_retention_threshold,
+            },
+            "edge_hysteresis": {
+                "entry": args.edge_entry_threshold,
+                "retention": args.edge_retention_threshold,
+            },
+            "community_controls": {
+                "cross_community_penalty": args.cross_community_penalty,
+                "node_reuse_penalty": args.node_reuse_penalty,
+                "community_reuse_penalty": args.community_reuse_penalty,
+            },
             "initialization": initialization,
         },
     )

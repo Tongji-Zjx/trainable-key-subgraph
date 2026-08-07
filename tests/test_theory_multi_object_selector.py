@@ -12,6 +12,7 @@ from keysubgraph.models.fixed_k_subgraph_selector import (
 )
 from keysubgraph.models.theory_multi_object_selector import (
     TheoryGuidedMultiObjectScorer,
+    composite_slot_similarity,
     signed_laplacian_eigenvectors,
 )
 from tests.test_exact_stse_model import _exact_sample
@@ -35,6 +36,31 @@ def _fixture(count=8):
 
 
 class TheoryMultiObjectSelectorTest(unittest.TestCase):
+    def test_composite_alignment_uses_signed_geometry_and_latent_evidence(self):
+        neutral = torch.full((3, 3), 0.5)
+        signed = torch.tensor(
+            [[0.9, 0.1, 0.2], [0.1, 0.8, 0.2], [0.2, 0.1, 0.95]]
+        )
+        latent = torch.tensor(
+            [[0.8, 0.2, 0.1], [0.2, 0.9, 0.1], [0.1, 0.2, 0.85]]
+        )
+        combined, components = composite_slot_similarity(
+            neutral,
+            signed_edge_similarity=signed,
+            latent_similarity=latent,
+            weights={
+                "node": 0.2,
+                "signed_edge": 0.5,
+                "latent": 0.3,
+                "coordinate": 0.0,
+                "spectral": 0.0,
+            },
+        )
+        self.assertEqual(set(components), {"node", "signed_edge", "latent"})
+        self.assertTrue(
+            torch.equal(combined.argmax(dim=-1), torch.arange(3))
+        )
+
     def test_roi_aligned_structural_memory_is_permutation_safe_and_differentiable(self):
         node, edge, adjacency, mask = _fixture()
         scorer = TheoryGuidedMultiObjectScorer(
@@ -56,6 +82,7 @@ class TheoryMultiObjectSelectorTest(unittest.TestCase):
             mask,
             adjacency,
             current_node_ids=names,
+            current_coordinates=torch.arange(24, dtype=torch.float32).reshape(8, 3),
         )
         permutation = torch.tensor([3, 0, 7, 1, 5, 2, 6, 4])
         permuted_names = tuple(names[index] for index in permutation.tolist())
@@ -66,6 +93,9 @@ class TheoryMultiObjectSelectorTest(unittest.TestCase):
             adjacency.index_select(0, permutation).index_select(1, permutation),
             previous_memory=first.next_memory,
             current_node_ids=permuted_names,
+            current_coordinates=torch.arange(
+                24, dtype=torch.float32
+            ).reshape(8, 3).index_select(0, permutation),
         )
         expected = first.object_node_probabilities.index_select(1, permutation)
         self.assertTrue(
@@ -86,6 +116,10 @@ class TheoryMultiObjectSelectorTest(unittest.TestCase):
         )
         self.assertGreaterEqual(float(second.regularization.node_continuity), 0.0)
         self.assertGreaterEqual(float(second.regularization.edge_continuity), 0.0)
+        self.assertEqual(
+            set(second.alignment_components),
+            {"node", "signed_edge", "latent", "coordinate", "spectral"},
+        )
         loss = (
             second.object_node_probabilities.mean()
             + second.regularization.node_continuity
@@ -325,6 +359,88 @@ class TheoryMultiObjectSelectorTest(unittest.TestCase):
         )
         self.assertTrue(torch.equal(selected.seed_indices.cpu(), previous_seeds))
 
+    def test_dual_threshold_hysteresis_retains_history_but_blocks_weak_entry(self):
+        count = 12
+        global_node = torch.full((count,), 0.6)
+        global_edge = torch.full((count, count), 0.7)
+        mask = torch.ones(count, count, dtype=torch.bool)
+        mask.fill_diagonal_(False)
+        objects = torch.full((3, count), 0.10)
+        object_edges = torch.full((3, count, count), 0.20)
+        previous_nodes = torch.zeros(3, count, dtype=torch.bool)
+        previous_edges = torch.zeros(3, count, count, dtype=torch.bool)
+        previous_seeds = torch.tensor([0, 4, 8])
+        for object_index, seed in enumerate(previous_seeds.tolist()):
+            retained = seed + 1
+            newcomer = seed + 2
+            strong = seed + 3
+            objects[object_index, seed] = 0.80
+            objects[object_index, retained] = 0.36
+            objects[object_index, newcomer] = 0.44
+            objects[object_index, strong] = 0.70
+            object_edges[object_index, seed, retained] = 0.09
+            object_edges[object_index, retained, seed] = 0.09
+            previous_nodes[object_index, seed] = True
+            previous_nodes[object_index, retained] = True
+            previous_edges[object_index, seed, retained] = True
+            previous_edges[object_index, retained, seed] = True
+        selected = select_object_conditioned_subgraphs(
+            global_node,
+            global_edge,
+            objects,
+            object_edges,
+            mask,
+            per_object_node_ratio=0.25,
+            edge_ratio=0.5,
+            previous_node_masks=previous_nodes,
+            previous_edge_masks=previous_edges,
+            previous_seed_indices=previous_seeds,
+            history_node_growth_bonus=0.10,
+            history_edge_growth_bonus=0.10,
+            node_entry_threshold=0.45,
+            node_retention_threshold=0.35,
+            edge_entry_threshold=0.12,
+            edge_retention_threshold=0.08,
+        )
+        for object_index, item in enumerate(selected.subgraphs):
+            seed = int(previous_seeds[object_index])
+            self.assertTrue(bool(item.hard_node_mask[seed + 1]))
+            self.assertFalse(bool(item.hard_node_mask[seed + 2]))
+
+    def test_community_and_reuse_penalties_separate_object_growth(self):
+        count = 12
+        global_node = torch.full((count,), 0.6)
+        global_edge = torch.full((count, count), 0.7)
+        mask = torch.ones(count, count, dtype=torch.bool)
+        mask.fill_diagonal_(False)
+        communities = torch.arange(count) // 4
+        objects = torch.full((3, count), 0.80)
+        objects[:, :4] = 0.90
+        object_edges = torch.full((3, count, count), 0.70)
+        selected = select_object_conditioned_subgraphs(
+            global_node,
+            global_edge,
+            objects,
+            object_edges,
+            mask,
+            per_object_node_ratio=0.25,
+            edge_ratio=0.5,
+            candidate_multiplier=6,
+            communities=communities,
+            cross_community_penalty=0.10,
+            node_reuse_penalty=0.40,
+            community_reuse_penalty=0.40,
+        )
+        seed_communities = communities.index_select(
+            0, selected.seed_indices.cpu()
+        )
+        self.assertEqual(len(torch.unique(seed_communities)), 3)
+        for item, label in zip(selected.subgraphs, seed_communities.tolist()):
+            chosen = communities[item.hard_node_mask.cpu()]
+            self.assertGreaterEqual(
+                int((chosen == label).sum()), int(chosen.numel()) - 1
+            )
+
     def test_structural_memory_config_integrates_with_dual_selector(self):
         torch.manual_seed(31)
         sample = _exact_sample("structural-memory", 1, 3)
@@ -351,6 +467,7 @@ class TheoryMultiObjectSelectorTest(unittest.TestCase):
         self.assertTrue(
             bool(torch.isfinite(terms["node_continuity"]))
         )
+        self.assertIn("node", output.diagnostics["mean_slot_alignment_components"])
 
     def test_dual_selector_integration_emits_three_learned_objects(self):
         torch.manual_seed(17)

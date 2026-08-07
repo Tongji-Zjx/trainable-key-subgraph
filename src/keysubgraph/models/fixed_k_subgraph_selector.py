@@ -29,6 +29,7 @@ class FixedKSelectionOutput:
     seed_distance_matrix: torch.Tensor
     union_efficiency: float
     diversity_constraint_relaxed: bool
+    hysteresis_constraint_relaxed: bool = False
 
 
 def _valid_edges(mask: torch.Tensor) -> torch.Tensor:
@@ -178,6 +179,8 @@ def _grow_one(
     target_nodes: int,
     edge_ratio: float,
     edge_minimum: int,
+    communities: Optional[torch.Tensor] = None,
+    cross_community_penalty: float = 0.0,
 ) -> HardSelectionOutput:
     count = int(node_probabilities.numel())
     scores = _edge_scores(node_probabilities, edge_probabilities)
@@ -187,9 +190,6 @@ def _grow_one(
     selected_mask[int(seed)] = True
     selected_count = 1
     tree_edges = []
-    growth_scores = scores * (
-        0.5 + 0.5 * node_probabilities[None, :]
-    )
     while selected_count < int(target_nodes):
         frontier = (
             valid_edges
@@ -198,6 +198,22 @@ def _grow_one(
         )
         if not bool(frontier.any()):
             break
+        growth_scores = scores * (
+            0.5 + 0.5 * node_probabilities[None, :]
+        )
+        if communities is not None and float(cross_community_penalty) > 0.0:
+            selected_communities = communities[selected_mask]
+            same_fraction = torch.stack(
+                [
+                    (selected_communities == communities[index])
+                    .to(growth_scores.dtype)
+                    .mean()
+                    for index in range(count)
+                ]
+            )
+            growth_scores = growth_scores - float(
+                cross_community_penalty
+            ) * (1.0 - same_fraction)[None, :]
         # Row-major argmax reproduces the previous tie-break rule: highest
         # score, then the smallest source node and smallest target node.
         flat_index = int(
@@ -879,6 +895,16 @@ def select_object_conditioned_subgraphs(
     previous_seed_indices: Optional[torch.Tensor] = None,
     continuity_bonus: float = 0.0,
     switch_margin: float = 0.0,
+    history_node_growth_bonus: float = 0.0,
+    history_edge_growth_bonus: float = 0.0,
+    node_entry_threshold: Optional[float] = None,
+    node_retention_threshold: Optional[float] = None,
+    edge_entry_threshold: Optional[float] = None,
+    edge_retention_threshold: Optional[float] = None,
+    communities: Optional[torch.Tensor] = None,
+    cross_community_penalty: float = 0.0,
+    node_reuse_penalty: float = 0.0,
+    community_reuse_penalty: float = 0.0,
 ) -> FixedKSelectionOutput:
     """Harden K independently learned object fields and return their union.
 
@@ -911,8 +937,34 @@ def select_object_conditioned_subgraphs(
         raise ValueError("maximum node overlap must lie in [0,1]")
     if not 0.0 <= max_edge_overlap <= 1.0:
         raise ValueError("maximum edge overlap must lie in [0,1]")
-    if continuity_bonus < 0.0 or switch_margin < 0.0:
+    nonnegative_controls = (
+        continuity_bonus,
+        switch_margin,
+        history_node_growth_bonus,
+        history_edge_growth_bonus,
+        cross_community_penalty,
+        node_reuse_penalty,
+        community_reuse_penalty,
+    )
+    if any(float(value) < 0.0 for value in nonnegative_controls):
         raise ValueError("hard history controls cannot be negative")
+    threshold_pairs = (
+        (node_entry_threshold, node_retention_threshold, "node"),
+        (edge_entry_threshold, edge_retention_threshold, "edge"),
+    )
+    for entry, retention, name in threshold_pairs:
+        if (entry is None) != (retention is None):
+            raise ValueError("{} hysteresis thresholds must be paired".format(name))
+        if entry is not None and not (
+            0.0 <= float(retention) <= float(entry) <= 1.0
+        ):
+            raise ValueError(
+                "{} retention threshold must not exceed entry threshold".format(
+                    name
+                )
+            )
+    if communities is not None and tuple(communities.shape) != (count,):
+        raise ValueError("communities must have shape [N]")
     history_supplied = previous_node_masks is not None
     if history_supplied != (previous_edge_masks is not None):
         raise ValueError("previous node and edge masks must be supplied together")
@@ -948,6 +1000,9 @@ def select_object_conditioned_subgraphs(
             object_node_probabilities.detach().reshape(-1),
             object_edge_probabilities.detach().reshape(-1),
     ]
+    if communities is not None:
+        lengths.append(count)
+        snapshot_parts.append(communities.to(snapshot_dtype).reshape(-1))
     if history_supplied:
         lengths.extend(
             [
@@ -980,14 +1035,21 @@ def select_object_conditioned_subgraphs(
     decision_object_edges = snapshot[
         offsets[4] : offsets[5]
     ].reshape(object_count, count, count)
+    cursor = 5
+    decision_communities = None
+    if communities is not None:
+        decision_communities = snapshot[
+            offsets[cursor] : offsets[cursor + 1]
+        ].reshape(count).to(torch.long)
+        cursor += 1
     decision_previous_nodes = None
     decision_previous_edges = None
     if history_supplied:
         decision_previous_nodes = snapshot[
-            offsets[5] : offsets[6]
+            offsets[cursor] : offsets[cursor + 1]
         ].reshape(object_count, count).to(torch.bool)
         decision_previous_edges = snapshot[
-            offsets[6] : offsets[7]
+            offsets[cursor + 1] : offsets[cursor + 2]
         ].reshape(object_count, count, count).to(torch.bool)
     decision_previous_seeds = (
         previous_seed_indices.detach().cpu().tolist()
@@ -1000,10 +1062,49 @@ def select_object_conditioned_subgraphs(
     )
     selected: List[Tuple[int, HardSelectionOutput]] = []
     relaxed = False
+    hysteresis_relaxed = False
     for object_index in range(int(object_count)):
         node_scores = decision_object_nodes[object_index]
         edge_scores = decision_object_edges[object_index]
-        seeds = torch.argsort(node_scores, descending=True).tolist()
+        growth_node_scores = node_scores.clone()
+        growth_edge_scores = edge_scores.clone()
+        if history_supplied:
+            growth_node_scores = growth_node_scores + float(
+                history_node_growth_bonus
+            ) * decision_previous_nodes[object_index].to(
+                growth_node_scores.dtype
+            )
+            growth_edge_scores = growth_edge_scores + float(
+                history_edge_growth_bonus
+            ) * decision_previous_edges[object_index].to(
+                growth_edge_scores.dtype
+            )
+        if selected and float(node_reuse_penalty) > 0.0:
+            reuse = torch.stack(
+                [item.hard_node_mask.to(growth_node_scores.dtype) for _, item in selected]
+            ).sum(dim=0)
+            growth_node_scores = growth_node_scores - float(
+                node_reuse_penalty
+            ) * reuse
+        if (
+            selected
+            and decision_communities is not None
+            and float(community_reuse_penalty) > 0.0
+        ):
+            reuse_by_community = torch.zeros_like(growth_node_scores)
+            prior_nodes = torch.stack(
+                [item.hard_node_mask for _, item in selected]
+            )
+            for label in torch.unique(decision_communities, sorted=True):
+                members = decision_communities == label
+                fraction = prior_nodes[:, members].to(
+                    growth_node_scores.dtype
+                ).mean()
+                reuse_by_community[members] = fraction
+            growth_node_scores = growth_node_scores - float(
+                community_reuse_penalty
+            ) * reuse_by_community
+        seeds = torch.argsort(growth_node_scores, descending=True).tolist()
         candidates = []
         signatures = set()
         pool_limit = min(
@@ -1011,16 +1112,72 @@ def select_object_conditioned_subgraphs(
         )
         history_seed = int(decision_previous_seeds[object_index])
 
-        def consider_seed(seed, is_history=False):
-            candidate = _grow_one(
-                int(seed),
-                node_scores,
-                edge_scores,
-                decision_valid,
-                target_nodes,
-                edge_ratio,
-                edge_minimum,
+        strict_nodes = None
+        strict_edges = None
+        if node_entry_threshold is not None:
+            if history_supplied:
+                strict_nodes = torch.where(
+                    decision_previous_nodes[object_index],
+                    node_scores >= float(node_retention_threshold),
+                    node_scores >= float(node_entry_threshold),
+                )
+            else:
+                strict_nodes = node_scores >= float(node_entry_threshold)
+        if edge_entry_threshold is not None:
+            if history_supplied:
+                strict_edges = torch.where(
+                    decision_previous_edges[object_index],
+                    edge_scores >= float(edge_retention_threshold),
+                    edge_scores >= float(edge_entry_threshold),
+                )
+            else:
+                strict_edges = edge_scores >= float(edge_entry_threshold)
+        if strict_nodes is not None:
+            node_pair = strict_nodes[:, None] & strict_nodes[None, :]
+            strict_edges = (
+                node_pair
+                if strict_edges is None
+                else strict_edges & node_pair
             )
+        if strict_edges is not None:
+            strict_edges = decision_valid & strict_edges
+
+        def consider_seed(seed, is_history=False):
+            candidate = None
+            used_hysteresis_fallback = False
+            if (
+                strict_edges is not None
+                and (strict_nodes is None or bool(strict_nodes[int(seed)]))
+            ):
+                strict_candidate = _grow_one(
+                    int(seed),
+                    growth_node_scores,
+                    growth_edge_scores,
+                    strict_edges,
+                    target_nodes,
+                    edge_ratio,
+                    edge_minimum,
+                    communities=decision_communities,
+                    cross_community_penalty=cross_community_penalty,
+                )
+                if (
+                    strict_candidate.actual_node_count >= int(target_nodes)
+                    and strict_candidate.actual_edge_count >= int(edge_minimum)
+                ):
+                    candidate = strict_candidate
+            if candidate is None:
+                used_hysteresis_fallback = strict_edges is not None
+                candidate = _grow_one(
+                    int(seed),
+                    growth_node_scores,
+                    growth_edge_scores,
+                    decision_valid,
+                    target_nodes,
+                    edge_ratio,
+                    edge_minimum,
+                    communities=decision_communities,
+                    cross_community_penalty=cross_community_penalty,
+                )
             if (
                 candidate.actual_node_count < int(node_minimum)
                 or candidate.actual_edge_count < int(edge_minimum)
@@ -1044,11 +1201,18 @@ def select_object_conditioned_subgraphs(
                 current_node, current_edge = _selection_overlaps(candidate, prior)
                 node_overlap = max(node_overlap, current_node)
                 edge_overlap = max(edge_overlap, current_edge)
-            quality = _candidate_quality(candidate, node_scores, edge_scores)
+            quality = _candidate_quality(
+                candidate, growth_node_scores, growth_edge_scores
+            )
             violation = (
                 max(0.0, node_overlap - float(max_node_overlap))
                 + max(0.0, edge_overlap - float(max_edge_overlap))
             )
+            # A threshold-satisfying candidate always outranks a relaxed one.
+            # The fallback remains available only to prevent empty or
+            # undersized objects on sparse/calibration-shifted windows.
+            if used_hysteresis_fallback:
+                violation += 3.0
             objective = quality - float(overlap_penalty) * (
                 node_overlap + edge_overlap
             )
@@ -1067,6 +1231,7 @@ def select_object_conditioned_subgraphs(
                     -objective,
                     int(seed),
                     bool(is_history),
+                    bool(used_hysteresis_fallback),
                     candidate,
                 )
             )
@@ -1100,8 +1265,12 @@ def select_object_conditioned_subgraphs(
                 < float(switch_margin)
             ):
                 chosen = retained
-        relaxed = relaxed or chosen[0] > 0.0
-        selected.append((chosen[2], chosen[4]))
+        overlap_violation = float(chosen[0]) - (
+            3.0 if bool(chosen[4]) else 0.0
+        )
+        relaxed = relaxed or overlap_violation > 0.0
+        hysteresis_relaxed = hysteresis_relaxed or bool(chosen[4])
+        selected.append((chosen[2], chosen[5]))
 
     union_node = torch.zeros(count, dtype=torch.bool)
     union_edge = torch.zeros_like(decision_valid)
@@ -1171,4 +1340,5 @@ def select_object_conditioned_subgraphs(
         seed_distance_matrix=diagnostics[3],
         union_efficiency=diagnostics[4],
         diversity_constraint_relaxed=diagnostics[5],
+        hysteresis_constraint_relaxed=hysteresis_relaxed,
     )
