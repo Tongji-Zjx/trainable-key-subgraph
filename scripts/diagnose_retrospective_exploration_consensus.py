@@ -261,7 +261,7 @@ def _capture_independent_sample(model, cpu_batch, device, config, seed):
         union_windows.append(output.hard_windows[0][0])
     trajectory = build_dynamic_trajectories(
         object_windows,
-        source.coordinates,
+        tuple(item.to(device) for item in source.coordinates),
         config.critical_subgraph_count,
     )
     objects = []
