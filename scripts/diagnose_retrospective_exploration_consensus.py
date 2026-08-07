@@ -38,8 +38,12 @@ from keysubgraph.data.data_protocol import (  # noqa: E402
 )
 from keysubgraph.data.data_split import file_sha256  # noqa: E402
 from keysubgraph.data.exact_stse_dataset import (  # noqa: E402
+    ExactSTSEBatch,
     ExactSTSEDataset,
     create_exact_stse_loader,
+)
+from keysubgraph.models.dynamic_subgraph_tracking import (  # noqa: E402
+    build_dynamic_trajectories,
 )
 from keysubgraph.models.dual_stse_hard_sgw import (  # noqa: E402
     DualSTSEHardSGWClassifier,
@@ -56,8 +60,6 @@ CONDITIONS = (
     (
         "independent",
         {
-            "selector_structural_temporal_memory": False,
-            "selector_object_temporal_state": False,
             "selector_exploration_consensus_enabled": False,
             "selector_confidence_gated_history": False,
         },
@@ -221,6 +223,74 @@ def _capture_sample(output, sample_key: str, config) -> Dict[str, Any]:
             "mean_exploration_consensus_confidence": _scalar(
                 diagnostics["mean_exploration_consensus_confidence"]
             ),
+        },
+    }
+
+
+def _capture_independent_sample(model, cpu_batch, device, config, seed):
+    """Run every window as a one-window sample with no carried model state."""
+
+    source = cpu_batch[0]
+    object_windows = []
+    union_windows = []
+    for time_index in range(source.num_timepoints):
+        graph = replace(
+            source.graph,
+            sample_key="{}::independent_window_{}".format(
+                source.sample_key, time_index
+            ),
+            adjacency=(source.graph.adjacency[time_index],),
+            edge_mask=(source.graph.edge_mask[time_index],),
+            node_names=(source.graph.node_names[time_index],),
+            communities=(source.graph.communities[time_index],),
+            window_starts=source.graph.window_starts[time_index : time_index + 1],
+        )
+        exact = replace(
+            source,
+            graph=graph,
+            coordinates=(source.coordinates[time_index],),
+        )
+        with torch.no_grad():
+            output = model.selector(
+                ExactSTSEBatch((exact,)).to(device),
+                selection_mode="learned",
+                random_seed=seed,
+                track_subgraphs=False,
+            )
+        object_windows.append(output.hard_subgraphs[0][0])
+        union_windows.append(output.hard_windows[0][0])
+    trajectory = build_dynamic_trajectories(
+        object_windows,
+        source.coordinates,
+        config.critical_subgraph_count,
+    )
+    objects = []
+    unions = []
+    for current_objects, union in zip(object_windows, union_windows):
+        objects.append(tuple(
+            _sets(item)
+            for item in current_objects
+            if item is not None and item.window_valid
+        ))
+        unions.append(_sets(union) if union is not None and union.window_valid else None)
+    assignments = tuple({
+        "continuation_from": tuple(int(v) for v in item.continuation_from.tolist()),
+        "birth_mask": tuple(bool(v) for v in item.birth_mask.tolist()),
+        "match_confidence": tuple(float(v) for v in item.match_confidence.tolist()),
+    } for item in trajectory.assignments)
+    return {
+        "sample_key": source.sample_key,
+        "objects": tuple(objects),
+        "unions": tuple(unions),
+        "assignments": assignments,
+        "exploration_windows": _exploration_count(config, len(objects)),
+        "trajectory_count": int(trajectory.trajectory_count),
+        "birth_count": int(trajectory.total_birth_count),
+        "selector_diagnostics": {
+            "mean_history_strength": 0.0,
+            "mean_slot_alignment_confidence": 0.0,
+            "mean_memory_update_gate": 0.0,
+            "mean_exploration_consensus_confidence": 0.0,
         },
     }
 
@@ -528,14 +598,25 @@ def main() -> int:
         model.eval()
         samples = []
         for index, cpu_batch in enumerate(cpu_batches):
-            with torch.no_grad():
-                selected = model.selector(
-                    cpu_batch.to(device),
-                    selection_mode="learned",
-                    random_seed=args.seed,
-                    track_subgraphs=True,
+            if name == "independent":
+                samples.append(
+                    _capture_independent_sample(
+                        model, cpu_batch, device, config, args.seed
+                    )
                 )
-            samples.append(_capture_sample(selected, cpu_batch[0].sample_key, config))
+            else:
+                with torch.no_grad():
+                    selected = model.selector(
+                        cpu_batch.to(device),
+                        selection_mode="learned",
+                        random_seed=args.seed,
+                        track_subgraphs=True,
+                    )
+                samples.append(
+                    _capture_sample(
+                        selected, cpu_batch[0].sample_key, config
+                    )
+                )
             print(
                 "condition {}/{} {} sample {}/{} {}".format(
                     condition_index + 1,
