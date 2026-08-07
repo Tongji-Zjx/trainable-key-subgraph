@@ -146,6 +146,43 @@ class DualHardSGWSelector(nn.Module):
                 ),
                 epsilon=self.config.epsilon,
             )
+        # The signed-Laplacian basis is a detached positional encoding of a
+        # frozen input window.  Keeping it outside state_dict makes caching a
+        # pure runtime optimization while avoiding one eigendecomposition per
+        # window on every epoch.
+        self._spectral_cache: Dict[Tuple[Any, ...], torch.Tensor] = {}
+
+    def clear_spectral_cache(self) -> None:
+        self._spectral_cache.clear()
+
+    def _cached_spectral_features(
+        self,
+        sample_key: str,
+        time_index: int,
+        adjacency: torch.Tensor,
+        edge_presence_mask: torch.Tensor,
+    ) -> Optional[torch.Tensor]:
+        if (
+            self.config.selector_architecture != "theory_multi_object"
+            or not self.config.selector_spectral_cache
+        ):
+            return None
+        key = (
+            str(sample_key),
+            int(time_index),
+            int(adjacency.shape[0]),
+            adjacency.device.type,
+            adjacency.device.index,
+            str(adjacency.dtype),
+            int(self.config.selector_spectral_dim),
+        )
+        cached = self._spectral_cache.get(key)
+        if cached is None:
+            cached = self.scorer.encoder.spectral_features(
+                adjacency, edge_presence_mask
+            ).detach()
+            self._spectral_cache[key] = cached
+        return cached
 
     def forward(
         self,
@@ -170,6 +207,7 @@ class DualHardSGWSelector(nn.Module):
         multi_object_iou = []
         selected_positive_edge_count = 0
         selected_negative_edge_count = 0
+        fast_runtime = bool(self.config.selector_fast_runtime)
         for exact_sample in batch:
             sample = exact_sample.graph
             previous_object_states = None
@@ -190,6 +228,9 @@ class DualHardSGWSelector(nn.Module):
                             features.edge_presence_mask,
                         )
                     else:
+                        current_edge_mask = sample.edge_mask[
+                            time_index
+                        ].to(adjacency.device)
                         scores = self.scorer(
                             features.node_features,
                             features.edge_base_features,
@@ -199,6 +240,14 @@ class DualHardSGWSelector(nn.Module):
                                 previous_object_states
                                 if self.config.selector_object_temporal_state
                                 else None
+                            ),
+                            spectral_features=(
+                                self._cached_spectral_features(
+                                    sample.sample_key,
+                                    time_index,
+                                    adjacency,
+                                    current_edge_mask,
+                                )
                             ),
                         )
                         previous_object_states = scores.next_object_states
@@ -298,7 +347,8 @@ class DualHardSGWSelector(nn.Module):
                                 self.config.critical_min_seed_distance
                             ),
                         )
-                    fixed_k_outputs.append(fixed_k)
+                    if not fast_runtime:
+                        fixed_k_outputs.append(fixed_k)
                     selection = fixed_k.union
                 else:
                     selection = select_hard_stse_window(
@@ -345,40 +395,42 @@ class DualHardSGWSelector(nn.Module):
                 communities = sample.communities[time_index].to(
                     adjacency.device
                 )
-                candidate_coverages.append(
-                    _community_coverage(
-                        selection.candidate_node_mask, communities
+                if not fast_runtime:
+                    candidate_coverages.append(
+                        _community_coverage(
+                            selection.candidate_node_mask, communities
+                        )
                     )
-                )
-                final_coverages.append(
-                    _community_coverage(
-                        selection.hard_node_mask, communities
+                    final_coverages.append(
+                        _community_coverage(
+                            selection.hard_node_mask, communities
+                        )
                     )
-                )
                 selections.append(selection)
-                node_probability_values.append(
-                    selection.node_probabilities.reshape(-1)
-                )
-                valid_upper = torch.triu(
-                    sample.edge_mask[time_index].to(
-                        device=adjacency.device, dtype=torch.bool
-                    ),
-                    diagonal=1,
-                )
-                if bool(valid_upper.any()):
-                    edge_probability_values.append(
-                        selection.edge_probabilities[valid_upper]
+                if not fast_runtime:
+                    node_probability_values.append(
+                        selection.node_probabilities.reshape(-1)
                     )
-                selected_upper = torch.triu(
-                    selection.hard_edge_mask, diagonal=1
-                )
-                selected_weights = adjacency[selected_upper]
-                selected_positive_edge_count += int(
-                    (selected_weights > 0.0).sum()
-                )
-                selected_negative_edge_count += int(
-                    (selected_weights < 0.0).sum()
-                )
+                    valid_upper = torch.triu(
+                        sample.edge_mask[time_index].to(
+                            device=adjacency.device, dtype=torch.bool
+                        ),
+                        diagonal=1,
+                    )
+                    if bool(valid_upper.any()):
+                        edge_probability_values.append(
+                            selection.edge_probabilities[valid_upper]
+                        )
+                    selected_upper = torch.triu(
+                        selection.hard_edge_mask, diagonal=1
+                    )
+                    selected_weights = adjacency[selected_upper]
+                    selected_positive_edge_count += int(
+                        (selected_weights > 0.0).sum()
+                    )
+                    selected_negative_edge_count += int(
+                        (selected_weights < 0.0).sum()
+                    )
                 windows.append(hard)
                 subgraph_windows.append(tuple(object_outputs))
                 soft_windows.append(soft)
@@ -397,11 +449,20 @@ class DualHardSGWSelector(nn.Module):
         total_original_nodes = sum(
             int(item.node_probabilities.numel()) for item in selections
         )
-        total_candidate_nodes = sum(
-            int(item.candidate_node_mask.sum()) for item in selections
+        total_candidate_nodes = (
+            sum(item.requested_node_count for item in selections)
+            if fast_runtime
+            else sum(
+                int(item.candidate_node_mask.sum())
+                for item in selections
+            )
         )
-        total_final_nodes = sum(
-            int(item.hard_node_mask.sum()) for item in selections
+        total_final_nodes = (
+            sum(item.actual_node_count for item in selections)
+            if fast_runtime
+            else sum(
+                int(item.hard_node_mask.sum()) for item in selections
+            )
         )
         total_original_edges = sum(
             item.original_edge_count for item in selections
@@ -409,11 +470,15 @@ class DualHardSGWSelector(nn.Module):
         total_final_edges = sum(
             item.actual_edge_count for item in selections
         )
-        node_probabilities = torch.cat(node_probability_values)
+        node_probabilities = (
+            torch.cat(node_probability_values)
+            if node_probability_values
+            else selections[-1].node_probabilities.new_zeros((0,))
+        )
         edge_probabilities = (
             torch.cat(edge_probability_values)
             if edge_probability_values
-            else node_probabilities.new_zeros((0,))
+            else selections[-1].node_probabilities.new_zeros((0,))
         )
         diagnostics = {
             "selector_architecture": self.config.selector_architecture,
@@ -425,6 +490,7 @@ class DualHardSGWSelector(nn.Module):
                 and self.config.selector_object_temporal_state
             ),
             "selection_mode": selection_mode,
+            "detailed_diagnostics_skipped": fast_runtime,
             "selection_count": len(selections),
             "candidate_node_ratio": total_candidate_nodes
             / float(max(1, total_original_nodes)),
@@ -443,9 +509,14 @@ class DualHardSGWSelector(nn.Module):
             ),
             "node_probability_mean": float(
                 node_probabilities.detach().mean().cpu()
-            ),
-            "node_probability_std": float(
-                node_probabilities.detach().std(unbiased=False).cpu()
+            ) if node_probabilities.numel() else 0.0,
+            "node_probability_std": (
+                float(
+                    node_probabilities.detach()
+                    .std(unbiased=False).cpu()
+                )
+                if node_probabilities.numel()
+                else 0.0
             ),
             "edge_probability_mean": (
                 float(edge_probabilities.detach().mean().cpu())

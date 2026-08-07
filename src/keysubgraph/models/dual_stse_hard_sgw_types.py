@@ -31,6 +31,8 @@ class DualSTSEHardSGWConfig:
     selector_architecture: str = "legacy_mlp"
     selector_graph_layers: int = 2
     selector_spectral_dim: int = 8
+    selector_spectral_cache: bool = True
+    selector_fast_runtime: bool = False
     selector_object_overlap_minimum: float = 0.05
     selector_object_overlap_maximum: float = 0.30
     selector_object_temporal_state: bool = False

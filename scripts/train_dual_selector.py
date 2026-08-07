@@ -42,6 +42,21 @@ from keysubgraph.training.dual_stse_hard_sgw_trainer import (  # noqa: E402
 from keysubgraph.training.trainer import set_reproducible_seed  # noqa: E402
 
 
+class _InMemoryExactSTSEDataset(object):
+    """Materialize immutable samples once to avoid repeated torch.load calls."""
+
+    def __init__(self, source):
+        self.split = source.split
+        self.assignments = source.assignments
+        self.samples = tuple(source[index] for index in range(len(source)))
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, index):
+        return self.samples[index]
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -56,6 +71,16 @@ def parse_args():
     parser.add_argument("--epochs", type=int, default=80)
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--num-workers", type=int, default=0)
+    parser.add_argument(
+        "--cache-dataset-memory",
+        action="store_true",
+        help="load each immutable graph sequence once before training",
+    )
+    parser.add_argument(
+        "--fast-runtime",
+        action="store_true",
+        help="skip synchronization-heavy selector logging only",
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--learning-rate", type=float, default=1.0e-3)
     parser.add_argument("--weight-decay", type=float, default=1.0e-4)
@@ -111,6 +136,10 @@ def parse_args():
 
 def main():
     args = parse_args()
+    if args.cache_dataset_memory and args.num_workers != 0:
+        raise ValueError(
+            "in-memory selector data requires --num-workers 0"
+        )
     set_reproducible_seed(args.seed)
     protocol = validate_data_protocol(args.protocol, PROJECT_ROOT)
     if tuple(protocol_partitions(protocol)) != (
@@ -142,6 +171,11 @@ def main():
         require_coordinates=False,
         node_name_policy=node_name_policy,
     )
+    if args.cache_dataset_memory:
+        train_dataset = _InMemoryExactSTSEDataset(train_dataset)
+        validation_dataset = _InMemoryExactSTSEDataset(
+            validation_dataset
+        )
     device = torch.device(
         "cuda"
         if args.device == "auto" and torch.cuda.is_available()
@@ -176,6 +210,8 @@ def main():
         critical_subgraph_count=critical_subgraph_count,
         selector_graph_layers=args.selector_graph_layers,
         selector_spectral_dim=args.selector_spectral_dim,
+        selector_spectral_cache=True,
+        selector_fast_runtime=args.fast_runtime,
         selector_object_overlap_minimum=args.object_overlap_minimum,
         selector_object_overlap_maximum=args.object_overlap_maximum,
         selector_object_temporal_state=args.object_temporal_state,

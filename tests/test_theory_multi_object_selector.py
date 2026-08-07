@@ -95,6 +95,38 @@ class TheoryMultiObjectSelectorTest(unittest.TestCase):
         )
         self.assertGreaterEqual(float(second.regularization.temporal), 0.0)
 
+    def test_cached_spectrum_is_forward_equivalent(self):
+        node, edge, adjacency, mask = _fixture()
+        scorer = TheoryGuidedMultiObjectScorer(
+            hidden_dim=16,
+            edge_hidden_dim=8,
+            object_count=3,
+            spectral_dim=4,
+            graph_layers=1,
+            dropout=0.0,
+        ).eval()
+        spectrum = scorer.encoder.spectral_features(adjacency, mask)
+        direct = scorer(node, edge, mask, adjacency)
+        cached = scorer(
+            node,
+            edge,
+            mask,
+            adjacency,
+            spectral_features=spectrum,
+        )
+        self.assertTrue(
+            torch.equal(
+                direct.object_node_probabilities,
+                cached.object_node_probabilities,
+            )
+        )
+        self.assertTrue(
+            torch.equal(
+                direct.object_edge_probabilities,
+                cached.object_edge_probabilities,
+            )
+        )
+
     def test_invalid_edges_and_signed_spectrum_are_safe(self):
         node, edge, adjacency, mask = _fixture()
         vectors = signed_laplacian_eigenvectors(adjacency, 10)
@@ -178,9 +210,29 @@ class TheoryMultiObjectSelectorTest(unittest.TestCase):
             edge_minimum=1,
         )
         selector = DualHardSGWSelector(config)
+        selector.eval()
         output = selector(
             ExactSTSEBatch((sample,)), selection_mode="learned"
         )
+        cache_count = len(selector._spectral_cache)
+        repeated = selector(
+            ExactSTSEBatch((sample,)), selection_mode="learned"
+        )
+        self.assertEqual(cache_count, sample.graph.num_timepoints)
+        self.assertEqual(len(selector._spectral_cache), cache_count)
+        for first, second in zip(
+            output.hard_windows[0], repeated.hard_windows[0]
+        ):
+            self.assertTrue(
+                torch.equal(
+                    first.hard_node_mask, second.hard_node_mask
+                )
+            )
+            self.assertTrue(
+                torch.equal(
+                    first.hard_edge_mask, second.hard_edge_mask
+                )
+            )
         self.assertEqual(len(output.hard_subgraphs[0]), 3)
         self.assertTrue(
             all(len(objects) == 3 for objects in output.hard_subgraphs[0])
@@ -206,6 +258,48 @@ class TheoryMultiObjectSelectorTest(unittest.TestCase):
             float(selector.scorer.object_edge_head[0].weight.grad.abs().sum()),
             0.0,
         )
+
+    def test_fast_runtime_preserves_hard_decisions(self):
+        torch.manual_seed(29)
+        sample = _exact_sample("fast-runtime", 1, 3)
+        common = dict(
+            selector_architecture="theory_multi_object",
+            selector_object_temporal_state=True,
+            critical_subgraph_count=3,
+            critical_node_ratio_per_object=0.67,
+            node_minimum=2,
+            edge_minimum=1,
+        )
+        reference = DualHardSGWSelector(
+            DualSTSEHardSGWConfig(**common)
+        ).eval()
+        accelerated = DualHardSGWSelector(
+            DualSTSEHardSGWConfig(
+                selector_fast_runtime=True, **common
+            )
+        ).eval()
+        accelerated.load_state_dict(reference.state_dict())
+        batch = ExactSTSEBatch((sample,))
+        expected = reference(batch, selection_mode="learned")
+        actual = accelerated(batch, selection_mode="learned")
+        self.assertTrue(
+            actual.diagnostics["detailed_diagnostics_skipped"]
+        )
+        for expected_window, actual_window in zip(
+            expected.hard_windows[0], actual.hard_windows[0]
+        ):
+            self.assertTrue(
+                torch.equal(
+                    expected_window.hard_node_mask,
+                    actual_window.hard_node_mask,
+                )
+            )
+            self.assertTrue(
+                torch.equal(
+                    expected_window.hard_edge_mask,
+                    actual_window.hard_edge_mask,
+                )
+            )
 
 
 if __name__ == "__main__":

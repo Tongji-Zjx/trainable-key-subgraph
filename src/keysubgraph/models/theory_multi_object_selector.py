@@ -115,11 +115,34 @@ class SignedSpectralGCNIIEncoder(nn.Module):
             for _ in range(int(layer_count))
         )
 
+    def spectral_features(
+        self,
+        adjacency: torch.Tensor,
+        edge_presence_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        """Compute the fixed spectral positional encoding for one window."""
+
+        count = int(adjacency.shape[0])
+        if tuple(adjacency.shape) != (count, count):
+            raise ValueError("selector adjacency must be square")
+        valid = edge_presence_mask.to(
+            device=adjacency.device, dtype=torch.bool
+        )
+        valid = valid & valid.transpose(0, 1)
+        valid = valid.clone()
+        valid.fill_diagonal_(False)
+        signed = 0.5 * (adjacency + adjacency.transpose(0, 1))
+        signed = signed * valid.to(signed.dtype)
+        return signed_laplacian_eigenvectors(
+            signed, self.spectral_dim, self.epsilon
+        )
+
     def forward(
         self,
         node_features: torch.Tensor,
         adjacency: torch.Tensor,
         edge_presence_mask: torch.Tensor,
+        spectral_features: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         count = int(node_features.shape[0])
         if tuple(adjacency.shape) != (count, count):
@@ -132,9 +155,19 @@ class SignedSpectralGCNIIEncoder(nn.Module):
         signed = signed * valid.to(signed.dtype)
         positive = _symmetric_normalize(signed.clamp_min(0.0), self.epsilon)
         negative = _symmetric_normalize((-signed).clamp_min(0.0), self.epsilon)
-        spectral = signed_laplacian_eigenvectors(
-            signed, self.spectral_dim, self.epsilon
-        ).to(node_features)
+        if spectral_features is None:
+            spectral = signed_laplacian_eigenvectors(
+                signed, self.spectral_dim, self.epsilon
+            ).to(node_features)
+        else:
+            if tuple(spectral_features.shape) != (
+                count,
+                self.spectral_dim,
+            ):
+                raise ValueError(
+                    "cached selector spectrum has an invalid shape"
+                )
+            spectral = spectral_features.to(node_features)
         initial = self.input(torch.cat((node_features, spectral), dim=-1))
         hidden = initial
         for layer in self.layers:
@@ -245,12 +278,18 @@ class TheoryGuidedMultiObjectScorer(nn.Module):
         edge_presence_mask: torch.Tensor,
         adjacency: torch.Tensor,
         previous_object_states: Optional[torch.Tensor] = None,
+        spectral_features: Optional[torch.Tensor] = None,
     ) -> TheoryMultiObjectScoreOutput:
         count = int(node_features.shape[0])
         if tuple(edge_base_features.shape[:2]) != (count, count):
             raise ValueError("selector edge features must align with nodes")
         valid = self._valid_edges(edge_presence_mask, node_features)
-        hidden = self.encoder(node_features, adjacency, valid)
+        hidden = self.encoder(
+            node_features,
+            adjacency,
+            valid,
+            spectral_features=spectral_features,
+        )
         global_nodes = torch.sigmoid(self.global_node_head(hidden).squeeze(-1))
         left = hidden[:, None, :].expand(-1, count, -1)
         right = hidden[None, :, :].expand(count, -1, -1)

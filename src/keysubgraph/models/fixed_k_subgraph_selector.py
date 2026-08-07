@@ -891,11 +891,44 @@ def select_object_conditioned_subgraphs(
 
     device = global_node_probabilities.device
     valid = _valid_edges(edge_presence_mask).to(device)
-    decision_valid = valid.detach().cpu()
-    decision_global_nodes = global_node_probabilities.detach().cpu()
-    decision_global_edges = global_edge_probabilities.detach().cpu()
-    decision_object_nodes = object_node_probabilities.detach().cpu()
-    decision_object_edges = object_edge_probabilities.detach().cpu()
+    # One fused snapshot is materially faster than five independent .cpu()
+    # calls on CUDA because it creates one synchronization point per window.
+    # Slicing the detached CPU buffer preserves exactly the same decisions.
+    snapshot_dtype = global_node_probabilities.dtype
+    lengths = (
+        count * count,
+        count,
+        count * count,
+        int(object_count) * count,
+        int(object_count) * count * count,
+    )
+    snapshot = torch.cat(
+        (
+            valid.to(snapshot_dtype).reshape(-1),
+            global_node_probabilities.detach().reshape(-1),
+            global_edge_probabilities.detach().reshape(-1),
+            object_node_probabilities.detach().reshape(-1),
+            object_edge_probabilities.detach().reshape(-1),
+        )
+    ).detach().cpu()
+    offsets = [0]
+    for length in lengths:
+        offsets.append(offsets[-1] + int(length))
+    decision_valid = snapshot[
+        offsets[0] : offsets[1]
+    ].reshape(count, count).to(torch.bool)
+    decision_global_nodes = snapshot[
+        offsets[1] : offsets[2]
+    ].reshape(count)
+    decision_global_edges = snapshot[
+        offsets[2] : offsets[3]
+    ].reshape(count, count)
+    decision_object_nodes = snapshot[
+        offsets[3] : offsets[4]
+    ].reshape(object_count, count)
+    decision_object_edges = snapshot[
+        offsets[4] : offsets[5]
+    ].reshape(object_count, count, count)
     target_nodes = min(
         int(count),
         max(int(node_minimum), int(math.ceil(per_object_node_ratio * count))),
