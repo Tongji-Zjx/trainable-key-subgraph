@@ -129,6 +129,7 @@ from .fixed_k_subgraph_selector import (
 )
 from .theory_multi_object_selector import (
     MultiObjectRegularization,
+    MultiObjectTemporalMemory,
     SignedSpectralGCNIIEncoder,
     SignedSpectralGCNIILayer,
     TheoryGuidedMultiObjectScorer,
@@ -218,6 +219,7 @@ __all__ = [
     "select_object_conditioned_subgraphs",
     "select_fixed_k_subgraphs",
     "MultiObjectRegularization",
+    "MultiObjectTemporalMemory",
     "SignedSpectralGCNIIEncoder",
     "SignedSpectralGCNIILayer",
     "TheoryGuidedMultiObjectScorer",

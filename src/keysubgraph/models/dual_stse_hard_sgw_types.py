@@ -37,6 +37,10 @@ class DualSTSEHardSGWConfig:
     selector_object_overlap_maximum: float = 0.30
     selector_object_temporal_state: bool = False
     selector_temporal_confidence_threshold: float = 0.25
+    selector_structural_temporal_memory: bool = False
+    selector_memory_diffusion: float = 0.15
+    selector_sinkhorn_temperature: float = 0.10
+    selector_sinkhorn_iterations: int = 8
     target_node_ratio: float = 0.50
     target_edge_ratio: float = 0.30
     node_minimum: int = 2
@@ -53,6 +57,8 @@ class DualSTSEHardSGWConfig:
     critical_min_unique_node_fraction: float = 0.50
     critical_quality_floor_ratio: float = 0.80
     critical_min_seed_distance: float = 0.15
+    critical_history_continuity_bonus: float = 0.25
+    critical_history_switch_margin: float = 0.05
     spectral_quantile_dim: int = 16
     sgw_core_dim: int = 18
     sgw_variation_dim: int = 16
@@ -122,6 +128,13 @@ class DualSTSEHardSGWConfig:
             raise ValueError("selector object overlap interval is invalid")
         if not 0.0 <= self.selector_temporal_confidence_threshold <= 1.0:
             raise ValueError("selector temporal confidence is invalid")
+        if not 0.0 <= self.selector_memory_diffusion <= 1.0:
+            raise ValueError("selector memory diffusion is invalid")
+        if (
+            self.selector_sinkhorn_temperature <= 0.0
+            or self.selector_sinkhorn_iterations < 1
+        ):
+            raise ValueError("selector Sinkhorn controls must be positive")
         if (
             self.selector_architecture == "theory_multi_object"
             and self.critical_subgraph_count < 2
@@ -132,6 +145,13 @@ class DualSTSEHardSGWConfig:
             and self.selector_object_temporal_state
         ):
             raise ValueError("legacy selector has no object temporal state")
+        if self.selector_structural_temporal_memory and (
+            self.selector_architecture != "theory_multi_object"
+            or not self.selector_object_temporal_state
+        ):
+            raise ValueError(
+                "structural temporal memory requires the temporal theory selector"
+            )
         diversity_ratios = (
             self.critical_node_ratio_per_object,
             self.critical_node_reuse_decay,
@@ -145,6 +165,11 @@ class DualSTSEHardSGWConfig:
             raise ValueError("critical diversity ratios must lie in (0,1]")
         if self.critical_min_seed_distance < 0.0:
             raise ValueError("critical minimum seed distance cannot be negative")
+        if (
+            self.critical_history_continuity_bonus < 0.0
+            or self.critical_history_switch_margin < 0.0
+        ):
+            raise ValueError("critical history controls cannot be negative")
         for dropout in (self.selector_dropout, self.fusion_dropout):
             if dropout < 0.0 or dropout >= 1.0:
                 raise ValueError("dropout must lie in [0,1)")

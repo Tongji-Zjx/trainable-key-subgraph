@@ -99,6 +99,23 @@ def parse_args():
     parser.add_argument("--object-node-ratio", type=float, default=0.10)
     parser.add_argument("--object-temporal-state", action="store_true")
     parser.add_argument(
+        "--structural-temporal-memory",
+        action="store_true",
+        help=(
+            "carry ROI-aligned soft node/edge memberships, use Sinkhorn slot "
+            "alignment, enable latent object state, and use history-aware hardening"
+        ),
+    )
+    parser.add_argument("--memory-diffusion", type=float, default=0.15)
+    parser.add_argument(
+        "--sinkhorn-temperature", type=float, default=0.10
+    )
+    parser.add_argument("--sinkhorn-iterations", type=int, default=8)
+    parser.add_argument(
+        "--history-continuity-bonus", type=float, default=0.25
+    )
+    parser.add_argument("--history-switch-margin", type=float, default=0.05)
+    parser.add_argument(
         "--selector-objective",
         choices=("current", "full_soft", "full_soft_hard"),
         default="current",
@@ -130,6 +147,12 @@ def parse_args():
     )
     parser.add_argument("--object-coverage-weight", type=float, default=0.05)
     parser.add_argument("--object-temporal-weight", type=float, default=0.05)
+    parser.add_argument(
+        "--object-node-continuity-weight", type=float, default=0.10
+    )
+    parser.add_argument(
+        "--object-edge-continuity-weight", type=float, default=0.05
+    )
     parser.add_argument("--smoke", action="store_true")
     return parser.parse_args()
 
@@ -214,8 +237,21 @@ def main():
         selector_fast_runtime=args.fast_runtime,
         selector_object_overlap_minimum=args.object_overlap_minimum,
         selector_object_overlap_maximum=args.object_overlap_maximum,
-        selector_object_temporal_state=args.object_temporal_state,
+        selector_object_temporal_state=(
+            args.object_temporal_state
+            or args.structural_temporal_memory
+        ),
+        selector_structural_temporal_memory=(
+            args.structural_temporal_memory
+        ),
+        selector_memory_diffusion=args.memory_diffusion,
+        selector_sinkhorn_temperature=args.sinkhorn_temperature,
+        selector_sinkhorn_iterations=args.sinkhorn_iterations,
         critical_node_ratio_per_object=args.object_node_ratio,
+        critical_history_continuity_bonus=(
+            args.history_continuity_bonus
+        ),
+        critical_history_switch_margin=args.history_switch_margin,
     )
     result = train_dual_stage(
         model=DualSTSEHardSGWClassifier(model_config),
@@ -250,6 +286,12 @@ def main():
             ),
             object_coverage_weight=args.object_coverage_weight,
             object_temporal_weight=args.object_temporal_weight,
+            object_node_continuity_weight=(
+                args.object_node_continuity_weight
+            ),
+            object_edge_continuity_weight=(
+                args.object_edge_continuity_weight
+            ),
         ),
         output_dir=args.output_dir,
         protocol_sha256=file_sha256(args.protocol),
@@ -260,7 +302,18 @@ def main():
             "selector_objective": args.selector_objective,
             "selector_architecture": args.selector_architecture,
             "critical_subgraph_count": critical_subgraph_count,
-            "object_temporal_state": args.object_temporal_state,
+            "object_temporal_state": (
+                args.object_temporal_state
+                or args.structural_temporal_memory
+            ),
+            "structural_temporal_memory": (
+                args.structural_temporal_memory
+            ),
+            "memory_diffusion": args.memory_diffusion,
+            "sinkhorn_temperature": args.sinkhorn_temperature,
+            "sinkhorn_iterations": args.sinkhorn_iterations,
+            "history_continuity_bonus": args.history_continuity_bonus,
+            "history_switch_margin": args.history_switch_margin,
         },
     )
     print(

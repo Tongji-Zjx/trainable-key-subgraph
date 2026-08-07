@@ -2,7 +2,7 @@
 
 from __future__ import absolute_import, division, print_function
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Dict, List, Optional, Tuple
 
 import torch
@@ -21,7 +21,10 @@ from .fixed_k_subgraph_selector import (
     select_object_conditioned_subgraphs,
 )
 from .dynamic_subgraph_tracking import build_dynamic_trajectories
-from .theory_multi_object_selector import TheoryGuidedMultiObjectScorer
+from .theory_multi_object_selector import (
+    MultiObjectTemporalMemory,
+    TheoryGuidedMultiObjectScorer,
+)
 from .hard_stse_types import (
     HardSelectionSchedule,
     HardSTSEConfig,
@@ -91,6 +94,65 @@ def _build_soft_window(
     )
 
 
+def _align_hard_history(
+    memory: Optional[MultiObjectTemporalMemory],
+    current_node_ids: Tuple[str, ...],
+    device: torch.device,
+) -> Tuple[
+    Optional[torch.Tensor],
+    Optional[torch.Tensor],
+    Optional[torch.Tensor],
+]:
+    """Align previous discrete objects to current ROI order for hysteresis."""
+
+    if memory is None or memory.hard_node_masks is None:
+        return None, None, None
+    current = tuple(str(value) for value in current_node_ids)
+    lookup = {value: index for index, value in enumerate(current)}
+    object_count = int(memory.hard_node_masks.shape[0])
+    count = len(current)
+    nodes = torch.zeros(
+        object_count, count, dtype=torch.bool, device=device
+    )
+    edges = torch.zeros(
+        object_count, count, count, dtype=torch.bool, device=device
+    )
+    mapping = []
+    for previous_index, node_id in enumerate(memory.node_ids):
+        current_index = lookup.get(str(node_id))
+        if current_index is not None:
+            mapping.append((previous_index, current_index))
+    if mapping:
+        previous_indices = torch.tensor(
+            [item[0] for item in mapping], dtype=torch.long, device=device
+        )
+        current_indices = torch.tensor(
+            [item[1] for item in mapping], dtype=torch.long, device=device
+        )
+        source_nodes = memory.hard_node_masks.to(device)
+        source_edges = memory.hard_edge_masks.to(device)
+        nodes[:, current_indices] = source_nodes.index_select(
+            1, previous_indices
+        )
+        selected_edges = source_edges.index_select(
+            1, previous_indices
+        ).index_select(2, previous_indices)
+        edges[:, current_indices[:, None], current_indices[None, :]] = (
+            selected_edges
+        )
+    seeds = torch.full(
+        (object_count,), -1, dtype=torch.long, device=device
+    )
+    if memory.seed_indices is not None:
+        previous_seeds = memory.seed_indices.detach().cpu().tolist()
+        for object_index, previous_seed in enumerate(previous_seeds):
+            if 0 <= int(previous_seed) < len(memory.node_ids):
+                seeds[object_index] = lookup.get(
+                    str(memory.node_ids[int(previous_seed)]), -1
+                )
+    return nodes, edges, seeds
+
+
 class DualHardSGWSelector(nn.Module):
     """Legacy or theory-guided signed multi-object hard graph selector."""
 
@@ -143,6 +205,16 @@ class DualHardSGWSelector(nn.Module):
                 ),
                 temporal_confidence_threshold=(
                     self.config.selector_temporal_confidence_threshold
+                ),
+                structural_memory_enabled=(
+                    self.config.selector_structural_temporal_memory
+                ),
+                memory_diffusion=self.config.selector_memory_diffusion,
+                sinkhorn_temperature=(
+                    self.config.selector_sinkhorn_temperature
+                ),
+                sinkhorn_iterations=(
+                    self.config.selector_sinkhorn_iterations
                 ),
                 epsilon=self.config.epsilon,
             )
@@ -205,12 +277,15 @@ class DualHardSGWSelector(nn.Module):
         fixed_k_outputs = []
         multi_object_regularization = []
         multi_object_iou = []
+        slot_alignment_values = []
+        memory_gate_values = []
         selected_positive_edge_count = 0
         selected_negative_edge_count = 0
         fast_runtime = bool(self.config.selector_fast_runtime)
         for exact_sample in batch:
             sample = exact_sample.graph
             previous_object_states = None
+            previous_object_memory = None
             windows = []
             subgraph_windows = []
             soft_windows = []
@@ -231,14 +306,21 @@ class DualHardSGWSelector(nn.Module):
                         current_edge_mask = sample.edge_mask[
                             time_index
                         ].to(adjacency.device)
+                        current_node_ids = tuple(
+                            str(value)
+                            for value in sample.node_names[time_index]
+                        )
                         scores = self.scorer(
                             features.node_features,
                             features.edge_base_features,
                             features.edge_presence_mask,
                             adjacency,
-                            (
+                            previous_object_states=(
                                 previous_object_states
-                                if self.config.selector_object_temporal_state
+                                if (
+                                    self.config.selector_object_temporal_state
+                                    and not self.config.selector_structural_temporal_memory
+                                )
                                 else None
                             ),
                             spectral_features=(
@@ -249,14 +331,35 @@ class DualHardSGWSelector(nn.Module):
                                     current_edge_mask,
                                 )
                             ),
+                            previous_memory=(
+                                previous_object_memory
+                                if self.config.selector_structural_temporal_memory
+                                else None
+                            ),
+                            current_node_ids=(
+                                current_node_ids
+                                if self.config.selector_structural_temporal_memory
+                                else None
+                            ),
                         )
-                        previous_object_states = scores.next_object_states
+                        if not self.config.selector_structural_temporal_memory:
+                            previous_object_states = scores.next_object_states
                         multi_object_regularization.append(
                             scores.regularization
                         )
                         multi_object_iou.append(
                             scores.regularization.pairwise_soft_iou
                         )
+                        if (
+                            self.config.selector_structural_temporal_memory
+                            and scores.transported_node_probabilities is not None
+                        ):
+                            slot_alignment_values.append(
+                                scores.slot_alignment
+                            )
+                            memory_gate_values.append(
+                                scores.memory_update_gate
+                            )
                     node_probabilities = scores.node_probabilities
                     edge_probabilities = scores.edge_probabilities
                 else:
@@ -278,6 +381,14 @@ class DualHardSGWSelector(nn.Module):
                 fixed_k = None
                 if selection_mode == "learned":
                     if self.config.selector_architecture == "theory_multi_object":
+                        previous_hard = _align_hard_history(
+                            previous_object_memory,
+                            tuple(
+                                str(value)
+                                for value in sample.node_names[time_index]
+                            ),
+                            adjacency.device,
+                        )
                         fixed_k = select_object_conditioned_subgraphs(
                             global_node_probabilities=node_probabilities,
                             global_edge_probabilities=edge_probabilities,
@@ -308,7 +419,37 @@ class DualHardSGWSelector(nn.Module):
                             max_edge_overlap=(
                                 self.config.critical_max_edge_overlap
                             ),
+                            previous_node_masks=previous_hard[0],
+                            previous_edge_masks=previous_hard[1],
+                            previous_seed_indices=previous_hard[2],
+                            continuity_bonus=(
+                                self.config.critical_history_continuity_bonus
+                                if self.config.selector_structural_temporal_memory
+                                else 0.0
+                            ),
+                            switch_margin=(
+                                self.config.critical_history_switch_margin
+                                if self.config.selector_structural_temporal_memory
+                                else 0.0
+                            ),
                         )
+                        if self.config.selector_structural_temporal_memory:
+                            previous_object_memory = replace(
+                                scores.next_memory,
+                                hard_node_masks=torch.stack(
+                                    [
+                                        item.hard_node_mask
+                                        for item in fixed_k.subgraphs
+                                    ]
+                                ),
+                                hard_edge_masks=torch.stack(
+                                    [
+                                        item.hard_edge_mask
+                                        for item in fixed_k.subgraphs
+                                    ]
+                                ),
+                                seed_indices=fixed_k.seed_indices,
+                            )
                     else:
                         fixed_k = select_fixed_k_subgraphs(
                         node_probabilities=node_probabilities,
@@ -489,6 +630,10 @@ class DualHardSGWSelector(nn.Module):
                 self.config.selector_architecture == "theory_multi_object"
                 and self.config.selector_object_temporal_state
             ),
+            "uses_structural_temporal_memory": (
+                self.config.selector_architecture == "theory_multi_object"
+                and self.config.selector_structural_temporal_memory
+            ),
             "selection_mode": selection_mode,
             "detailed_diagnostics_skipped": fast_runtime,
             "selection_count": len(selections),
@@ -610,9 +755,33 @@ class DualHardSGWSelector(nn.Module):
                     "temporal": torch.stack(
                         [item.temporal for item in multi_object_regularization]
                     ).mean(),
+                    "node_continuity": torch.stack(
+                        [
+                            item.node_continuity
+                            for item in multi_object_regularization
+                        ]
+                    ).mean(),
+                    "edge_continuity": torch.stack(
+                        [
+                            item.edge_continuity
+                            for item in multi_object_regularization
+                        ]
+                    ).mean(),
                 }
                 if multi_object_regularization
                 else None
+            ),
+            "mean_slot_alignment_confidence": (
+                torch.stack(
+                    [item.max(dim=-1).values.mean() for item in slot_alignment_values]
+                ).mean()
+                if slot_alignment_values
+                else node_probabilities.new_zeros(())
+            ),
+            "mean_memory_update_gate": (
+                torch.cat(memory_gate_values).mean()
+                if memory_gate_values
+                else node_probabilities.new_zeros(())
             ),
             "mean_soft_object_iou": (
                 torch.stack(

@@ -31,6 +31,8 @@ class DualSTSEHardSGWLossConfig:
     object_reconstruction_weight: float = 0.10
     object_coverage_weight: float = 0.05
     object_temporal_weight: float = 0.05
+    object_node_continuity_weight: float = 0.10
+    object_edge_continuity_weight: float = 0.05
     soft_hard_kd_temperature: float = 1.0
     soft_warmup_epochs: int = 3
     target_node_ratio: float = 0.50
@@ -61,6 +63,8 @@ class DualSTSEHardSGWLossConfig:
             self.object_reconstruction_weight,
             self.object_coverage_weight,
             self.object_temporal_weight,
+            self.object_node_continuity_weight,
+            self.object_edge_continuity_weight,
         )
         if any(value < 0.0 for value in weights):
             raise ValueError("dual loss weights cannot be negative")
@@ -95,6 +99,8 @@ class DualSTSEHardSGWLoss:
     object_reconstruction: torch.Tensor
     object_coverage: torch.Tensor
     object_temporal: torch.Tensor
+    object_node_continuity: torch.Tensor
+    object_edge_continuity: torch.Tensor
     stage: str
     weights: Dict[str, float]
 
@@ -154,6 +160,8 @@ class DualSTSEHardSGWCriterion(object):
         object_reconstruction = zero
         object_coverage = zero
         object_temporal = zero
+        object_node_continuity = zero
+        object_edge_continuity = zero
 
         if stage == "selector_proxy":
             if output.selector_proxy_logits is None:
@@ -221,6 +229,12 @@ class DualSTSEHardSGWCriterion(object):
                 object_reconstruction = object_terms["reconstruction"]
                 object_coverage = object_terms["coverage"]
                 object_temporal = object_terms["temporal"]
+                object_node_continuity = object_terms.get(
+                    "node_continuity", zero
+                )
+                object_edge_continuity = object_terms.get(
+                    "edge_continuity", zero
+                )
             node_values = [
                 item.node_probabilities.reshape(-1)
                 for item in selections
@@ -287,6 +301,10 @@ class DualSTSEHardSGWCriterion(object):
                 * object_reconstruction
                 + self.config.object_coverage_weight * object_coverage
                 + self.config.object_temporal_weight * object_temporal
+                + self.config.object_node_continuity_weight
+                * object_node_continuity
+                + self.config.object_edge_continuity_weight
+                * object_edge_continuity
             )
         elif stage == "sgw_classifier":
             if output.sgw_logits is None:
@@ -331,6 +349,8 @@ class DualSTSEHardSGWCriterion(object):
             object_reconstruction=object_reconstruction,
             object_coverage=object_coverage,
             object_temporal=object_temporal,
+            object_node_continuity=object_node_continuity,
+            object_edge_continuity=object_edge_continuity,
             stage=stage,
             weights={
                 "fusion_ce": self.config.fusion_ce_weight,
@@ -356,5 +376,11 @@ class DualSTSEHardSGWCriterion(object):
                 ),
                 "object_coverage": self.config.object_coverage_weight,
                 "object_temporal": self.config.object_temporal_weight,
+                "object_node_continuity": (
+                    self.config.object_node_continuity_weight
+                ),
+                "object_edge_continuity": (
+                    self.config.object_edge_continuity_weight
+                ),
             },
         )

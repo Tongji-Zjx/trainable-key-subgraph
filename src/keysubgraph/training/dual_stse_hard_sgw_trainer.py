@@ -318,6 +318,8 @@ def run_dual_epoch(
             "object_reconstruction",
             "object_coverage",
             "object_temporal",
+            "object_node_continuity",
+            "object_edge_continuity",
         ):
             value = getattr(loss, name)
             component_totals[name] = component_totals.get(

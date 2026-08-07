@@ -35,6 +35,67 @@ def _fixture(count=8):
 
 
 class TheoryMultiObjectSelectorTest(unittest.TestCase):
+    def test_roi_aligned_structural_memory_is_permutation_safe_and_differentiable(self):
+        node, edge, adjacency, mask = _fixture()
+        scorer = TheoryGuidedMultiObjectScorer(
+            hidden_dim=16,
+            edge_hidden_dim=8,
+            object_count=3,
+            spectral_dim=4,
+            graph_layers=1,
+            dropout=0.0,
+            structural_memory_enabled=True,
+            memory_diffusion=0.0,
+            sinkhorn_temperature=0.10,
+            sinkhorn_iterations=12,
+        )
+        names = tuple("roi_{}".format(index) for index in range(8))
+        first = scorer(
+            node,
+            edge,
+            mask,
+            adjacency,
+            current_node_ids=names,
+        )
+        permutation = torch.tensor([3, 0, 7, 1, 5, 2, 6, 4])
+        permuted_names = tuple(names[index] for index in permutation.tolist())
+        second = scorer(
+            node.index_select(0, permutation),
+            edge.index_select(0, permutation).index_select(1, permutation),
+            mask.index_select(0, permutation).index_select(1, permutation),
+            adjacency.index_select(0, permutation).index_select(1, permutation),
+            previous_memory=first.next_memory,
+            current_node_ids=permuted_names,
+        )
+        expected = first.object_node_probabilities.index_select(1, permutation)
+        self.assertTrue(
+            torch.allclose(
+                second.transported_node_probabilities,
+                expected,
+                atol=1.0e-7,
+                rtol=1.0e-7,
+            )
+        )
+        self.assertTrue(
+            torch.allclose(
+                second.slot_alignment.sum(dim=0),
+                torch.ones(3),
+                atol=1.0e-5,
+                rtol=1.0e-5,
+            )
+        )
+        self.assertGreaterEqual(float(second.regularization.node_continuity), 0.0)
+        self.assertGreaterEqual(float(second.regularization.edge_continuity), 0.0)
+        loss = (
+            second.object_node_probabilities.mean()
+            + second.regularization.node_continuity
+            + second.regularization.edge_continuity
+        )
+        loss.backward()
+        self.assertGreater(
+            float(scorer.memory_gate.weight.grad.abs().sum()), 0.0
+        )
+
     def test_signed_spectral_multi_object_shapes_and_gradients(self):
         node, edge, adjacency, mask = _fixture()
         scorer = TheoryGuidedMultiObjectScorer(
@@ -222,6 +283,73 @@ class TheoryMultiObjectSelectorTest(unittest.TestCase):
         self.assertEqual(len(selected.subgraphs), 3)
         self.assertTrue(
             all(item.actual_edge_count >= 1 for item in selected.subgraphs)
+        )
+
+    def test_history_seed_hysteresis_retains_near_tied_objects(self):
+        count = 12
+        global_node = torch.full((count,), 0.6)
+        global_edge = torch.full((count, count), 0.7)
+        mask = torch.ones(count, count, dtype=torch.bool)
+        mask.fill_diagonal_(False)
+        objects = torch.full((3, count), 0.50)
+        objects[0, 0] = 0.56
+        objects[1, 4] = 0.56
+        objects[2, 8] = 0.56
+        object_edges = torch.full((3, count, count), 0.60)
+        previous_nodes = torch.zeros(3, count, dtype=torch.bool)
+        previous_edges = torch.zeros(3, count, count, dtype=torch.bool)
+        previous_seeds = torch.tensor([3, 7, 11])
+        for object_index, seed in enumerate(previous_seeds.tolist()):
+            previous_nodes[object_index, seed] = True
+            previous_nodes[object_index, (seed - 1) % count] = True
+            previous_edges[
+                object_index, seed, (seed - 1) % count
+            ] = True
+            previous_edges[
+                object_index, (seed - 1) % count, seed
+            ] = True
+        selected = select_object_conditioned_subgraphs(
+            global_node,
+            global_edge,
+            objects,
+            object_edges,
+            mask,
+            per_object_node_ratio=0.20,
+            edge_ratio=0.5,
+            candidate_multiplier=4,
+            previous_node_masks=previous_nodes,
+            previous_edge_masks=previous_edges,
+            previous_seed_indices=previous_seeds,
+            continuity_bonus=0.25,
+            switch_margin=1.0,
+        )
+        self.assertTrue(torch.equal(selected.seed_indices.cpu(), previous_seeds))
+
+    def test_structural_memory_config_integrates_with_dual_selector(self):
+        torch.manual_seed(31)
+        sample = _exact_sample("structural-memory", 1, 3)
+        selector = DualHardSGWSelector(
+            DualSTSEHardSGWConfig(
+                selector_architecture="theory_multi_object",
+                selector_object_temporal_state=True,
+                selector_structural_temporal_memory=True,
+                critical_subgraph_count=3,
+                critical_node_ratio_per_object=0.67,
+                node_minimum=2,
+                edge_minimum=1,
+            )
+        )
+        output = selector(
+            ExactSTSEBatch((sample,)), selection_mode="learned"
+        )
+        self.assertTrue(
+            output.diagnostics["uses_structural_temporal_memory"]
+        )
+        terms = output.diagnostics["multi_object_regularization"]
+        self.assertIn("node_continuity", terms)
+        self.assertIn("edge_continuity", terms)
+        self.assertTrue(
+            bool(torch.isfinite(terms["node_continuity"]))
         )
 
     def test_dual_selector_integration_emits_three_learned_objects(self):

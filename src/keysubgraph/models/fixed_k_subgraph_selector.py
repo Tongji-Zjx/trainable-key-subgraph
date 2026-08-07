@@ -330,6 +330,24 @@ def _selection_overlaps(
     )
 
 
+def _history_jaccard(
+    candidate: HardSelectionOutput,
+    previous_node_mask: torch.Tensor,
+    previous_edge_mask: torch.Tensor,
+) -> Tuple[float, float]:
+    node_union = candidate.hard_node_mask | previous_node_mask
+    edge_candidate = torch.triu(candidate.hard_edge_mask, diagonal=1)
+    edge_previous = torch.triu(previous_edge_mask, diagonal=1)
+    edge_union = edge_candidate | edge_previous
+    node = float(
+        (candidate.hard_node_mask & previous_node_mask).sum()
+    ) / float(max(1, int(node_union.sum())))
+    edge = float((edge_candidate & edge_previous).sum()) / float(
+        max(1, int(edge_union.sum()))
+    )
+    return node, edge
+
+
 def _coordinate_scale(coordinates: torch.Tensor) -> float:
     if coordinates.numel() < 3:
         return 1.0
@@ -856,6 +874,11 @@ def select_object_conditioned_subgraphs(
     overlap_penalty: float = 0.25,
     max_node_overlap: float = 0.40,
     max_edge_overlap: float = 0.30,
+    previous_node_masks: Optional[torch.Tensor] = None,
+    previous_edge_masks: Optional[torch.Tensor] = None,
+    previous_seed_indices: Optional[torch.Tensor] = None,
+    continuity_bonus: float = 0.0,
+    switch_margin: float = 0.0,
 ) -> FixedKSelectionOutput:
     """Harden K independently learned object fields and return their union.
 
@@ -888,6 +911,22 @@ def select_object_conditioned_subgraphs(
         raise ValueError("maximum node overlap must lie in [0,1]")
     if not 0.0 <= max_edge_overlap <= 1.0:
         raise ValueError("maximum edge overlap must lie in [0,1]")
+    if continuity_bonus < 0.0 or switch_margin < 0.0:
+        raise ValueError("hard history controls cannot be negative")
+    history_supplied = previous_node_masks is not None
+    if history_supplied != (previous_edge_masks is not None):
+        raise ValueError("previous node and edge masks must be supplied together")
+    if history_supplied:
+        if tuple(previous_node_masks.shape) != (object_count, count):
+            raise ValueError("previous node masks must have shape [K,N]")
+        if tuple(previous_edge_masks.shape) != (
+            object_count, count, count
+        ):
+            raise ValueError("previous edge masks must have shape [K,N,N]")
+        if previous_seed_indices is not None and tuple(
+            previous_seed_indices.shape
+        ) != (object_count,):
+            raise ValueError("previous seeds must have shape [K]")
 
     device = global_node_probabilities.device
     valid = _valid_edges(edge_presence_mask).to(device)
@@ -895,22 +934,34 @@ def select_object_conditioned_subgraphs(
     # calls on CUDA because it creates one synchronization point per window.
     # Slicing the detached CPU buffer preserves exactly the same decisions.
     snapshot_dtype = global_node_probabilities.dtype
-    lengths = (
+    lengths = [
         count * count,
         count,
         count * count,
         int(object_count) * count,
         int(object_count) * count * count,
-    )
-    snapshot = torch.cat(
-        (
+    ]
+    snapshot_parts = [
             valid.to(snapshot_dtype).reshape(-1),
             global_node_probabilities.detach().reshape(-1),
             global_edge_probabilities.detach().reshape(-1),
             object_node_probabilities.detach().reshape(-1),
             object_edge_probabilities.detach().reshape(-1),
+    ]
+    if history_supplied:
+        lengths.extend(
+            [
+                int(object_count) * count,
+                int(object_count) * count * count,
+            ]
         )
-    ).detach().cpu()
+        snapshot_parts.extend(
+            [
+                previous_node_masks.to(snapshot_dtype).reshape(-1),
+                previous_edge_masks.to(snapshot_dtype).reshape(-1),
+            ]
+        )
+    snapshot = torch.cat(snapshot_parts).detach().cpu()
     offsets = [0]
     for length in lengths:
         offsets.append(offsets[-1] + int(length))
@@ -929,6 +980,20 @@ def select_object_conditioned_subgraphs(
     decision_object_edges = snapshot[
         offsets[4] : offsets[5]
     ].reshape(object_count, count, count)
+    decision_previous_nodes = None
+    decision_previous_edges = None
+    if history_supplied:
+        decision_previous_nodes = snapshot[
+            offsets[5] : offsets[6]
+        ].reshape(object_count, count).to(torch.bool)
+        decision_previous_edges = snapshot[
+            offsets[6] : offsets[7]
+        ].reshape(object_count, count, count).to(torch.bool)
+    decision_previous_seeds = (
+        previous_seed_indices.detach().cpu().tolist()
+        if previous_seed_indices is not None
+        else [-1] * int(object_count)
+    )
     target_nodes = min(
         int(count),
         max(int(node_minimum), int(math.ceil(per_object_node_ratio * count))),
@@ -944,7 +1009,9 @@ def select_object_conditioned_subgraphs(
         pool_limit = min(
             len(seeds), max(int(object_count), int(candidate_multiplier))
         )
-        def consider_seed(seed):
+        history_seed = int(decision_previous_seeds[object_index])
+
+        def consider_seed(seed, is_history=False):
             candidate = _grow_one(
                 int(seed),
                 node_scores,
@@ -985,25 +1052,56 @@ def select_object_conditioned_subgraphs(
             objective = quality - float(overlap_penalty) * (
                 node_overlap + edge_overlap
             )
+            if history_supplied:
+                history_node, history_edge = _history_jaccard(
+                    candidate,
+                    decision_previous_nodes[object_index],
+                    decision_previous_edges[object_index],
+                )
+                objective = objective + float(continuity_bonus) * 0.5 * (
+                    history_node + history_edge
+                )
             candidates.append(
-                (violation, -objective, int(seed), candidate)
+                (
+                    violation,
+                    -objective,
+                    int(seed),
+                    bool(is_history),
+                    candidate,
+                )
             )
+        if 0 <= history_seed < count:
+            consider_seed(history_seed, is_history=True)
         for seed in seeds[:pool_limit]:
-            consider_seed(seed)
+            consider_seed(seed, is_history=(int(seed) == history_seed))
         # Sparse or disconnected windows can place all preferred seeds on
         # isolated nodes.  Only in that failure case, scan the deterministic
         # remainder so the object still resolves to a valid connected graph.
         if not candidates:
             for seed in seeds[pool_limit:]:
-                consider_seed(seed)
+                consider_seed(seed, is_history=(int(seed) == history_seed))
                 if candidates:
                     break
         if not candidates:
             raise ValueError("object field cannot supply a connected hard subgraph")
         candidates.sort(key=lambda item: (item[0], item[1], item[2]))
         chosen = candidates[0]
+        history_candidates = [item for item in candidates if item[3]]
+        if history_candidates and not chosen[3]:
+            history_candidates.sort(
+                key=lambda item: (item[0], item[1], item[2])
+            )
+            retained = history_candidates[0]
+            best_objective = -float(chosen[1])
+            retained_objective = -float(retained[1])
+            if (
+                chosen[0] >= retained[0]
+                and best_objective - retained_objective
+                < float(switch_margin)
+            ):
+                chosen = retained
         relaxed = relaxed or chosen[0] > 0.0
-        selected.append((chosen[2], chosen[3]))
+        selected.append((chosen[2], chosen[4]))
 
     union_node = torch.zeros(count, dtype=torch.bool)
     union_edge = torch.zeros_like(decision_valid)
