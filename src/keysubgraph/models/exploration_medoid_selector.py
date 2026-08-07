@@ -387,7 +387,7 @@ def _window_normalized_quality(
 def select_exploration_medoids(
     candidates: Sequence[ExplorationObjectCandidate],
     object_count: int,
-    similarity_threshold: float = 0.45,
+    similarity_threshold: float = 0.25,
     shortlist_multiplier: int = 3,
     coverage_weight: float = 0.45,
     support_weight: float = 0.25,

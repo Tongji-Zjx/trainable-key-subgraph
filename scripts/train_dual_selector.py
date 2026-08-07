@@ -156,7 +156,7 @@ def parse_args():
     parser.add_argument(
         "--exploration-candidate-similarity-threshold",
         type=float,
-        default=0.45,
+        default=0.25,
     )
     parser.add_argument(
         "--exploration-shortlist-multiplier", type=int, default=3

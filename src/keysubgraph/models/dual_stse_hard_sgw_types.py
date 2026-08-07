@@ -52,7 +52,7 @@ class DualSTSEHardSGWConfig:
     selector_exploration_max_windows: int = 5
     selector_exploration_history_ramp_windows: int = 4
     selector_exploration_retrospective_strength: float = 0.30
-    selector_exploration_candidate_similarity_threshold: float = 0.45
+    selector_exploration_candidate_similarity_threshold: float = 0.25
     selector_exploration_shortlist_multiplier: int = 3
     selector_exploration_coverage_weight: float = 0.45
     selector_exploration_support_weight: float = 0.25
