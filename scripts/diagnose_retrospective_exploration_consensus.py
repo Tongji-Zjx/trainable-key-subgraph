@@ -507,7 +507,10 @@ def main() -> int:
     for condition_index, (name, overrides, description) in enumerate(CONDITIONS):
         config = replace(base_config, **overrides)
         condition_configs[name] = config
-        model = DualSTSEHardSGWClassifier(config).to(device)
+        # Always construct the exact checkpoint architecture.  In particular,
+        # disabling structural memory for the independent-forward condition
+        # must not remove the trained memory-gate tensors from the state dict.
+        model = DualSTSEHardSGWClassifier(base_config).to(device)
         load_dual_checkpoint(
             checkpoint_path,
             model,
@@ -515,6 +518,13 @@ def main() -> int:
             expected_stage="selector_proxy",
             expected_protocol_sha256=protocol_sha256,
         )
+        # These switches alter only forward-time information flow; no module
+        # or learned tensor is added, removed, or reinitialized.
+        model.selector.config = config
+        if hasattr(model.selector.scorer, "confidence_gated_history"):
+            model.selector.scorer.confidence_gated_history = bool(
+                config.selector_confidence_gated_history
+            )
         model.eval()
         samples = []
         for index, cpu_batch in enumerate(cpu_batches):
