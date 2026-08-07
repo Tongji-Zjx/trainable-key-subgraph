@@ -897,6 +897,11 @@ def select_object_conditioned_subgraphs(
     switch_margin: float = 0.0,
     history_node_growth_bonus: float = 0.0,
     history_edge_growth_bonus: float = 0.0,
+    anchor_node_masks: Optional[torch.Tensor] = None,
+    anchor_edge_masks: Optional[torch.Tensor] = None,
+    anchor_continuity_bonus: float = 0.0,
+    anchor_node_growth_bonus: float = 0.0,
+    anchor_edge_growth_bonus: float = 0.0,
     node_entry_threshold: Optional[float] = None,
     node_retention_threshold: Optional[float] = None,
     edge_entry_threshold: Optional[float] = None,
@@ -942,6 +947,9 @@ def select_object_conditioned_subgraphs(
         switch_margin,
         history_node_growth_bonus,
         history_edge_growth_bonus,
+        anchor_continuity_bonus,
+        anchor_node_growth_bonus,
+        anchor_edge_growth_bonus,
         cross_community_penalty,
         node_reuse_penalty,
         community_reuse_penalty,
@@ -979,6 +987,16 @@ def select_object_conditioned_subgraphs(
             previous_seed_indices.shape
         ) != (object_count,):
             raise ValueError("previous seeds must have shape [K]")
+    anchor_supplied = anchor_node_masks is not None
+    if anchor_supplied != (anchor_edge_masks is not None):
+        raise ValueError("anchor node and edge masks must be supplied together")
+    if anchor_supplied:
+        if tuple(anchor_node_masks.shape) != (object_count, count):
+            raise ValueError("anchor node masks must have shape [K,N]")
+        if tuple(anchor_edge_masks.shape) != (
+            object_count, count, count
+        ):
+            raise ValueError("anchor edge masks must have shape [K,N,N]")
 
     device = global_node_probabilities.device
     valid = _valid_edges(edge_presence_mask).to(device)
@@ -1016,6 +1034,19 @@ def select_object_conditioned_subgraphs(
                 previous_edge_masks.to(snapshot_dtype).reshape(-1),
             ]
         )
+    if anchor_supplied:
+        lengths.extend(
+            [
+                int(object_count) * count,
+                int(object_count) * count * count,
+            ]
+        )
+        snapshot_parts.extend(
+            [
+                anchor_node_masks.to(snapshot_dtype).reshape(-1),
+                anchor_edge_masks.to(snapshot_dtype).reshape(-1),
+            ]
+        )
     snapshot = torch.cat(snapshot_parts).detach().cpu()
     offsets = [0]
     for length in lengths:
@@ -1051,6 +1082,16 @@ def select_object_conditioned_subgraphs(
         decision_previous_edges = snapshot[
             offsets[cursor + 1] : offsets[cursor + 2]
         ].reshape(object_count, count, count).to(torch.bool)
+        cursor += 2
+    decision_anchor_nodes = None
+    decision_anchor_edges = None
+    if anchor_supplied:
+        decision_anchor_nodes = snapshot[
+            offsets[cursor] : offsets[cursor + 1]
+        ].reshape(object_count, count).to(torch.bool)
+        decision_anchor_edges = snapshot[
+            offsets[cursor + 1] : offsets[cursor + 2]
+        ].reshape(object_count, count, count).to(torch.bool)
     decision_previous_seeds = (
         previous_seed_indices.detach().cpu().tolist()
         if previous_seed_indices is not None
@@ -1077,6 +1118,17 @@ def select_object_conditioned_subgraphs(
             growth_edge_scores = growth_edge_scores + float(
                 history_edge_growth_bonus
             ) * decision_previous_edges[object_index].to(
+                growth_edge_scores.dtype
+            )
+        if anchor_supplied:
+            growth_node_scores = growth_node_scores + float(
+                anchor_node_growth_bonus
+            ) * decision_anchor_nodes[object_index].to(
+                growth_node_scores.dtype
+            )
+            growth_edge_scores = growth_edge_scores + float(
+                anchor_edge_growth_bonus
+            ) * decision_anchor_edges[object_index].to(
                 growth_edge_scores.dtype
             )
         if selected and float(node_reuse_penalty) > 0.0:
@@ -1224,6 +1276,15 @@ def select_object_conditioned_subgraphs(
                 )
                 objective = objective + float(continuity_bonus) * 0.5 * (
                     history_node + history_edge
+                )
+            if anchor_supplied:
+                anchor_node, anchor_edge = _history_jaccard(
+                    candidate,
+                    decision_anchor_nodes[object_index],
+                    decision_anchor_edges[object_index],
+                )
+                objective = objective + float(anchor_continuity_bonus) * 0.5 * (
+                    anchor_node + anchor_edge
                 )
             candidates.append(
                 (

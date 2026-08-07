@@ -22,10 +22,16 @@ from .fixed_k_subgraph_selector import (
     select_object_conditioned_subgraphs,
 )
 from .dynamic_subgraph_tracking import build_dynamic_trajectories
+from .exploration_medoid_selector import (
+    ExplorationObjectCandidate,
+    candidate_quality,
+    select_exploration_medoids,
+    singleton_memory,
+    stack_real_candidate_memories,
+)
 from .theory_multi_object_selector import (
     MultiObjectTemporalMemory,
     TheoryGuidedMultiObjectScorer,
-    merge_exploration_memories,
 )
 from .hard_stse_types import (
     HardSelectionSchedule,
@@ -173,6 +179,7 @@ def _cosine_history_strength(
     time_index: int,
     exploration_windows: int,
     ramp_windows: int,
+    minimum_strength: float = 0.0,
 ) -> float:
     """Smoothly turn causal history on after retrospective exploration."""
 
@@ -183,7 +190,9 @@ def _cosine_history_strength(
         float(time_index - exploration_windows + 1)
         / float(max(1, ramp_windows)),
     )
-    return 0.5 - 0.5 * math.cos(math.pi * progress)
+    cosine = 0.5 - 0.5 * math.cos(math.pi * progress)
+    minimum = min(1.0, max(0.0, float(minimum_strength)))
+    return minimum + (1.0 - minimum) * cosine
 
 
 class DualHardSGWSelector(nn.Module):
@@ -318,6 +327,7 @@ class DualHardSGWSelector(nn.Module):
         communities: torch.Tensor,
         current_node_ids: Tuple[str, ...],
         previous_memory: Optional[MultiObjectTemporalMemory],
+        anchor_memory: Optional[MultiObjectTemporalMemory],
         history_strength: float,
         alignment_confidence: Optional[torch.Tensor],
         edge_ratio: float,
@@ -326,6 +336,7 @@ class DualHardSGWSelector(nn.Module):
 
         strength = min(1.0, max(0.0, float(history_strength)))
         previous_hard = (None, None, None)
+        anchor_hard = (None, None, None)
         if previous_memory is not None and strength > 0.0:
             previous_hard = _align_hard_history(
                 previous_memory,
@@ -349,6 +360,12 @@ class DualHardSGWSelector(nn.Module):
                         torch.full_like(previous_hard[2], -1),
                     ),
                 )
+        if anchor_memory is not None:
+            anchor_hard = _align_hard_history(
+                anchor_memory,
+                current_node_ids,
+                global_node_probabilities.device,
+            )
         node_retention = self.config.critical_node_entry_threshold - strength * (
             self.config.critical_node_entry_threshold
             - self.config.critical_node_retention_threshold
@@ -383,6 +400,23 @@ class DualHardSGWSelector(nn.Module):
             ),
             history_edge_growth_bonus=(
                 self.config.critical_history_edge_growth_bonus * strength
+            ),
+            anchor_node_masks=anchor_hard[0],
+            anchor_edge_masks=anchor_hard[1],
+            anchor_continuity_bonus=(
+                self.config.selector_exploration_anchor_continuity_bonus
+                if anchor_hard[0] is not None
+                else 0.0
+            ),
+            anchor_node_growth_bonus=(
+                self.config.selector_exploration_anchor_node_growth_bonus
+                if anchor_hard[0] is not None
+                else 0.0
+            ),
+            anchor_edge_growth_bonus=(
+                self.config.selector_exploration_anchor_edge_growth_bonus
+                if anchor_hard[0] is not None
+                else 0.0
             ),
             node_entry_threshold=(
                 self.config.critical_node_entry_threshold
@@ -426,46 +460,6 @@ class DualHardSGWSelector(nn.Module):
             ),
         )
 
-    def _harden_exploration_consensus(
-        self,
-        memory: MultiObjectTemporalMemory,
-        communities: torch.Tensor,
-        edge_ratio: float,
-    ) -> MultiObjectTemporalMemory:
-        """Turn the soft multi-window consensus into K initial hard objects."""
-
-        object_nodes = memory.node_probabilities
-        object_edges = memory.edge_probabilities
-        global_nodes = 1.0 - torch.prod(1.0 - object_nodes, dim=0)
-        global_edges = 1.0 - torch.prod(1.0 - object_edges, dim=0)
-        valid = object_edges.max(dim=0).values > 0.0
-        valid = valid & valid.transpose(0, 1)
-        valid = valid.clone()
-        valid.fill_diagonal_(False)
-        selected = self._harden_object_fields(
-            global_node_probabilities=global_nodes,
-            global_edge_probabilities=global_edges,
-            object_node_probabilities=object_nodes,
-            object_edge_probabilities=object_edges,
-            edge_presence_mask=valid,
-            communities=communities,
-            current_node_ids=memory.node_ids,
-            previous_memory=None,
-            history_strength=0.0,
-            alignment_confidence=None,
-            edge_ratio=edge_ratio,
-        )
-        return replace(
-            memory,
-            hard_node_masks=torch.stack(
-                [item.hard_node_mask for item in selected.subgraphs]
-            ),
-            hard_edge_masks=torch.stack(
-                [item.hard_edge_mask for item in selected.subgraphs]
-            ),
-            seed_indices=selected.seed_indices,
-        )
-
     def forward(
         self,
         batch: ExactSTSEBatch,
@@ -494,7 +488,12 @@ class DualHardSGWSelector(nn.Module):
         exploration_window_counts: List[int] = []
         retrospective_window_count = 0
         history_strength_values: List[float] = []
-        exploration_consensus_confidences: List[torch.Tensor] = []
+        exploration_candidate_pool_sizes: List[int] = []
+        exploration_shortlist_sizes: List[int] = []
+        exploration_anchor_supports: List[float] = []
+        exploration_anchor_similarities: List[float] = []
+        exploration_cluster_similarities: List[float] = []
+        exploration_medoid_objectives: List[float] = []
         selected_positive_edge_count = 0
         selected_negative_edge_count = 0
         fast_runtime = bool(self.config.selector_fast_runtime)
@@ -503,6 +502,8 @@ class DualHardSGWSelector(nn.Module):
             previous_object_states = None
             previous_object_memory = None
             exploration_features: Dict[int, Any] = {}
+            exploration_candidates: List[ExplorationObjectCandidate] = []
+            exploration_medoid_selection = None
             exploration_windows = 0
             use_retrospective_exploration = bool(
                 selection_mode == "learned"
@@ -519,7 +520,6 @@ class DualHardSGWSelector(nn.Module):
                     self.config.selector_exploration_max_windows,
                     self.config.selector_exploration_fraction,
                 )
-                consensus = None
                 for exploration_index in range(exploration_windows):
                     exploration_adjacency = sample.adjacency[exploration_index]
                     exploration_edge_mask = sample.edge_mask[
@@ -547,52 +547,123 @@ class DualHardSGWSelector(nn.Module):
                         exploration_node_ids,
                         exploration_coordinates,
                     )
-                    observation = self.scorer(
+                    observation_scores = self.scorer(
                         exploration_feature.node_features,
                         exploration_feature.edge_base_features,
                         exploration_feature.edge_presence_mask,
                         exploration_adjacency,
                         spectral_features=exploration_spectrum,
-                        previous_memory=consensus,
+                        previous_memory=None,
                         current_node_ids=exploration_node_ids,
                         current_coordinates=exploration_coordinates,
                         history_strength=0.0,
-                    ).next_memory
-                    if consensus is None:
-                        consensus = replace(
-                            observation,
-                            # The first window has no alignment observation;
-                            # it must not dilute later confidence estimates.
-                            alignment_confidence=None,
-                            consensus_weight=1.0,
-                            consensus_object_weights=(
-                                observation.object_states.new_full(
-                                    (self.config.critical_subgraph_count,),
-                                    1.0
-                                    / float(self.config.critical_subgraph_count),
-                                )
-                            ),
-                        )
-                    else:
-                        consensus = merge_exploration_memories(
-                            consensus,
-                            observation,
-                            exploration_adjacency,
-                            exploration_edge_mask,
-                        )
-                reference_index = exploration_windows - 1
-                consensus = self._harden_exploration_consensus(
-                    consensus,
-                    sample.communities[reference_index].to(
-                        sample.adjacency[reference_index].device
-                    ),
-                    self.config.target_edge_ratio,
-                )
-                previous_object_memory = consensus
-                if consensus.alignment_confidence is not None:
-                    exploration_consensus_confidences.append(
-                        consensus.alignment_confidence
                     )
+                    observation = observation_scores.next_memory
+                    candidate_hardening = self._harden_object_fields(
+                        global_node_probabilities=(
+                            observation_scores.node_probabilities
+                        ),
+                        global_edge_probabilities=(
+                            observation_scores.edge_probabilities
+                        ),
+                        object_node_probabilities=(
+                            observation_scores.object_node_probabilities
+                        ),
+                        object_edge_probabilities=(
+                            observation_scores.object_edge_probabilities
+                        ),
+                        edge_presence_mask=exploration_edge_mask,
+                        communities=sample.communities[exploration_index].to(
+                            exploration_adjacency.device
+                        ),
+                        current_node_ids=exploration_node_ids,
+                        previous_memory=None,
+                        anchor_memory=None,
+                        history_strength=0.0,
+                        alignment_confidence=None,
+                        edge_ratio=self.config.target_edge_ratio,
+                    )
+                    for object_index, hard_object in enumerate(
+                        candidate_hardening.subgraphs
+                    ):
+                        memory = singleton_memory(
+                            observation,
+                            object_index,
+                            hard_object.hard_node_mask,
+                            hard_object.hard_edge_mask,
+                            candidate_hardening.seed_indices[object_index],
+                        )
+                        exploration_candidates.append(
+                            ExplorationObjectCandidate(
+                                window_index=exploration_index,
+                                object_index=object_index,
+                                quality=candidate_quality(memory),
+                                memory=memory,
+                            )
+                        )
+                exploration_medoid_selection = select_exploration_medoids(
+                    exploration_candidates,
+                    self.config.critical_subgraph_count,
+                    similarity_threshold=(
+                        self.config.selector_exploration_candidate_similarity_threshold
+                    ),
+                    shortlist_multiplier=(
+                        self.config.selector_exploration_shortlist_multiplier
+                    ),
+                    coverage_weight=(
+                        self.config.selector_exploration_coverage_weight
+                    ),
+                    support_weight=(
+                        self.config.selector_exploration_support_weight
+                    ),
+                    quality_weight=(
+                        self.config.selector_exploration_quality_weight
+                    ),
+                    diversity_weight=(
+                        self.config.selector_exploration_diversity_weight
+                    ),
+                    similarity_weights={
+                        "node": self.config.selector_alignment_node_weight,
+                        "signed_edge": (
+                            self.config.selector_alignment_signed_edge_weight
+                        ),
+                        "latent": self.config.selector_alignment_latent_weight,
+                        "coordinate": (
+                            self.config.selector_alignment_coordinate_weight
+                        ),
+                        "spectral": (
+                            self.config.selector_alignment_spectral_weight
+                        ),
+                    },
+                )
+                reference_index = exploration_windows - 1
+                reference_adjacency = sample.adjacency[reference_index]
+                previous_object_memory = stack_real_candidate_memories(
+                    exploration_candidates,
+                    exploration_medoid_selection.recent_indices,
+                    sample.node_names[reference_index],
+                    reference_adjacency,
+                    sample.edge_mask[reference_index],
+                )
+                exploration_candidate_pool_sizes.append(
+                    len(exploration_candidates)
+                )
+                exploration_shortlist_sizes.append(
+                    len(exploration_medoid_selection.shortlist_indices)
+                )
+                exploration_anchor_supports.extend(
+                    value / float(max(1, exploration_windows))
+                    for value in exploration_medoid_selection.support_window_counts
+                )
+                exploration_anchor_similarities.append(
+                    exploration_medoid_selection.mean_anchor_similarity
+                )
+                exploration_cluster_similarities.append(
+                    exploration_medoid_selection.mean_cluster_similarity
+                )
+                exploration_medoid_objectives.append(
+                    exploration_medoid_selection.objective
+                )
                 retrospective_window_count += exploration_windows
             exploration_window_counts.append(exploration_windows)
             windows = []
@@ -613,6 +684,7 @@ class DualHardSGWSelector(nn.Module):
                             time_index,
                             exploration_windows,
                             self.config.selector_exploration_history_ramp_windows,
+                            self.config.selector_exploration_retrospective_strength,
                         )
                 else:
                     history_strength = 1.0
@@ -649,6 +721,26 @@ class DualHardSGWSelector(nn.Module):
                                 adjacency.device
                             )
                         )
+                        current_anchor_memory = None
+                        if use_retrospective_exploration:
+                            current_anchor_memory = stack_real_candidate_memories(
+                                exploration_candidates,
+                                exploration_medoid_selection.anchor_indices,
+                                current_node_ids,
+                                adjacency,
+                                current_edge_mask,
+                            )
+                        scorer_previous_memory = previous_object_memory
+                        scorer_history_strength = history_strength
+                        if (
+                            use_retrospective_exploration
+                            and time_index < exploration_windows
+                        ):
+                            # The real medoids establish object identity, but
+                            # their node/edge fields are never averaged into
+                            # the current soft graph.
+                            scorer_previous_memory = current_anchor_memory
+                            scorer_history_strength = 0.0
                         scores = self.scorer(
                             features.node_features,
                             features.edge_base_features,
@@ -674,7 +766,7 @@ class DualHardSGWSelector(nn.Module):
                                 )
                             ),
                             previous_memory=(
-                                previous_object_memory
+                                scorer_previous_memory
                                 if (
                                     self.config.selector_structural_temporal_memory
                                     and not diagnostic_independent_windows
@@ -691,7 +783,7 @@ class DualHardSGWSelector(nn.Module):
                                 if self.config.selector_structural_temporal_memory
                                 else None
                             ),
-                            history_strength=history_strength,
+                            history_strength=scorer_history_strength,
                         )
                         if (
                             not self.config.selector_structural_temporal_memory
@@ -758,10 +850,29 @@ class DualHardSGWSelector(nn.Module):
                             previous_memory=(
                                 None
                                 if diagnostic_independent_windows
-                                else previous_object_memory
+                                else (
+                                    current_anchor_memory
+                                    if (
+                                        use_retrospective_exploration
+                                        and time_index < exploration_windows
+                                    )
+                                    else previous_object_memory
+                                )
+                            ),
+                            anchor_memory=(
+                                current_anchor_memory
+                                if (
+                                    use_retrospective_exploration
+                                    and time_index >= exploration_windows
+                                )
+                                else None
                             ),
                             history_strength=history_strength,
-                            alignment_confidence=scores.alignment_confidence,
+                            alignment_confidence=(
+                                None
+                                if use_retrospective_exploration
+                                else scores.alignment_confidence
+                            ),
                             edge_ratio=edge_ratio,
                         )
                         if (
@@ -977,16 +1088,45 @@ class DualHardSGWSelector(nn.Module):
                 and self.config.selector_structural_temporal_memory
                 and self.config.selector_exploration_consensus_enabled
             ),
+            "exploration_initializer": "real_candidate_medoid",
+            "uses_real_candidate_medoid_initializer": (
+                self.config.selector_architecture == "theory_multi_object"
+                and self.config.selector_structural_temporal_memory
+                and self.config.selector_exploration_consensus_enabled
+            ),
             "exploration_window_count": tuple(exploration_window_counts),
             "retrospectively_refined_window_count": retrospective_window_count,
             "mean_history_strength": (
                 sum(history_strength_values)
                 / float(max(1, len(history_strength_values)))
             ),
+            # Compatibility field: soft cross-window averaging is retired.
             "mean_exploration_consensus_confidence": (
-                torch.cat(exploration_consensus_confidences).mean()
-                if exploration_consensus_confidences
-                else node_probabilities.new_zeros(())
+                node_probabilities.new_zeros(())
+            ),
+            "mean_exploration_candidate_pool_size": (
+                sum(exploration_candidate_pool_sizes)
+                / float(max(1, len(exploration_candidate_pool_sizes)))
+            ),
+            "mean_exploration_shortlist_size": (
+                sum(exploration_shortlist_sizes)
+                / float(max(1, len(exploration_shortlist_sizes)))
+            ),
+            "mean_exploration_anchor_support": (
+                sum(exploration_anchor_supports)
+                / float(max(1, len(exploration_anchor_supports)))
+            ),
+            "mean_exploration_anchor_similarity": (
+                sum(exploration_anchor_similarities)
+                / float(max(1, len(exploration_anchor_similarities)))
+            ),
+            "mean_exploration_cluster_similarity": (
+                sum(exploration_cluster_similarities)
+                / float(max(1, len(exploration_cluster_similarities)))
+            ),
+            "mean_exploration_medoid_objective": (
+                sum(exploration_medoid_objectives)
+                / float(max(1, len(exploration_medoid_objectives)))
             ),
             "selection_mode": selection_mode,
             "diagnostic_independent_windows": bool(

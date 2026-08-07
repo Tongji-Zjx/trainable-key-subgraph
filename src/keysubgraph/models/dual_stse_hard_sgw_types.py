@@ -52,7 +52,16 @@ class DualSTSEHardSGWConfig:
     selector_exploration_max_windows: int = 5
     selector_exploration_history_ramp_windows: int = 4
     selector_exploration_retrospective_strength: float = 0.30
-    selector_confidence_gated_history: bool = True
+    selector_exploration_candidate_similarity_threshold: float = 0.45
+    selector_exploration_shortlist_multiplier: int = 3
+    selector_exploration_coverage_weight: float = 0.45
+    selector_exploration_support_weight: float = 0.25
+    selector_exploration_quality_weight: float = 0.15
+    selector_exploration_diversity_weight: float = 0.15
+    selector_exploration_anchor_continuity_bonus: float = 0.10
+    selector_exploration_anchor_node_growth_bonus: float = 0.05
+    selector_exploration_anchor_edge_growth_bonus: float = 0.05
+    selector_confidence_gated_history: bool = False
     target_node_ratio: float = 0.50
     target_edge_ratio: float = 0.30
     node_minimum: int = 2
@@ -107,6 +116,7 @@ class DualSTSEHardSGWConfig:
             self.selector_exploration_min_windows,
             self.selector_exploration_max_windows,
             self.selector_exploration_history_ramp_windows,
+            self.selector_exploration_shortlist_multiplier,
             self.node_minimum,
             self.edge_minimum,
             self.critical_subgraph_count,
@@ -181,6 +191,31 @@ class DualSTSEHardSGWConfig:
             raise ValueError(
                 "selector retrospective consensus strength must lie in [0,1]"
             )
+        if not (
+            0.0
+            <= self.selector_exploration_candidate_similarity_threshold
+            <= 1.0
+        ):
+            raise ValueError(
+                "selector candidate similarity threshold must lie in [0,1]"
+            )
+        medoid_weights = (
+            self.selector_exploration_coverage_weight,
+            self.selector_exploration_support_weight,
+            self.selector_exploration_quality_weight,
+            self.selector_exploration_diversity_weight,
+        )
+        if any(value < 0.0 for value in medoid_weights) or sum(
+            medoid_weights
+        ) <= 0.0:
+            raise ValueError("selector exploration medoid weights are invalid")
+        anchor_controls = (
+            self.selector_exploration_anchor_continuity_bonus,
+            self.selector_exploration_anchor_node_growth_bonus,
+            self.selector_exploration_anchor_edge_growth_bonus,
+        )
+        if any(value < 0.0 for value in anchor_controls):
+            raise ValueError("selector exploration anchor controls are invalid")
         if (
             self.selector_architecture == "theory_multi_object"
             and self.critical_subgraph_count < 2

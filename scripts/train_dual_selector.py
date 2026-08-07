@@ -85,6 +85,14 @@ def parse_args():
         help="load each immutable graph sequence once before training",
     )
     parser.add_argument(
+        "--use-tracking-coordinates",
+        action="store_true",
+        help=(
+            "load coordinates for cross-window candidate correspondence; "
+            "coordinates are not added to selector scoring features"
+        ),
+    )
+    parser.add_argument(
         "--fast-runtime",
         action="store_true",
         help="skip synchronization-heavy selector logging only",
@@ -133,7 +141,10 @@ def parse_args():
     parser.add_argument(
         "--disable-exploration-consensus",
         action="store_true",
-        help="disable two-pass exploration consensus and retrospective hardening",
+        help=(
+            "disable real-candidate exploration medoids and retrospective "
+            "hardening (legacy option name retained for checkpoint scripts)"
+        ),
     )
     parser.add_argument("--exploration-fraction", type=float, default=0.12)
     parser.add_argument("--exploration-min-windows", type=int, default=3)
@@ -143,9 +154,52 @@ def parse_args():
         "--exploration-retrospective-strength", type=float, default=0.30
     )
     parser.add_argument(
+        "--exploration-candidate-similarity-threshold",
+        type=float,
+        default=0.45,
+    )
+    parser.add_argument(
+        "--exploration-shortlist-multiplier", type=int, default=3
+    )
+    parser.add_argument(
+        "--exploration-coverage-weight", type=float, default=0.45
+    )
+    parser.add_argument(
+        "--exploration-support-weight", type=float, default=0.25
+    )
+    parser.add_argument(
+        "--exploration-quality-weight", type=float, default=0.15
+    )
+    parser.add_argument(
+        "--exploration-diversity-weight", type=float, default=0.15
+    )
+    parser.add_argument(
+        "--exploration-anchor-continuity-bonus",
+        type=float,
+        default=0.10,
+    )
+    parser.add_argument(
+        "--exploration-anchor-node-growth-bonus",
+        type=float,
+        default=0.05,
+    )
+    parser.add_argument(
+        "--exploration-anchor-edge-growth-bonus",
+        type=float,
+        default=0.05,
+    )
+    parser.add_argument(
+        "--enable-confidence-gated-history",
+        action="store_true",
+        help=(
+            "experimental legacy behavior; disabled by default because it "
+            "suppresses useful history when alignments are uncertain"
+        ),
+    )
+    parser.add_argument(
         "--disable-confidence-gated-history",
         action="store_true",
-        help="do not attenuate history when slot alignment is ambiguous",
+        help="deprecated compatibility flag; confidence gating is now off",
     )
     parser.add_argument(
         "--history-continuity-bonus", type=float, default=0.25
@@ -233,14 +287,14 @@ def main():
         *common,
         "train",
         protocol["edge_presence_threshold"],
-        require_coordinates=False,
+        require_coordinates=args.use_tracking_coordinates,
         node_name_policy=node_name_policy,
     )
     validation_dataset = ExactSTSEDataset(
         *common,
         "validation",
         protocol["edge_presence_threshold"],
-        require_coordinates=False,
+        require_coordinates=args.use_tracking_coordinates,
         node_name_policy=node_name_policy,
     )
     if args.cache_dataset_memory:
@@ -317,8 +371,36 @@ def main():
         selector_exploration_retrospective_strength=(
             args.exploration_retrospective_strength
         ),
+        selector_exploration_candidate_similarity_threshold=(
+            args.exploration_candidate_similarity_threshold
+        ),
+        selector_exploration_shortlist_multiplier=(
+            args.exploration_shortlist_multiplier
+        ),
+        selector_exploration_coverage_weight=(
+            args.exploration_coverage_weight
+        ),
+        selector_exploration_support_weight=(
+            args.exploration_support_weight
+        ),
+        selector_exploration_quality_weight=(
+            args.exploration_quality_weight
+        ),
+        selector_exploration_diversity_weight=(
+            args.exploration_diversity_weight
+        ),
+        selector_exploration_anchor_continuity_bonus=(
+            args.exploration_anchor_continuity_bonus
+        ),
+        selector_exploration_anchor_node_growth_bonus=(
+            args.exploration_anchor_node_growth_bonus
+        ),
+        selector_exploration_anchor_edge_growth_bonus=(
+            args.exploration_anchor_edge_growth_bonus
+        ),
         selector_confidence_gated_history=(
-            not args.disable_confidence_gated_history
+            args.enable_confidence_gated_history
+            and not args.disable_confidence_gated_history
         ),
         critical_node_ratio_per_object=args.object_node_ratio,
         critical_history_continuity_bonus=(
@@ -430,6 +512,7 @@ def main():
             "structural_temporal_memory": (
                 args.structural_temporal_memory
             ),
+            "uses_tracking_coordinates": args.use_tracking_coordinates,
             "memory_diffusion": args.memory_diffusion,
             "sinkhorn_temperature": args.sinkhorn_temperature,
             "sinkhorn_iterations": args.sinkhorn_iterations,
@@ -442,6 +525,7 @@ def main():
             },
             "exploration_consensus": {
                 "enabled": not args.disable_exploration_consensus,
+                "initializer": "real_candidate_medoid",
                 "fraction": args.exploration_fraction,
                 "minimum_windows": args.exploration_min_windows,
                 "maximum_windows": args.exploration_max_windows,
@@ -449,8 +533,32 @@ def main():
                 "retrospective_strength": (
                     args.exploration_retrospective_strength
                 ),
+                "candidate_similarity_threshold": (
+                    args.exploration_candidate_similarity_threshold
+                ),
+                "shortlist_multiplier": (
+                    args.exploration_shortlist_multiplier
+                ),
+                "medoid_weights": {
+                    "coverage": args.exploration_coverage_weight,
+                    "support": args.exploration_support_weight,
+                    "quality": args.exploration_quality_weight,
+                    "diversity": args.exploration_diversity_weight,
+                },
+                "anchor_controls": {
+                    "continuity": (
+                        args.exploration_anchor_continuity_bonus
+                    ),
+                    "node_growth": (
+                        args.exploration_anchor_node_growth_bonus
+                    ),
+                    "edge_growth": (
+                        args.exploration_anchor_edge_growth_bonus
+                    ),
+                },
                 "confidence_gated_history": (
-                    not args.disable_confidence_gated_history
+                    args.enable_confidence_gated_history
+                    and not args.disable_confidence_gated_history
                 ),
             },
             "history_continuity_bonus": args.history_continuity_bonus,
