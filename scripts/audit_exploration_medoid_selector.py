@@ -7,12 +7,14 @@ import csv
 import json
 import math
 import os
+import random
 import statistics
 import sys
 from itertools import combinations
 from pathlib import Path
 
 import torch
+from torch.utils.data import Subset
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -115,7 +117,8 @@ def _aggregate(rows):
             key
             for row in rows
             for key, value in row.items()
-            if isinstance(value, (int, float)) and key not in ("window",)
+            if isinstance(value, (int, float))
+            and key not in ("window", "label")
         }
     )
     return {key: _summary([row[key] for row in rows if key in row]) for key in keys}
@@ -150,6 +153,36 @@ def _metric(diagnostics, name):
     return _scalar(value)
 
 
+def _stratified_indices(assignments, limit, seed):
+    """Select a deterministic site-by-label audit panel, not a site prefix."""
+
+    groups = {}
+    for index, assignment in enumerate(assignments):
+        groups.setdefault((str(assignment.site), int(assignment.label)), []).append(
+            index
+        )
+    generator = random.Random(int(seed))
+    for key in sorted(groups):
+        generator.shuffle(groups[key])
+    selected = []
+    offsets = {key: 0 for key in groups}
+    keys = sorted(groups)
+    while len(selected) < min(int(limit), len(assignments)):
+        progressed = False
+        for key in keys:
+            offset = offsets[key]
+            if offset >= len(groups[key]):
+                continue
+            selected.append(groups[key][offset])
+            offsets[key] = offset + 1
+            progressed = True
+            if len(selected) >= min(int(limit), len(assignments)):
+                break
+        if not progressed:
+            break
+    return tuple(selected)
+
+
 def _audit_sample(model, batch, split, config):
     output = model.selector(
         batch,
@@ -157,6 +190,7 @@ def _audit_sample(model, batch, split, config):
         track_subgraphs=False,
     )
     sample_key = batch.sample_keys[0]
+    source_sample = batch[0]
     windows = []
     unions = []
     within_rows = []
@@ -227,6 +261,8 @@ def _audit_sample(model, batch, split, config):
     sample_row = {
         "split": split,
         "sample_key": sample_key,
+        "site": str(source_sample.graph.site),
+        "label": int(source_sample.label),
         "window_count": len(windows),
         "exploration_window_count": exploration_windows,
         "candidate_pool_size": _metric(
@@ -395,8 +431,14 @@ def main():
                 require_coordinates=True,
                 node_name_policy=protocol_node_name_policy(protocol),
             )
+            selected_indices = _stratified_indices(
+                dataset.assignments,
+                limit,
+                args.seed + (0 if split == "train" else 1000),
+            )
+            audit_dataset = Subset(dataset, selected_indices)
             loader = create_exact_stse_loader(
-                dataset,
+                audit_dataset,
                 1,
                 seed=args.seed,
                 num_workers=args.num_workers,
@@ -404,8 +446,6 @@ def main():
                 pin_memory=device.type == "cuda",
             )
             for index, batch in enumerate(loader):
-                if index >= limit:
-                    break
                 sample, local_within, local_transitions = _audit_sample(
                     model, batch.to(device), split, config
                 )
@@ -414,7 +454,10 @@ def main():
                 transition_rows.extend(local_transitions)
                 print(
                     "audited {} {}/{} {}".format(
-                        split, index + 1, min(limit, len(dataset)), batch.sample_keys[0]
+                        split,
+                        index + 1,
+                        len(selected_indices),
+                        batch.sample_keys[0],
                     ),
                     flush=True,
                 )
@@ -428,6 +471,25 @@ def main():
         "checkpoint_epoch": int(payload.get("epoch", -1)),
         "best_validation_roc_auc": payload.get("best_validation_roc_auc"),
         "sample_count": len(sample_rows),
+        "audit_panel": {
+            split: {
+                "sites": sorted(
+                    {
+                        row["site"]
+                        for row in sample_rows
+                        if row["split"] == split
+                    }
+                ),
+                "class_counts": {
+                    str(label): sum(
+                        row["split"] == split and row["label"] == label
+                        for row in sample_rows
+                    )
+                    for label in (0, 1)
+                },
+            }
+            for split in split_limits
+        },
         "test_used": False,
         "config": {
             "critical_subgraph_count": config.critical_subgraph_count,

@@ -1,6 +1,7 @@
 from __future__ import absolute_import, division, print_function
 
 import unittest
+from types import SimpleNamespace
 
 import torch
 
@@ -16,6 +17,7 @@ from keysubgraph.models.fixed_k_subgraph_selector import (
 from keysubgraph.models.theory_multi_object_selector import (
     MultiObjectTemporalMemory,
 )
+from scripts.audit_exploration_medoid_selector import _stratified_indices
 
 
 def _candidate(window_index, cluster_index, sign=1.0):
@@ -66,6 +68,21 @@ def _candidate(window_index, cluster_index, sign=1.0):
 
 
 class ExplorationMedoidSelectorTest(unittest.TestCase):
+    def test_formal_audit_panel_is_site_and_label_stratified(self):
+        assignments = tuple(
+            SimpleNamespace(site=site, label=label)
+            for site in ("A", "B", "C")
+            for label in (0, 1)
+            for _ in range(3)
+        )
+        indices = _stratified_indices(assignments, limit=6, seed=43)
+        strata = {
+            (assignments[index].site, assignments[index].label)
+            for index in indices
+        }
+        self.assertEqual(len(indices), 6)
+        self.assertEqual(len(strata), 6)
+
     def test_selects_diverse_cross_window_real_medoids(self):
         candidates = [
             _candidate(window, cluster)
