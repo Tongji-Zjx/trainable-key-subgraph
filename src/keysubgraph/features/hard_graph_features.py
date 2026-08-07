@@ -19,6 +19,7 @@ class HardGraphWindow:
     edge_presence_threshold: float
     node_ids: Optional[Tuple[str, ...]] = None
     window_valid: bool = True
+    coordinates: Optional[torch.Tensor] = None
 
     @property
     def num_nodes(self) -> int:
@@ -150,4 +151,3 @@ class HardGraphFeatureBuilder:
             previous_window = window
             previous_adjacency = adjacency
         return tuple(results)
-

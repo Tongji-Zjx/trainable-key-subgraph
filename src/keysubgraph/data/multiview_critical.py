@@ -153,6 +153,72 @@ def validate_multiview_record(record):
             or transition.delta_time <= 0.0
         ):
             raise ValueError("multi-view transition schema mismatch")
+    trajectory_set = getattr(sample, "trajectory_set", None)
+    if trajectory_set is not None:
+        k = int(trajectory_set.active_subgraphs_per_valid_window)
+        if k < 1 or len(trajectory_set.assignments) != count:
+            raise ValueError("multi-view trajectory assignment schema mismatch")
+        observation_count = 0
+        for index, assignment in enumerate(trajectory_set.assignments):
+            if assignment.window_index != index or any(
+                tuple(value.shape) != (k,)
+                for value in (
+                    assignment.track_ids,
+                    assignment.birth_mask,
+                    assignment.continuation_from,
+                    assignment.match_confidence,
+                )
+            ):
+                raise ValueError("multi-view trajectory slot schema mismatch")
+            expected = (
+                len(sample.hard_windows[index].objects)
+                if sample.hard_windows[index] is not None
+                else 0
+            )
+            active = assignment.track_ids[:expected]
+            if (
+                expected != (k if bool(sample.window_mask[index]) else 0)
+                or bool((active < 0).any())
+                or len(set(int(value) for value in active.tolist())) != expected
+                or bool((assignment.track_ids[expected:] >= 0).any())
+            ):
+                raise ValueError("multi-view active trajectory slots are invalid")
+            observation_count += expected
+        trajectory_observations = 0
+        track_ids = set()
+        for trajectory in trajectory_set.trajectories:
+            if (
+                trajectory.track_id in track_ids
+                or not trajectory.window_indices
+                or len(trajectory.window_indices) != len(trajectory.object_indices)
+                or any(
+                    right != left + 1
+                    for left, right in zip(
+                        trajectory.window_indices[:-1],
+                        trajectory.window_indices[1:],
+                    )
+                )
+            ):
+                raise ValueError("multi-view trajectory continuity is invalid")
+            track_ids.add(int(trajectory.track_id))
+            for window_index, object_index in zip(
+                trajectory.window_indices, trajectory.object_indices
+            ):
+                if (
+                    window_index < 0
+                    or window_index >= count
+                    or object_index < 0
+                    or object_index >= k
+                    or int(
+                        trajectory_set.assignments[window_index]
+                        .track_ids[object_index]
+                    )
+                    != int(trajectory.track_id)
+                ):
+                    raise ValueError("multi-view trajectory reference is invalid")
+            trajectory_observations += len(trajectory.window_indices)
+        if trajectory_observations != observation_count:
+            raise ValueError("multi-view trajectory observations are incomplete")
     if any(
         not str(value)
         for value in (
@@ -403,6 +469,9 @@ def _standardize_object(item, scaler):
         _standardize(item.edge_features, scaler.edge_mean, scaler.edge_scale),
         item.communities.clone(),
         item.union_node_indices.clone(), float(item.mass),
+        tuple(item.roi_ids),
+        item.coordinates.clone() if item.coordinates is not None else None,
+        item.coordinate_mask.clone() if item.coordinate_mask is not None else None,
     )
 
 
@@ -445,6 +514,7 @@ def standardize_multiview_sample(sample, scaler):
         tuple(_standardize_window(item, scaler, use_q=False) if item is not None else None for item in sample.full_windows),
         tuple(transitions), sample.window_mask.clone(), sample.transition_mask.clone(),
         legacy_variation,
+        getattr(sample, "trajectory_set", None),
     )
 
 

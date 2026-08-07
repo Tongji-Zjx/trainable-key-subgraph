@@ -9,7 +9,7 @@ loop.
 from __future__ import absolute_import, division, print_function
 
 from dataclasses import dataclass
-from typing import Optional, Sequence, Tuple
+from typing import Any, Optional, Sequence, Tuple
 
 import torch
 
@@ -22,6 +22,10 @@ from keysubgraph.features.sv_hard_graph_features import (
 )
 from keysubgraph.features.theory_neural_features import TheoryNeuralFeatureBuilder
 from keysubgraph.theory.sgw_core_features import SGWCoreConfig
+from keysubgraph.models.dynamic_subgraph_tracking import (
+    DynamicTrackingConfig,
+    build_dynamic_trajectories_from_costs,
+)
 
 
 MULTIVIEW_SPECTRAL_FEATURE_DIM = 9
@@ -39,6 +43,9 @@ class CriticalObjectFeatures:
     communities: torch.Tensor
     union_node_indices: torch.Tensor
     mass: float
+    roi_ids: Tuple[str, ...] = ()
+    coordinates: Optional[torch.Tensor] = None
+    coordinate_mask: Optional[torch.Tensor] = None
 
     def to(self, device):
         return CriticalObjectFeatures(
@@ -49,6 +56,9 @@ class CriticalObjectFeatures:
             self.communities.to(device),
             self.union_node_indices.to(device),
             float(self.mass),
+            self.roi_ids,
+            self.coordinates.to(device) if self.coordinates is not None else None,
+            self.coordinate_mask.to(device) if self.coordinate_mask is not None else None,
         )
 
 
@@ -114,6 +124,7 @@ class MultiViewCriticalSampleFeatures:
     # It is deliberately absent from the expensive immutable record schema so
     # the Stage-2 legacy-Variation control does not require cache regeneration.
     legacy_variation: Optional[torch.Tensor] = None
+    trajectory_set: Optional[Any] = None
 
     def to(self, device):
         return MultiViewCriticalSampleFeatures(
@@ -126,6 +137,7 @@ class MultiViewCriticalSampleFeatures:
             self.window_mask.to(device),
             self.transition_mask.to(device),
             self.legacy_variation.to(device) if self.legacy_variation is not None else None,
+            getattr(self, "trajectory_set", None),
         )
 
 
@@ -342,6 +354,7 @@ class MultiViewCriticalFeatureBuilder(object):
         uot_entropic_reg=0.1,
         uot_mass_reg=1.0,
         uot_iterations=100,
+        tracking_config=None,
     ):
         self.core_config = core_config or SGWCoreConfig()
         self.theory = TheoryNeuralFeatureBuilder(self.core_config)
@@ -355,23 +368,111 @@ class MultiViewCriticalFeatureBuilder(object):
         self.uot_entropic_reg = float(uot_entropic_reg)
         self.uot_mass_reg = float(uot_mass_reg)
         self.uot_iterations = int(uot_iterations)
+        self.tracking_config = tracking_config or DynamicTrackingConfig()
 
     @staticmethod
     def _graphs(cache):
         return tuple(item.graph if item is not None else None for item in cache.windows)
 
-    def _window(self, source, node_window, theory_window):
+    def _selected_objects(
+        self,
+        source,
+        node_window,
+        theory_window,
+        selected_graphs,
+    ):
+        """Use selector-provided fixed-K objects without decomposing the union."""
+
+        union_ids = tuple(
+            str(value)
+            for value in (
+                source.node_ids
+                if source.node_ids is not None
+                else source.node_names
+            )
+        )
+        union_local = {value: index for index, value in enumerate(union_ids)}
+        objects = []
+        for graph in selected_graphs:
+            if graph is None or not graph.window_valid:
+                continue
+            object_ids = tuple(
+                str(value)
+                for value in (
+                    graph.node_ids
+                    if graph.node_ids is not None
+                    else graph.node_names
+                )
+            )
+            if any(value not in union_local for value in object_ids):
+                raise ValueError("fixed-K object is absent from its hard union")
+            indices = torch.tensor(
+                [union_local[value] for value in object_ids],
+                dtype=torch.long,
+                device=node_window.adjacency.device,
+            )
+            edge_features = theory_window.edge_features.index_select(
+                0, indices
+            ).index_select(1, indices).clone()
+            edge_features[:, :, 0] = graph.adjacency
+            edge_features[:, :, 1] = graph.adjacency.abs()
+            spectral = self.spectral(
+                graph.adjacency, graph.edge_presence_threshold
+            )
+            coordinates = graph.coordinates
+            if coordinates is None:
+                coordinates = graph.adjacency.new_zeros(
+                    (graph.adjacency.shape[0], 3)
+                )
+            coordinate_mask = torch.isfinite(coordinates).all(dim=-1) & (
+                coordinates.abs().sum(dim=-1) > 0.0
+            )
+            objects.append(
+                CriticalObjectFeatures(
+                    node_features=node_window.node_features.index_select(0, indices),
+                    spectral_features=spectral,
+                    adjacency=graph.adjacency,
+                    edge_features=edge_features,
+                    communities=graph.communities,
+                    union_node_indices=indices,
+                    mass=float(indices.numel()) / float(max(1, len(union_ids))),
+                    roi_ids=tuple(str(value) for value in graph.node_names),
+                    coordinates=coordinates,
+                    coordinate_mask=coordinate_mask,
+                )
+            )
+        if not objects:
+            raise ValueError("fixed-K window contains no valid objects")
+        coupling = node_window.adjacency.new_zeros((len(objects), len(objects), 2))
+        for left, first in enumerate(objects):
+            for right, second in enumerate(objects):
+                if left == right:
+                    continue
+                values = node_window.adjacency.index_select(
+                    0, first.union_node_indices
+                ).index_select(1, second.union_node_indices)
+                possible = float(max(1, values.numel()))
+                coupling[left, right, 0] = values.clamp_min(0.0).sum() / possible
+                coupling[left, right, 1] = (-values.clamp_max(0.0)).sum() / possible
+        return tuple(objects), coupling
+
+    def _window(self, source, node_window, theory_window, selected_graphs=None):
         spectral = self.spectral(
             node_window.adjacency, source.edge_presence_threshold
         )
-        objects, coupling = decompose_critical_objects(
-            node_window.node_features,
-            spectral,
-            node_window.adjacency,
-            theory_window.edge_features,
-            node_window.communities,
-            source.edge_presence_threshold,
-        )
+        if selected_graphs is None:
+            objects, coupling = decompose_critical_objects(
+                node_window.node_features,
+                spectral,
+                node_window.adjacency,
+                theory_window.edge_features,
+                node_window.communities,
+                source.edge_presence_threshold,
+            )
+        else:
+            objects, coupling = self._selected_objects(
+                source, node_window, theory_window, selected_graphs
+            )
         return CriticalWindowFeatures(
             node_features=node_window.node_features,
             spectral_features=spectral,
@@ -434,6 +535,47 @@ class MultiViewCriticalFeatureBuilder(object):
         second_normalized = (second_attributes - mean) / scale
         feature_cost = torch.cdist(first_normalized, second_normalized).square()
         feature_cost = feature_cost / float(max(1, first_normalized.shape[1]))
+        terms = [feature_cost]
+        if (
+            len(first.roi_ids) == first.adjacency.shape[0]
+            and len(second.roi_ids) == second.adjacency.shape[0]
+        ):
+            roi_cost = feature_cost.new_tensor(
+                [
+                    [0.0 if str(left) == str(right) else 1.0 for right in second.roi_ids]
+                    for left in first.roi_ids
+                ]
+            )
+            terms.append(roi_cost)
+        if (
+            first.coordinates is not None
+            and second.coordinates is not None
+            and first.coordinate_mask is not None
+            and second.coordinate_mask is not None
+        ):
+            first_coordinates = first.coordinates.to(feature_cost)
+            second_coordinates = second.coordinates.to(feature_cost)
+            coordinate_cost = torch.cdist(
+                first_coordinates, second_coordinates
+            ).square()
+            valid = first.coordinate_mask.to(feature_cost.device)[:, None] & (
+                second.coordinate_mask.to(feature_cost.device)[None, :]
+            )
+            positive = coordinate_cost[valid]
+            scale = (
+                positive.median().clamp_min(float(epsilon))
+                if positive.numel()
+                else coordinate_cost.new_ones(())
+            )
+            coordinate_cost = torch.where(
+                valid,
+                (coordinate_cost / scale).clamp_max(4.0),
+                torch.zeros_like(coordinate_cost),
+            )
+            # Missing coordinates contribute neither evidence nor a penalty.
+            if bool(valid.any()):
+                terms.append(coordinate_cost)
+        feature_cost = sum(terms) / float(len(terms))
         if not bool(torch.isfinite(feature_cost).all()):
             raise RuntimeError("object attribute cost is not finite")
         return feature_cost
@@ -441,7 +583,9 @@ class MultiViewCriticalFeatureBuilder(object):
     def _transition(self, index, left, right, target, threshold):
         left_states = tuple(self._object_state(item, threshold) for item in left.objects)
         right_states = tuple(self._object_state(item, threshold) for item in right.objects)
-        cost = left.adjacency.new_zeros((len(left_states), len(right_states)))
+        structural_cost = left.adjacency.new_zeros((len(left_states), len(right_states)))
+        roi_cost = structural_cost.clone()
+        coordinate_cost = structural_cost.clone()
         converged = True
         with torch.no_grad():
             for row, first in enumerate(left_states):
@@ -462,8 +606,57 @@ class MultiViewCriticalFeatureBuilder(object):
                     # retains global spectral differences that node coupling
                     # alone cannot express.
                     spectral = (first.spectral_quantiles - second.spectral_quantiles).abs().mean()
-                    cost[row, column] = gw.distance + self.fgw_feature_weight * spectral
+                    structural_cost[row, column] = (
+                        gw.distance + self.fgw_feature_weight * spectral
+                    )
+                    first_roi = set(str(value) for value in left.objects[row].roi_ids)
+                    second_roi = set(str(value) for value in right.objects[column].roi_ids)
+                    union_roi = first_roi | second_roi
+                    roi_cost[row, column] = 1.0 - float(
+                        len(first_roi & second_roi)
+                    ) / float(max(1, len(union_roi)))
+                    first_object = left.objects[row]
+                    second_object = right.objects[column]
+                    first_valid = (
+                        first_object.coordinates is not None
+                        and first_object.coordinate_mask is not None
+                        and bool(first_object.coordinate_mask.any())
+                    )
+                    second_valid = (
+                        second_object.coordinates is not None
+                        and second_object.coordinate_mask is not None
+                        and bool(second_object.coordinate_mask.any())
+                    )
+                    if first_valid and second_valid:
+                        first_centroid = first_object.coordinates[
+                            first_object.coordinate_mask
+                        ].mean(dim=0)
+                        second_centroid = second_object.coordinates[
+                            second_object.coordinate_mask
+                        ].mean(dim=0)
+                        magnitude = max(
+                            1.0,
+                            float(first_centroid.norm()),
+                            float(second_centroid.norm()),
+                        )
+                        coordinate_cost[row, column] = min(
+                            2.0,
+                            float((first_centroid - second_centroid).norm()) / magnitude,
+                        )
                     converged = converged and bool(gw.converged)
+            positive = structural_cost[structural_cost > 0.0]
+            scale = (
+                positive.median().clamp_min(1.0e-8)
+                if positive.numel()
+                else structural_cost.new_ones(())
+            )
+            cost = (
+                0.50 * (structural_cost / scale).clamp_max(4.0)
+                + 0.35 * roi_cost
+                + 0.15 * coordinate_cost
+            )
+            incompatible = (roi_cost >= 1.0) & (coordinate_cost >= 0.50)
+            cost = cost + incompatible.to(cost.dtype)
             source_mass = cost.new_tensor([item.mass for item in left.objects])
             target_mass = cost.new_tensor([item.mass for item in right.objects])
             plan = unbalanced_sinkhorn(
@@ -555,13 +748,21 @@ class MultiViewCriticalFeatureBuilder(object):
             )
         return tuple(output)
 
-    def build(self, cache, full_graph_windows=None):
+    def build(
+        self,
+        cache,
+        full_graph_windows=None,
+        selected_object_windows=None,
+        trajectory_set=None,
+    ):
         if not isinstance(cache, HardGraphSampleCache):
             raise ValueError("multi-view builder requires HardGraphSampleCache")
         graphs = self._graphs(cache)
         base = self.hard.build(graphs)
         theory = self.theory.build(graphs, cache.time_values)
         hard_windows = []
+        if selected_object_windows is not None and len(selected_object_windows) != len(graphs):
+            raise ValueError("selected fixed-K windows do not align with hard unions")
         for index, (source, node_window, theory_window) in enumerate(
             zip(graphs, base.windows, theory.windows)
         ):
@@ -569,7 +770,14 @@ class MultiViewCriticalFeatureBuilder(object):
                 hard_windows.append(None)
             else:
                 hard_windows.append(
-                    self._window(source, node_window, theory_window)
+                    self._window(
+                        source,
+                        node_window,
+                        theory_window,
+                        None
+                        if selected_object_windows is None
+                        else selected_object_windows[index],
+                    )
                 )
         transitions = []
         threshold = next(
@@ -588,6 +796,21 @@ class MultiViewCriticalFeatureBuilder(object):
                     threshold,
                 )
             )
+        if selected_object_windows is not None:
+            trajectory_set = build_dynamic_trajectories_from_costs(
+                [
+                    len(item.objects) if item is not None else 0
+                    for item in hard_windows
+                ],
+                [
+                    item.object_cost if item is not None else None
+                    for item in transitions
+                ],
+                max(
+                    len(item) for item in selected_object_windows
+                ),
+                self.tracking_config,
+            )
         return MultiViewCriticalSampleFeatures(
             sample_key=cache.sample_key,
             label=int(cache.label),
@@ -597,6 +820,7 @@ class MultiViewCriticalFeatureBuilder(object):
             transitions=tuple(transitions),
             window_mask=theory.window_mask,
             transition_mask=theory.transition_mask,
+            trajectory_set=trajectory_set,
         )
 
 
