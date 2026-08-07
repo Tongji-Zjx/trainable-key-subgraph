@@ -54,6 +54,7 @@ class DualSTSEHardSGWConfig:
     selector_exploration_retrospective_strength: float = 0.30
     selector_exploration_candidate_similarity_threshold: float = 0.25
     selector_exploration_shortlist_multiplier: int = 3
+    selector_exploration_minimum_support_windows: int = 1
     selector_exploration_coverage_weight: float = 0.45
     selector_exploration_support_weight: float = 0.25
     selector_exploration_quality_weight: float = 0.15
@@ -117,6 +118,7 @@ class DualSTSEHardSGWConfig:
             self.selector_exploration_max_windows,
             self.selector_exploration_history_ramp_windows,
             self.selector_exploration_shortlist_multiplier,
+            self.selector_exploration_minimum_support_windows,
             self.node_minimum,
             self.edge_minimum,
             self.critical_subgraph_count,
@@ -198,6 +200,13 @@ class DualSTSEHardSGWConfig:
         ):
             raise ValueError(
                 "selector candidate similarity threshold must lie in [0,1]"
+            )
+        if (
+            self.selector_exploration_minimum_support_windows
+            > self.selector_exploration_max_windows
+        ):
+            raise ValueError(
+                "selector minimum support cannot exceed exploration windows"
             )
         medoid_weights = (
             self.selector_exploration_coverage_weight,

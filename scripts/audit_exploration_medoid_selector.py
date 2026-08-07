@@ -10,6 +10,7 @@ import os
 import random
 import statistics
 import sys
+from dataclasses import replace
 from itertools import combinations
 from pathlib import Path
 
@@ -54,6 +55,24 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=43)
     parser.add_argument("--max-train-samples", type=int, default=24)
     parser.add_argument("--max-validation-samples", type=int, default=24)
+    parser.add_argument(
+        "--exploration-windows",
+        type=int,
+        default=None,
+        help="override the frozen checkpoint with an exact exploration B",
+    )
+    parser.add_argument(
+        "--minimum-support-windows",
+        type=int,
+        default=None,
+        help="require every selected medoid to be supported by this many windows",
+    )
+    parser.add_argument(
+        "--shortlist-multiplier",
+        type=int,
+        default=None,
+        help="optional N/K override for read-only calibration",
+    )
     parser.add_argument("--overwrite", action="store_true")
     return parser.parse_args()
 
@@ -277,6 +296,17 @@ def _audit_sample(model, batch, split, config):
         "unsupported_anchor_rate": _metric(
             diagnostics, "mean_exploration_unsupported_anchor_rate"
         ),
+        "eligible_candidate_count": _metric(
+            diagnostics, "mean_exploration_eligible_candidate_count"
+        ),
+        "support_constraint_relaxation_rate": _metric(
+            diagnostics,
+            "mean_exploration_support_constraint_relaxation_rate",
+        ),
+        "support_constraint_violation_rate": _metric(
+            diagnostics,
+            "mean_exploration_support_constraint_violation_rate",
+        ),
         "anchor_pair_similarity": _metric(
             diagnostics, "mean_exploration_anchor_similarity"
         ),
@@ -347,6 +377,9 @@ def _write_report(path, report):
         ("代表短名单大小", "shortlist_size"),
         ("跨窗口支持率", "anchor_support_rate"),
         ("无跨窗口支持锚点率", "unsupported_anchor_rate"),
+        ("满足最少支持条件的候选数", "eligible_candidate_count"),
+        ("支持约束回退率", "support_constraint_relaxation_rate"),
+        ("支持约束违反率", "support_constraint_violation_rate"),
         ("Medoid 间相似度", "anchor_pair_similarity"),
         ("跨窗口簇内相似度（排除自身）", "cross_window_cluster_similarity"),
         ("候选最近跨窗口相似度", "nearest_cross_window_candidate_similarity"),
@@ -404,6 +437,24 @@ def main():
     protocol = validate_data_protocol(args.protocol, PROJECT_ROOT)
     payload = _trusted_load(args.checkpoint.resolve(), torch.device("cpu"))
     config = DualSTSEHardSGWConfig(**payload["model_config"])
+    overrides = {}
+    if args.exploration_windows is not None:
+        if args.exploration_windows < 1:
+            raise ValueError("exploration windows must be positive")
+        overrides.update(
+            selector_exploration_min_windows=args.exploration_windows,
+            selector_exploration_max_windows=args.exploration_windows,
+        )
+    if args.minimum_support_windows is not None:
+        overrides["selector_exploration_minimum_support_windows"] = (
+            args.minimum_support_windows
+        )
+    if args.shortlist_multiplier is not None:
+        overrides["selector_exploration_shortlist_multiplier"] = (
+            args.shortlist_multiplier
+        )
+    if overrides:
+        config = replace(config, **overrides)
     if not config.selector_structural_temporal_memory:
         raise ValueError("audit requires structural temporal memory")
     device = torch.device(args.device)
@@ -498,6 +549,13 @@ def main():
             ),
             "shortlist_multiplier": (
                 config.selector_exploration_shortlist_multiplier
+            ),
+            "exploration_windows": {
+                "minimum": config.selector_exploration_min_windows,
+                "maximum": config.selector_exploration_max_windows,
+            },
+            "minimum_support_windows": (
+                config.selector_exploration_minimum_support_windows
             ),
         },
         "overall": {

@@ -113,6 +113,39 @@ class ExplorationMedoidSelectorTest(unittest.TestCase):
         )
         self.assertEqual(len(selected.shortlist_indices), 9)
 
+    def test_minimum_support_uses_distinct_exploration_windows(self):
+        candidates = [
+            _candidate(window, cluster)
+            for window in range(6)
+            for cluster in range(3)
+        ]
+        selected = select_exploration_medoids(
+            candidates,
+            object_count=3,
+            shortlist_multiplier=3,
+            minimum_support_windows=2,
+        )
+        self.assertFalse(selected.support_constraint_relaxed)
+        self.assertEqual(selected.support_constraint_violation_count, 0)
+        self.assertTrue(
+            all(value >= 2 for value in selected.support_window_counts)
+        )
+        self.assertGreaterEqual(selected.eligible_candidate_count, 3)
+
+    def test_minimum_support_reports_deterministic_fixed_k_fallback(self):
+        candidates = [
+            _candidate(0, 0),
+            _candidate(1, 0),
+            _candidate(0, 1),
+        ]
+        selected = select_exploration_medoids(
+            candidates,
+            object_count=3,
+            minimum_support_windows=2,
+        )
+        self.assertTrue(selected.support_constraint_relaxed)
+        self.assertGreater(selected.support_constraint_violation_count, 0)
+
     def test_stacked_memory_is_reindexed_real_candidate_not_average(self):
         candidates = [_candidate(0, 0), _candidate(1, 1), _candidate(2, 2)]
         current_ids = tuple(reversed(candidates[0].memory.node_ids))

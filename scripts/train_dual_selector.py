@@ -162,6 +162,9 @@ def parse_args():
         "--exploration-shortlist-multiplier", type=int, default=3
     )
     parser.add_argument(
+        "--exploration-minimum-support-windows", type=int, default=1
+    )
+    parser.add_argument(
         "--exploration-coverage-weight", type=float, default=0.45
     )
     parser.add_argument(
@@ -377,6 +380,9 @@ def main():
         selector_exploration_shortlist_multiplier=(
             args.exploration_shortlist_multiplier
         ),
+        selector_exploration_minimum_support_windows=(
+            args.exploration_minimum_support_windows
+        ),
         selector_exploration_coverage_weight=(
             args.exploration_coverage_weight
         ),
@@ -538,6 +544,9 @@ def main():
                 ),
                 "shortlist_multiplier": (
                     args.exploration_shortlist_multiplier
+                ),
+                "minimum_support_windows": (
+                    args.exploration_minimum_support_windows
                 ),
                 "medoid_weights": {
                     "coverage": args.exploration_coverage_weight,

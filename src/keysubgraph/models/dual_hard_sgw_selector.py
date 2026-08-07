@@ -496,6 +496,9 @@ class DualHardSGWSelector(nn.Module):
         exploration_cross_window_cluster_similarities: List[float] = []
         exploration_nearest_cross_window_similarities: List[float] = []
         exploration_unsupported_anchor_rates: List[float] = []
+        exploration_eligible_candidate_counts: List[float] = []
+        exploration_support_constraint_relaxations: List[float] = []
+        exploration_support_constraint_violation_rates: List[float] = []
         exploration_medoid_objectives: List[float] = []
         selected_positive_edge_count = 0
         selected_negative_edge_count = 0
@@ -613,6 +616,9 @@ class DualHardSGWSelector(nn.Module):
                     shortlist_multiplier=(
                         self.config.selector_exploration_shortlist_multiplier
                     ),
+                    minimum_support_windows=(
+                        self.config.selector_exploration_minimum_support_windows
+                    ),
                     coverage_weight=(
                         self.config.selector_exploration_coverage_weight
                     ),
@@ -672,6 +678,18 @@ class DualHardSGWSelector(nn.Module):
                 )
                 exploration_unsupported_anchor_rates.append(
                     exploration_medoid_selection.unsupported_anchor_count
+                    / float(self.config.critical_subgraph_count)
+                )
+                exploration_eligible_candidate_counts.append(
+                    exploration_medoid_selection.eligible_candidate_count
+                )
+                exploration_support_constraint_relaxations.append(
+                    float(
+                        exploration_medoid_selection.support_constraint_relaxed
+                    )
+                )
+                exploration_support_constraint_violation_rates.append(
+                    exploration_medoid_selection.support_constraint_violation_count
                     / float(self.config.critical_subgraph_count)
                 )
                 exploration_medoid_objectives.append(
@@ -1158,6 +1176,25 @@ class DualHardSGWSelector(nn.Module):
             "mean_exploration_unsupported_anchor_rate": (
                 sum(exploration_unsupported_anchor_rates)
                 / float(max(1, len(exploration_unsupported_anchor_rates)))
+            ),
+            "mean_exploration_eligible_candidate_count": (
+                sum(exploration_eligible_candidate_counts)
+                / float(max(1, len(exploration_eligible_candidate_counts)))
+            ),
+            "mean_exploration_support_constraint_relaxation_rate": (
+                sum(exploration_support_constraint_relaxations)
+                / float(
+                    max(1, len(exploration_support_constraint_relaxations))
+                )
+            ),
+            "mean_exploration_support_constraint_violation_rate": (
+                sum(exploration_support_constraint_violation_rates)
+                / float(
+                    max(
+                        1,
+                        len(exploration_support_constraint_violation_rates),
+                    )
+                )
             ),
             "mean_exploration_medoid_objective": (
                 sum(exploration_medoid_objectives)

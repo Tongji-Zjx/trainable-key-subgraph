@@ -40,6 +40,10 @@ class ExplorationMedoidSelection:
     mean_cross_window_cluster_similarity: float
     mean_nearest_cross_window_similarity: float
     unsupported_anchor_count: int
+    minimum_support_windows: int
+    eligible_candidate_count: int
+    support_constraint_relaxed: bool
+    support_constraint_violation_count: int
 
 
 def stack_real_candidate_memories(
@@ -392,6 +396,7 @@ def select_exploration_medoids(
     object_count: int,
     similarity_threshold: float = 0.25,
     shortlist_multiplier: int = 3,
+    minimum_support_windows: int = 1,
     coverage_weight: float = 0.45,
     support_weight: float = 0.25,
     quality_weight: float = 0.15,
@@ -408,6 +413,9 @@ def select_exploration_medoids(
         raise ValueError("candidate similarity threshold must lie in [0,1]")
     if shortlist_multiplier < 1:
         raise ValueError("candidate shortlist multiplier must be positive")
+    minimum_support_windows = int(minimum_support_windows)
+    if minimum_support_windows < 1:
+        raise ValueError("minimum support windows must be positive")
     objective_weights = (
         coverage_weight, support_weight, quality_weight, diversity_weight
     )
@@ -438,15 +446,33 @@ def select_exploration_medoids(
             ]
             per_window.append(max(float(similarity[index, other]) for other in indices))
         representativeness.append(sum(per_window) / float(window_count))
+    if minimum_support_windows > window_count:
+        raise ValueError(
+            "minimum support windows cannot exceed exploration windows"
+        )
     base = torch.tensor(representativeness) * 0.55
     base = base + torch.tensor(support_counts, dtype=torch.float32) / float(window_count) * 0.30
     base = base + quality * 0.15
-    shortlist_size = min(count, max(object_count, object_count * int(shortlist_multiplier)))
     # N is itself a representative pool, rather than the N largest local
     # scores.  MMR keeps a dominant structure from occupying every shortlist
     # position before the exact K-medoid search begins.
+    eligible = {
+        index
+        for index, support in enumerate(support_counts)
+        if int(support) >= minimum_support_windows
+    }
+    # Prefer only candidates that meet the requested cross-window support.
+    # If fewer than K exist, preserve the fixed-K output contract and expose
+    # the deterministic relaxation through diagnostics rather than failing a
+    # complete sample at inference time.
+    support_constraint_relaxed = len(eligible) < object_count
+    candidate_pool = eligible if not support_constraint_relaxed else set(range(count))
+    shortlist_size = min(
+        len(candidate_pool),
+        max(object_count, object_count * int(shortlist_multiplier)),
+    )
     selected_shortlist: List[int] = []
-    remaining = set(range(count))
+    remaining = set(candidate_pool)
     while len(selected_shortlist) < shortlist_size:
         def shortlist_key(index):
             diversity = (
@@ -470,13 +496,46 @@ def select_exploration_medoids(
         selected_shortlist.append(chosen)
         remaining.remove(chosen)
     shortlist = tuple(selected_shortlist)
+
+    def assigned_support(combination):
+        assignments = []
+        for candidate_index in range(count):
+            values = [
+                float(similarity[candidate_index, anchor])
+                for anchor in combination
+            ]
+            selected = max(
+                range(object_count), key=lambda slot: (values[slot], -slot)
+            )
+            assignments.append(
+                selected
+                if values[selected] >= float(similarity_threshold)
+                else -1
+            )
+        for slot, anchor in enumerate(combination):
+            assignments[anchor] = slot
+        supports = tuple(
+            len(
+                {
+                    int(candidates[index].window_index)
+                    for index, value in enumerate(assignments)
+                    if value == slot
+                }
+            )
+            for slot in range(object_count)
+        )
+        return tuple(assignments), supports
+
     best = None
+    best_relaxed = None
     weight_sum = float(sum(objective_weights))
     for combination in itertools.combinations(shortlist, object_count):
         coverage = float(similarity[:, list(combination)].max(dim=1).values.mean())
+        combination_assignments, combination_supports = assigned_support(
+            combination
+        )
         support = sum(
-            support_counts[index] / float(window_count)
-            for index in combination
+            value / float(window_count) for value in combination_supports
         ) / object_count
         selected_quality = sum(
             float(quality[index]) for index in combination
@@ -496,19 +555,24 @@ def select_exploration_medoids(
             {candidates[index].window_index for index in combination}
         )
         candidate_key = (objective, distinct_windows, tuple(-index for index in combination))
-        if best is None or candidate_key > best[0]:
-            best = (candidate_key, tuple(combination))
-    anchors = best[1]
-    assignments: List[int] = []
-    for index in range(count):
-        values = [float(similarity[index, anchor]) for anchor in anchors]
-        selected = max(range(object_count), key=lambda slot: (values[slot], -slot))
-        assignments.append(
-            selected if values[selected] >= float(similarity_threshold) else -1
+        candidate_result = (
+            candidate_key,
+            tuple(combination),
+            combination_assignments,
+            combination_supports,
         )
-    # Every medoid is, by definition, a confirmed member of its own cluster.
-    for slot, anchor in enumerate(anchors):
-        assignments[anchor] = slot
+        if best_relaxed is None or candidate_key > best_relaxed[0]:
+            best_relaxed = candidate_result
+        if all(
+            value >= minimum_support_windows
+            for value in combination_supports
+        ) and (best is None or candidate_key > best[0]):
+            best = candidate_result
+    if best is None:
+        support_constraint_relaxed = True
+        best = best_relaxed
+    anchors = best[1]
+    assignments = list(best[2])
     recent = []
     selected_support = []
     cluster_similarities = []
@@ -574,4 +638,10 @@ def select_exploration_medoids(
             else 0.0
         ),
         unsupported_anchor_count=sum(value <= 1 for value in selected_support),
+        minimum_support_windows=minimum_support_windows,
+        eligible_candidate_count=len(eligible),
+        support_constraint_relaxed=bool(support_constraint_relaxed),
+        support_constraint_violation_count=sum(
+            value < minimum_support_windows for value in selected_support
+        ),
     )
