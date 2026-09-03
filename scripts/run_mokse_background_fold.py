@@ -5,9 +5,14 @@ from __future__ import absolute_import, division, print_function
 
 import argparse
 import json
+import os
 import sys
 from dataclasses import asdict
 from pathlib import Path
+
+# This must be set before importing/initializing torch CUDA.  Setting it from
+# the trainer after a frozen TGE forward is too late for strict CuBLAS mode.
+os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
 
 import torch
 
