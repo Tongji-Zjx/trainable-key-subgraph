@@ -67,7 +67,8 @@ wait "$pid_zero"
 wait "$pid_one"
 
 run_xgb_and_summary() {
-  local dataset=$1 output="$RESULT_ROOT/$dataset"
+  local dataset=$1
+  local output="$RESULT_ROOT/$dataset"
   local common
   common=(
     --fold-dir "$output/fold_0"
