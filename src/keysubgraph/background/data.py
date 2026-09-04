@@ -39,6 +39,12 @@ SIGNED_CONNECTIVITY_PROFILE_NAMES = (
     "has_negative_edge",
 )
 
+RELATIVE_SIGNED_CONNECTIVITY_PROFILE_NAMES = tuple(
+    "relative_{}".format(name)
+    if not name.startswith("has_") else name
+    for name in SIGNED_CONNECTIVITY_PROFILE_NAMES
+)
+
 DEFAULT_PROFILE_QUANTILES = (0.25, 0.50, 0.75, 0.90)
 
 
@@ -212,6 +218,65 @@ def build_signed_connectivity_profile(
     return output
 
 
+def build_relative_signed_connectivity_profile(
+    adjacency: torch.Tensor,
+    quantiles: Sequence[float] = DEFAULT_PROFILE_QUANTILES,
+    relative_epsilon: float = 1.0e-3,
+    absolute_epsilon: float = 1.0e-12,
+    log_clip: float = 4.0,
+) -> torch.Tensor:
+    """Return scale-robust node profiles relative to the whole signed graph.
+
+    Positive and negative-magnitude channels use separate graph references.
+    The numerical floor scales with the median non-zero graph weight, making
+    the ratios invariant to ordinary uniform rescaling of either sign channel.
+    Binary validity flags remain untransformed in the last two columns.
+    """
+
+    adjacency = torch.as_tensor(adjacency, dtype=torch.float32)
+    if adjacency.ndim != 2 or adjacency.shape[0] != adjacency.shape[1]:
+        raise ValueError("relative signed profile requires a square adjacency")
+    requested = tuple(float(value) for value in quantiles)
+    if len(requested) != 4 or any(value < 0.0 or value > 1.0 for value in requested):
+        raise ValueError("relative signed profile requires four quantiles in [0,1]")
+    if relative_epsilon <= 0.0 or absolute_epsilon <= 0.0 or log_clip <= 0.0:
+        raise ValueError("relative profile numerical safeguards must be positive")
+
+    count = int(adjacency.shape[0])
+    output = torch.zeros(count, 2 * len(requested) + 2, dtype=adjacency.dtype)
+    quantile_tensor = torch.tensor(requested, dtype=adjacency.dtype)
+    upper_mask = torch.triu(
+        torch.ones_like(adjacency, dtype=torch.bool), diagonal=1
+    )
+
+    channels = (
+        (adjacency, adjacency[upper_mask & (adjacency > 0.0)], 0, -2),
+        (-adjacency, (-adjacency)[upper_mask & (adjacency < 0.0)], len(requested), -1),
+    )
+    for row_values, graph_values, offset, validity_column in channels:
+        if graph_values.numel() == 0:
+            continue
+        graph_quantiles = torch.quantile(graph_values, quantile_tensor)
+        graph_scale = float(torch.quantile(graph_values, 0.5))
+        epsilon = max(float(absolute_epsilon), float(relative_epsilon) * graph_scale)
+        for node in range(count):
+            values = row_values[node]
+            values = values[values > 0.0]
+            if values.numel() == 0:
+                continue
+            node_quantiles = torch.quantile(values, quantile_tensor)
+            relative = torch.log(
+                (node_quantiles + epsilon) / (graph_quantiles + epsilon)
+            ).clamp(min=-float(log_clip), max=float(log_clip))
+            output[node, offset: offset + len(requested)] = relative
+            output[node, validity_column] = 1.0
+    if output.shape != (count, len(RELATIVE_SIGNED_CONNECTIVITY_PROFILE_NAMES)):
+        raise RuntimeError("unexpected relative signed profile shape")
+    if not bool(torch.isfinite(output).all()):
+        raise ValueError("relative signed connectivity profile is non-finite")
+    return output
+
+
 def signed_laplacian_encoding(
     adjacency: torch.Tensor,
     dimensions: int = 8,
@@ -289,6 +354,9 @@ def build_global_static_record(
     cache_dir: Optional[Path] = None,
     include_signed_profile: bool = False,
     profile_quantiles: Sequence[float] = DEFAULT_PROFILE_QUANTILES,
+    signed_profile_mode: str = "absolute",
+    relative_profile_epsilon: float = 1.0e-3,
+    relative_profile_log_clip: float = 4.0,
 ) -> GlobalStaticGraphRecord:
     sample_key = str(row["sample_key"])
     path = resolve_global_graph_path(Path(global_root), row)
@@ -296,11 +364,19 @@ def build_global_static_record(
     quantile_token = "_".join(
         "q{:g}".format(100.0 * float(value)) for value in profile_quantiles
     )
-    feature_version = (
-        "static12_spec{}_profile10_{}".format(spectral_dimensions, quantile_token)
-        if include_signed_profile
-        else "static12_spec{}".format(spectral_dimensions)
-    )
+    if signed_profile_mode not in ("absolute", "relative"):
+        raise ValueError("signed profile mode must be absolute or relative")
+    if include_signed_profile:
+        profile_token = "profile10_{}_{}".format(signed_profile_mode, quantile_token)
+        if signed_profile_mode == "relative":
+            profile_token += "_eps{:g}_clip{:g}".format(
+                relative_profile_epsilon, relative_profile_log_clip
+            )
+        feature_version = "static12_spec{}_{}".format(
+            spectral_dimensions, profile_token
+        )
+    else:
+        feature_version = "static12_spec{}".format(spectral_dimensions)
     if cache_dir is not None:
         token = hashlib.sha256(sample_key.encode("utf-8")).hexdigest()[:20]
         cache_path = Path(cache_dir) / (token + ".pt")
@@ -342,9 +418,16 @@ def build_global_static_record(
     )
     feature_blocks.append(spectral)
     if include_signed_profile:
-        feature_blocks.append(
-            build_signed_connectivity_profile(adjacency, profile_quantiles)
-        )
+        if signed_profile_mode == "relative":
+            profile = build_relative_signed_connectivity_profile(
+                adjacency,
+                profile_quantiles,
+                relative_epsilon=relative_profile_epsilon,
+                log_clip=relative_profile_log_clip,
+            )
+        else:
+            profile = build_signed_connectivity_profile(adjacency, profile_quantiles)
+        feature_blocks.append(profile)
     raw_positive = adjacency.clamp_min(0.0)
     raw_negative = -adjacency.clamp_max(0.0)
     positive, negative = signed_normalized_channels(adjacency)
@@ -387,6 +470,7 @@ def build_global_static_record(
 class BackgroundFeatureScaler:
     mean: torch.Tensor
     scale: torch.Tensor
+    passthrough_indices: Tuple[int, ...] = ()
 
     def transform(self, values: torch.Tensor) -> torch.Tensor:
         return (values - self.mean.to(values)) / self.scale.to(values)
@@ -396,6 +480,7 @@ class BackgroundFeatureScaler:
             "artifact_type": "mokse_background_train_only_scaler_v1",
             "mean": self.mean.tolist(),
             "scale": self.scale.tolist(),
+            "passthrough_indices": list(self.passthrough_indices),
         }
 
     @classmethod
@@ -405,16 +490,47 @@ class BackgroundFeatureScaler:
         return cls(
             mean=torch.tensor(payload["mean"], dtype=torch.float32),
             scale=torch.tensor(payload["scale"], dtype=torch.float32),
+            passthrough_indices=tuple(
+                int(value) for value in payload.get("passthrough_indices", ())
+            ),
         )
 
 
 def fit_background_feature_scaler(
     records: Iterable[GlobalStaticGraphRecord],
     epsilon: float = 1.0e-6,
+    passthrough_indices: Sequence[int] = (),
 ) -> BackgroundFeatureScaler:
     values = torch.cat(tuple(record.node_features for record in records), dim=0)
     if values.numel() == 0:
         raise ValueError("cannot fit background scaler on empty records")
     mean = values.mean(dim=0)
     scale = values.std(dim=0, unbiased=False).clamp_min(epsilon)
-    return BackgroundFeatureScaler(mean=mean, scale=scale)
+    indices = tuple(sorted(set(int(index) for index in passthrough_indices)))
+    if any(index < 0 or index >= values.shape[1] for index in indices):
+        raise ValueError("background scaler passthrough index is out of range")
+    if indices:
+        mean = mean.clone()
+        scale = scale.clone()
+        mean[list(indices)] = 0.0
+        scale[list(indices)] = 1.0
+    return BackgroundFeatureScaler(
+        mean=mean,
+        scale=scale,
+        passthrough_indices=indices,
+    )
+
+
+def fit_train_community_kappa(
+    records: Iterable[GlobalStaticGraphRecord],
+) -> float:
+    """Fit the support-shrinkage reference from training communities only."""
+
+    sizes = []
+    for record in records:
+        labels = torch.as_tensor(record.community_labels, dtype=torch.long)
+        for label in torch.unique(labels[labels >= 0]):
+            sizes.append(float((labels == label).sum()))
+    if not sizes:
+        raise ValueError("cannot fit community kappa without train communities")
+    return float(torch.quantile(torch.tensor(sizes, dtype=torch.float64), 0.5))

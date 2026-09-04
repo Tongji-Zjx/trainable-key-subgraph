@@ -24,6 +24,13 @@ class StaticBackgroundConfig:
     enable_community_residual: bool = False
     community_gate_max: float = 0.25
     community_gate_initial: float = 0.05
+    encoder_variant: str = "legacy"
+    base_input_dim: int = 20
+    profile_input_dim: int = 10
+    profile_gate_max: float = 0.25
+    profile_gate_initial: float = 0.04
+    support_shrunk_community: bool = False
+    community_kappa: float = 1.0
 
     def __post_init__(self):
         if min(self.input_dim, self.hidden_dim, self.representation_dim, self.layers) < 1:
@@ -42,6 +49,19 @@ class StaticBackgroundConfig:
             raise ValueError("community gate maximum must be positive")
         if not 0.0 < self.community_gate_initial < self.community_gate_max:
             raise ValueError("community gate initialization must be inside its bound")
+        if self.encoder_variant not in ("legacy", "s4_robust"):
+            raise ValueError("unsupported static background encoder variant")
+        if self.encoder_variant == "s4_robust":
+            if min(self.base_input_dim, self.profile_input_dim) < 1:
+                raise ValueError("S4 base/profile input dimensions must be positive")
+            if self.input_dim != self.base_input_dim + self.profile_input_dim:
+                raise ValueError("S4 input dimension must equal base plus profile")
+            if self.profile_gate_max <= 0.0:
+                raise ValueError("S4 profile gate maximum must be positive")
+            if not 0.0 < self.profile_gate_initial < self.profile_gate_max:
+                raise ValueError("S4 profile gate initialization must be inside its bound")
+            if self.community_kappa <= 0.0:
+                raise ValueError("S4 community kappa must be positive")
 
 
 class SignedWeightedGCNIILayer(nn.Module):
@@ -111,12 +131,65 @@ def masked_community_mean_std(
     return torch.stack(pooled, dim=0)
 
 
+def masked_support_shrunk_community_mean_std(
+    values: torch.Tensor,
+    community_labels: torch.Tensor,
+    mask: torch.Tensor,
+    kappa: float,
+) -> torch.Tensor:
+    """Pool support-shrunk community deviations without community-ID semantics."""
+
+    if values.ndim != 3 or community_labels.shape != mask.shape:
+        raise ValueError("support-shrunk community pooling inputs do not align")
+    if float(kappa) <= 0.0:
+        raise ValueError("community shrinkage kappa must be positive")
+    pooled = []
+    for batch_index in range(values.shape[0]):
+        valid = mask[batch_index]
+        labels = community_labels[batch_index, valid]
+        states = values[batch_index, valid]
+        unique = torch.unique(labels[labels >= 0], sorted=True)
+        if unique.numel() == 0:
+            raise ValueError("a graph does not contain any valid community")
+        global_mean = states.mean(dim=0)
+        deviations = []
+        for label in unique:
+            members = states[labels == label]
+            support = members.new_tensor(float(members.shape[0]))
+            shrinkage = support / (support + float(kappa))
+            deviations.append(shrinkage * (members.mean(dim=0) - global_mean))
+        stacked = torch.stack(deviations, dim=0)
+        mean = stacked.mean(dim=0)
+        variance = ((stacked - mean) ** 2).mean(dim=0)
+        pooled.append(torch.cat((mean, variance.clamp_min(0.0).sqrt()), dim=-1))
+    return torch.stack(pooled, dim=0)
+
+
 class GlobalBackgroundGCN(nn.Module):
     def __init__(self, config: StaticBackgroundConfig = StaticBackgroundConfig()):
         super().__init__()
         self.config = config
-        self.input_norm = nn.LayerNorm(config.input_dim)
-        self.input_projection = nn.Linear(config.input_dim, config.hidden_dim)
+        self.robust_s4 = config.encoder_variant == "s4_robust"
+        if self.robust_s4:
+            self.base_input_norm = nn.LayerNorm(config.base_input_dim)
+            self.base_projection = nn.Linear(config.base_input_dim, config.hidden_dim)
+            self.base_output_norm = nn.LayerNorm(
+                config.hidden_dim, elementwise_affine=False
+            )
+            self.profile_input_norm = nn.LayerNorm(config.profile_input_dim)
+            self.profile_projection = nn.Linear(
+                config.profile_input_dim, config.hidden_dim
+            )
+            self.profile_output_norm = nn.LayerNorm(
+                config.hidden_dim, elementwise_affine=False
+            )
+            ratio = config.profile_gate_initial / config.profile_gate_max
+            self.profile_gate_parameter = nn.Parameter(
+                torch.tensor(math.log(ratio / (1.0 - ratio)), dtype=torch.float32)
+            )
+        else:
+            self.input_norm = nn.LayerNorm(config.input_dim)
+            self.input_projection = nn.Linear(config.input_dim, config.hidden_dim)
         self.layers = nn.ModuleList(
             SignedWeightedGCNIILayer(config.hidden_dim, index + 1, config)
             for index in range(config.layers)
@@ -126,7 +199,13 @@ class GlobalBackgroundGCN(nn.Module):
         self.layer_gate = nn.Parameter(torch.tensor(0.0))
         if config.enable_community_residual:
             self.community_norm = nn.LayerNorm(pooled_dim)
-            self.community_residual = nn.Linear(pooled_dim, pooled_dim)
+            if self.robust_s4:
+                self.community_residual = nn.Sequential(
+                    nn.Linear(pooled_dim, pooled_dim),
+                    nn.LayerNorm(pooled_dim, elementwise_affine=False),
+                )
+            else:
+                self.community_residual = nn.Linear(pooled_dim, pooled_dim)
             ratio = config.community_gate_initial / config.community_gate_max
             self.community_gate_parameter = nn.Parameter(
                 torch.tensor(math.log(ratio / (1.0 - ratio)), dtype=torch.float32)
@@ -146,7 +225,22 @@ class GlobalBackgroundGCN(nn.Module):
         node_mask,
         community_labels=None,
     ):
-        initial = self.input_projection(self.input_norm(node_features))
+        if self.robust_s4:
+            base = node_features[..., : self.config.base_input_dim]
+            profile = node_features[..., self.config.base_input_dim:]
+            base = self.base_output_norm(
+                self.base_projection(self.base_input_norm(base))
+            )
+            profile = self.profile_output_norm(
+                self.profile_projection(self.profile_input_norm(profile))
+            )
+            profile_gate = self.config.profile_gate_max * torch.sigmoid(
+                self.profile_gate_parameter
+            )
+            initial = base + profile_gate * profile
+        else:
+            initial = self.input_projection(self.input_norm(node_features))
+            profile_gate = initial.new_tensor(0.0)
         initial = initial * node_mask.unsqueeze(-1).to(initial.dtype)
         state = initial
         pooled = []
@@ -159,9 +253,17 @@ class GlobalBackgroundGCN(nn.Module):
         if self.config.enable_community_residual:
             if community_labels is None:
                 raise ValueError("community labels are required by community residual pooling")
-            community = masked_community_mean_std(
-                state, community_labels, node_mask
-            )
+            if self.config.support_shrunk_community:
+                community = masked_support_shrunk_community_mean_std(
+                    state,
+                    community_labels,
+                    node_mask,
+                    self.config.community_kappa,
+                )
+            else:
+                community = masked_community_mean_std(
+                    state, community_labels, node_mask
+                )
             community_gate = self.config.community_gate_max * torch.sigmoid(
                 self.community_gate_parameter
             )
@@ -177,6 +279,7 @@ class GlobalBackgroundGCN(nn.Module):
             "background_logit": logit,
             "layer_gate": torch.sigmoid(self.layer_gate),
             "community_gate": community_gate,
+            "profile_gate": profile_gate,
         }
 
 

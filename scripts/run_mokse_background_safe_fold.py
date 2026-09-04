@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Train one S0-S3 MoKSE-BG-Safe static condition on a frozen rotation."""
+"""Train one S0-S4 MoKSE-BG-Safe static condition on a frozen rotation."""
 
 from __future__ import absolute_import, division, print_function
 
@@ -22,10 +22,12 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from keysubgraph.background.data import (  # noqa: E402
+    RELATIVE_SIGNED_CONNECTIVITY_PROFILE_NAMES,
     SIGNED_CONNECTIVITY_PROFILE_NAMES,
     STATIC_FEATURE_NAMES,
     build_global_static_record,
     fit_background_feature_scaler,
+    fit_train_community_kappa,
 )
 from keysubgraph.background.model import StaticBackgroundConfig  # noqa: E402
 from keysubgraph.background.training import (  # noqa: E402
@@ -53,6 +55,11 @@ STAGES = {
     },
     "s3": {
         "profile": True, "community": True,
+        "dropedge": 0.05, "consistency": 0.05, "top_k": 3,
+    },
+    "s4": {
+        "profile": True, "profile_mode": "relative", "community": True,
+        "support_shrunk_community": True,
         "dropedge": 0.05, "consistency": 0.05, "top_k": 3,
     },
 }
@@ -83,6 +90,9 @@ def parse_args():
     parser.add_argument("--dropout", type=float, default=0.10)
     parser.add_argument("--spectral-dim", type=int, default=8)
     parser.add_argument("--lambda-rank", type=float, default=0.05)
+    parser.add_argument("--margin-consistency-weight", type=float, default=0.0)
+    parser.add_argument("--relative-profile-epsilon", type=float, default=1.0e-3)
+    parser.add_argument("--relative-profile-log-clip", type=float, default=4.0)
     parser.add_argument("--non-strict", action="store_true")
     return parser.parse_args()
 
@@ -188,8 +198,9 @@ def main():
         )
         for split, manifest in manifests.items()
     }
+    profile_mode = stage.get("profile_mode", "absolute")
     feature_cache = args.cache_dir.resolve() / (
-        "profile10" if stage["profile"] else "base20"
+        "profile10_{}".format(profile_mode) if stage["profile"] else "base20"
     )
     records = {}
     for split in manifests:
@@ -200,10 +211,23 @@ def main():
                 spectral_dimensions=args.spectral_dim,
                 cache_dir=feature_cache,
                 include_signed_profile=stage["profile"],
+                signed_profile_mode=profile_mode,
+                relative_profile_epsilon=args.relative_profile_epsilon,
+                relative_profile_log_clip=args.relative_profile_log_clip,
             )
             for row in evolution[split]["rows"]
         )
-    scaler = fit_background_feature_scaler(records["train"])
+    # Binary profile-validity flags retain their 0/1 semantics in S4.
+    expected_input_dim = len(STATIC_FEATURE_NAMES) + args.spectral_dim
+    if stage["profile"]:
+        expected_input_dim += len(SIGNED_CONNECTIVITY_PROFILE_NAMES)
+    passthrough = (
+        (expected_input_dim - 2, expected_input_dim - 1)
+        if args.stage == "s4" else ()
+    )
+    scaler = fit_background_feature_scaler(
+        records["train"], passthrough_indices=passthrough
+    )
     datasets = {
         split: BackgroundFusionDataset(records[split], evolution[split], scaler)
         for split in manifests
@@ -211,19 +235,34 @@ def main():
     input_dim = len(STATIC_FEATURE_NAMES) + args.spectral_dim
     if stage["profile"]:
         input_dim += len(SIGNED_CONNECTIVITY_PROFILE_NAMES)
+    profile_names = (
+        RELATIVE_SIGNED_CONNECTIVITY_PROFILE_NAMES
+        if args.stage == "s4" else SIGNED_CONNECTIVITY_PROFILE_NAMES
+    )
     feature_names = list(STATIC_FEATURE_NAMES) + [
         "signed_laplacian_eigenvector_{}".format(i)
         for i in range(args.spectral_dim)
-    ] + (list(SIGNED_CONNECTIVITY_PROFILE_NAMES) if stage["profile"] else [])
+    ] + (list(profile_names) if stage["profile"] else [])
     audit = feature_audit(records["train"], feature_names)
     atomic_json(output_dir / "train_feature_audit.json", audit)
+    community_kappa = (
+        fit_train_community_kappa(records["train"])
+        if stage.get("support_shrunk_community", False) else 1.0
+    )
     model_config = StaticBackgroundConfig(
         input_dim=input_dim,
         hidden_dim=args.hidden_dim,
         dropout=args.dropout,
         enable_community_residual=stage["community"],
-        community_gate_max=0.25,
-        community_gate_initial=0.05,
+        community_gate_max=0.10 if args.stage == "s4" else 0.25,
+        community_gate_initial=0.02 if args.stage == "s4" else 0.05,
+        encoder_variant="s4_robust" if args.stage == "s4" else "legacy",
+        base_input_dim=len(STATIC_FEATURE_NAMES) + args.spectral_dim,
+        profile_input_dim=len(SIGNED_CONNECTIVITY_PROFILE_NAMES),
+        profile_gate_max=0.25,
+        profile_gate_initial=0.04,
+        support_shrunk_community=stage.get("support_shrunk_community", False),
+        community_kappa=community_kappa,
     )
     training_config = BackgroundTrainingConfig(
         epochs=args.epochs,
@@ -235,6 +274,7 @@ def main():
         lambda_rank=args.lambda_rank,
         signed_dropedge_probability=stage["dropedge"],
         lambda_consistency=stage["consistency"],
+        margin_consistency_weight=args.margin_consistency_weight,
         checkpoint_ensemble_top_k=stage["top_k"],
         strict_deterministic=not args.non_strict,
     )
@@ -268,6 +308,16 @@ def main():
             split: len(dataset) for split, dataset in datasets.items()
         },
         "feature_names": feature_names,
+        "profile_mode": profile_mode if stage["profile"] else None,
+        "relative_profile_epsilon": (
+            args.relative_profile_epsilon if args.stage == "s4" else None
+        ),
+        "relative_profile_log_clip": (
+            args.relative_profile_log_clip if args.stage == "s4" else None
+        ),
+        "community_kappa_train_only": (
+            community_kappa if stage.get("support_shrunk_community", False) else None
+        ),
         "train_feature_audit": str((output_dir / "train_feature_audit.json").resolve()),
         "model_config": asdict(model_config),
         "training_config": asdict(training_config),

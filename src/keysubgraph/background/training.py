@@ -35,6 +35,7 @@ class BackgroundTrainingConfig:
     lambda_gate: float = 1.0e-3
     signed_dropedge_probability: float = 0.0
     lambda_consistency: float = 0.0
+    margin_consistency_weight: float = 0.0
     checkpoint_ensemble_top_k: int = 1
     strict_deterministic: bool = True
 
@@ -44,7 +45,8 @@ class BackgroundTrainingConfig:
         if min(self.learning_rate, self.gradient_clip) <= 0.0:
             raise ValueError("learning rate and gradient clip must be positive")
         if min(self.weight_decay, self.lambda_background, self.lambda_rank,
-               self.lambda_gate, self.lambda_consistency) < 0.0:
+               self.lambda_gate, self.lambda_consistency,
+               self.margin_consistency_weight) < 0.0:
             raise ValueError("loss weights and weight decay must be non-negative")
         if not 0.0 <= self.signed_dropedge_probability < 1.0:
             raise ValueError("signed DropEdge probability must be in [0,1)")
@@ -166,6 +168,32 @@ def pairwise_rank_loss(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tens
     return torch.nn.functional.softplus(-differences).mean()
 
 
+def ranking_margin_consistency_loss(
+    first_logits: torch.Tensor,
+    second_logits: torch.Tensor,
+    labels: torch.Tensor,
+    beta: float = 1.0,
+) -> torch.Tensor:
+    """Huber consistency of all positive-negative margins in a batch."""
+
+    positive = labels > 0.5
+    negative = ~positive
+    if not bool(positive.any()) or not bool(negative.any()):
+        return (first_logits.sum() + second_logits.sum()) * 0.0
+    first_margin = (
+        first_logits[positive, None] - first_logits[negative][None, :]
+    )
+    second_margin = (
+        second_logits[positive, None] - second_logits[negative][None, :]
+    )
+    return torch.nn.functional.smooth_l1_loss(
+        first_margin,
+        second_margin,
+        reduction="mean",
+        beta=float(beta),
+    )
+
+
 def _stable_view_seed(seed, epoch, sample_key, view_id, sign_name):
     payload = "{}|{}|{}|{}|{}".format(
         int(seed), int(epoch), sample_key, int(view_id), sign_name
@@ -235,7 +263,12 @@ def deterministic_signed_balanced_dropedge(
     )
 
 
-def background_consistency_loss(first, second):
+def background_consistency_loss(
+    first,
+    second,
+    labels=None,
+    margin_consistency_weight=0.0,
+):
     cosine = torch.nn.functional.cosine_similarity(
         first["background_representation"],
         second["background_representation"],
@@ -243,7 +276,14 @@ def background_consistency_loss(first, second):
         eps=1.0e-8,
     )
     logit_difference = first["background_logit"] - second["background_logit"]
-    return (1.0 - cosine + 0.1 * logit_difference.pow(2)).mean()
+    loss = (1.0 - cosine + 0.1 * logit_difference.pow(2)).mean()
+    if labels is not None and float(margin_consistency_weight) > 0.0:
+        loss = loss + float(margin_consistency_weight) * (
+            ranking_margin_consistency_loss(
+                first["background_logit"], second["background_logit"], labels
+            )
+        )
+    return loss
 
 
 def _iter_batches(dataset, batch_size, order, device):
@@ -293,6 +333,8 @@ def _finalize_collected(collected, mode):
     }
     metrics = _score_logits(labels, primary, collected["sites"])
     metrics["fusion_alpha"] = float(np.mean(collected["fusion_alpha"]))
+    metrics["profile_gate"] = float(np.mean(collected["profile_gate"]))
+    metrics["community_gate"] = float(np.mean(collected["community_gate"]))
     collected["metrics"] = metrics
     collected["branch_metrics"] = branch_metrics
     return collected
@@ -305,6 +347,7 @@ def evaluate_background_model(model, dataset, device, batch_size, mode):
         "evolution_representations": [], "evolution_logits": [],
         "background_representations": [], "background_logits": [],
         "fused_logits": [], "fusion_alpha": [], "background_residual": [],
+        "profile_gate": [], "community_gate": [],
     }
     with torch.no_grad():
         order = list(range(len(dataset)))
@@ -324,6 +367,8 @@ def evaluate_background_model(model, dataset, device, batch_size, mode):
             collected["fused_logits"].append(output["fused_logit"].cpu().numpy())
             collected["background_residual"].append(output["background_residual"].cpu().numpy())
             collected["fusion_alpha"].append(float(output["fusion_alpha"].cpu()))
+            collected["profile_gate"].append(float(output["profile_gate"].cpu()))
+            collected["community_gate"].append(float(output["community_gate"].cpu()))
     for name in (
         "labels", "evolution_representations", "evolution_logits",
         "background_representations", "background_logits", "fused_logits",
@@ -355,6 +400,8 @@ def evaluate_background_ensemble(models, dataset, device, batch_size, mode):
         "evolution_representations": reference["evolution_representations"].copy(),
         "evolution_logits": reference["evolution_logits"].copy(),
         "fusion_alpha": [],
+        "profile_gate": [],
+        "community_gate": [],
     }
     for name in (
         "background_representations",
@@ -367,6 +414,12 @@ def evaluate_background_ensemble(models, dataset, device, batch_size, mode):
         )
     averaged["fusion_alpha"] = [
         float(np.mean(result["fusion_alpha"])) for result in results
+    ]
+    averaged["profile_gate"] = [
+        float(np.mean(result["profile_gate"])) for result in results
+    ]
+    averaged["community_gate"] = [
+        float(np.mean(result["community_gate"])) for result in results
     ]
     return _finalize_collected(averaged, mode)
 
@@ -470,6 +523,11 @@ def train_background_model(
                 loss = loss + training_config.lambda_rank * pairwise_rank_loss(
                     averaged, batch["labels"]
                 )
+                if model.config.encoder_variant == "s4_robust":
+                    loss = loss + training_config.lambda_gate * (
+                        output["profile_gate"].pow(2)
+                        + output["community_gate"].pow(2)
+                    )
             else:
                 primary = output["fused_logit"]
                 if augmented is None:
@@ -496,7 +554,14 @@ def train_background_model(
                 loss = loss + training_config.lambda_gate * output["fusion_alpha"].pow(2)
             if augmented is not None and training_config.lambda_consistency > 0.0:
                 loss = loss + training_config.lambda_consistency * (
-                    background_consistency_loss(output, augmented)
+                    background_consistency_loss(
+                        output,
+                        augmented,
+                        labels=batch["labels"],
+                        margin_consistency_weight=(
+                            training_config.margin_consistency_weight
+                        ),
+                    )
                 )
             if not bool(torch.isfinite(loss)):
                 raise FloatingPointError("non-finite background training loss")
