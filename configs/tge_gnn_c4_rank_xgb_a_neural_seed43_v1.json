@@ -1,0 +1,73 @@
+{
+  "artifact_type": "tge_theory_closed_formal_specification",
+  "schema_version": 6,
+  "feature_schema_version": 2,
+  "baseline_id": "tge_gnn_c4_rank_xgb_a_neural_seed43_v1",
+  "status": "formal_candidate",
+  "task": "binary_classification_from_aligned_key_subgraph_evolution",
+  "model": {
+    "family": "tge_gnn_state_pool",
+    "variant": "state_pool_signed_gin_dual_view",
+    "gnn_type": "shared_signed_weighted_gin_dual_view",
+    "gnn_layers": 2,
+    "node_hidden_dim": 64,
+    "transition_hidden_dim": 64,
+    "transition_residual_dim": 32,
+    "signed_gin_initial_layer_gate": 0.5,
+    "dropout": 0.1,
+    "weight_bound": 1.0,
+    "structured_state_outputs": true
+  },
+  "loss": {
+    "classification": "unweighted_bce_with_logits",
+    "lambda_state": 0.2,
+    "lambda_realization": 0.0,
+    "lambda_weight_prediction": 0.0,
+    "realization_pairs_per_transition": 0,
+    "realization_transitions_per_sample": 0,
+    "lambda_linear_classifier_l2": 0.0,
+    "lambda_state_gate": 0.0,
+    "state_huber_beta": 0.1,
+    "state_supervision_mode": "scaled_train_only",
+    "state_scale_epsilon_abs": 0.0001,
+    "state_scale_floor_rho": 0.05,
+    "state_loss_calibration": "match_unscaled_initial",
+    "state_calibration_samples": 24,
+    "lambda_pairwise_rank": 0.05,
+    "pairwise_rank_temperature": 1.0
+  },
+  "training": {
+    "seed": 43,
+    "optimizer": "AdamW",
+    "learning_rate": 0.00125,
+    "weight_decay": 0.0001,
+    "max_epochs": 120,
+    "early_stopping_patience": 15,
+    "selection_metric": "validation_accuracy_constrained_roc_auc",
+    "minimum_validation_accuracy": 0.613,
+    "gradient_clip_norm": 5.0,
+    "batch_size": 16,
+    "num_workers": 0
+  },
+  "evaluation": {
+    "primary_metric": "roc_auc",
+    "decision_threshold": 0.5,
+    "threshold_selection": "none",
+    "secondary_metrics": [
+      "accuracy_at_0.5",
+      "balanced_accuracy",
+      "sensitivity",
+      "specificity",
+      "auprc",
+      "f1",
+      "site_stratified_roc_auc"
+    ]
+  },
+  "frozen_constraints": [
+    "The deployed neural graph is the exact formal C4 M3/M4 architecture.",
+    "RankNet pairs are all positive-negative subject pairs available inside each training batch.",
+    "The neural checkpoint maximizes validation AUROC only after validation ACC@0.5 reaches 0.613.",
+    "Classification retains unweighted BCE and the deployed threshold remains fixed at 0.5.",
+    "The downstream XGB stage receives only frozen C4 subject embeddings and logits."
+  ]
+}

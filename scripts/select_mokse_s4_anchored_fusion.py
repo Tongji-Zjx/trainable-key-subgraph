@@ -123,6 +123,17 @@ def load_static(directory, split, expected_role=None):
         "logits": payload["background_logits"].astype(np.float64),
         "source": str(path),
         "provenance": str(provenance_path),
+        "conditional_on_frozen_selector_and_trajectory_cache": bool(
+            provenance.get(
+                "conditional_on_frozen_selector_and_trajectory_cache", False
+            )
+        ),
+        "end_to_end_selector_oof": bool(
+            provenance.get("end_to_end_selector_oof", True)
+        ),
+        "historical_fixed_test_guided_hyperparameters": bool(
+            provenance.get("historical_fixed_test_guided_hyperparameters", False)
+        ),
     }
 
 
@@ -186,6 +197,17 @@ def load_subgraph(directory, split, reference, expected_role=None):
         "logits": np.asarray(logits, dtype=np.float64),
         "source": str(path.resolve()),
         "provenance": str(provenance_path.resolve()),
+        "conditional_on_frozen_selector_and_trajectory_cache": bool(
+            provenance.get(
+                "conditional_on_frozen_selector_and_trajectory_cache", False
+            )
+        ),
+        "end_to_end_selector_oof": bool(
+            provenance.get("end_to_end_selector_oof", True)
+        ),
+        "historical_fixed_test_guided_hyperparameters": bool(
+            provenance.get("historical_fixed_test_guided_hyperparameters", False)
+        ),
     }
 
 
@@ -225,6 +247,9 @@ def main():
         "oof" if args.selection_role == "development_oof" else "validation"
     )
     validation = {}
+    conditional_flags = []
+    end_to_end_flags = []
+    historical_test_guided_flags = []
     for fold in folds:
         # oof_features must be exported by a checkpoint selected on a separate
         # inner-validation split; ordinary validation_features are rejected.
@@ -245,6 +270,10 @@ def main():
             "reference": reference,
             "seed_logits": seed_logits,
         }
+        conditional_flags.append(
+            bool(reference["conditional_on_frozen_selector_and_trajectory_cache"])
+        )
+        end_to_end_flags.append(bool(reference["end_to_end_selector_oof"]))
 
     seen = set()
     for fold in folds:
@@ -298,6 +327,17 @@ def main():
             expected_role=args.selection_role,
         )
         subgraph = subgraph_export["logits"]
+        conditional_flags.append(
+            bool(
+                subgraph_export[
+                    "conditional_on_frozen_selector_and_trajectory_cache"
+                ]
+            )
+        )
+        end_to_end_flags.append(bool(subgraph_export["end_to_end_selector_oof"]))
+        historical_test_guided_flags.append(
+            bool(subgraph_export["historical_fixed_test_guided_hyperparameters"])
+        )
         fusion_folds.append({
             "sample_keys": reference["sample_keys"],
             "sites": reference["sites"],
@@ -332,8 +372,21 @@ def main():
         "fixed_test_evaluated": bool(args.evaluate_test),
         "fixed_test_used_for_selection": False,
         "selection_role": args.selection_role,
+        "conditional_on_frozen_selector_and_trajectory_cache": bool(
+            conditional_flags and all(conditional_flags)
+        ),
+        "end_to_end_selector_oof": bool(
+            end_to_end_flags and all(end_to_end_flags)
+        ),
+        "historical_fixed_test_guided_hyperparameters": bool(
+            historical_test_guided_flags and any(historical_test_guided_flags)
+        ),
+        "unbiased_fusion_given_frozen_upstream": (
+            args.selection_role == "development_oof"
+        ),
         "unbiased_generalization_estimate": (
             args.selection_role == "development_oof"
+            and bool(end_to_end_flags and all(end_to_end_flags))
         ),
     }
 

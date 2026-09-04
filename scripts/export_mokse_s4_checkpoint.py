@@ -104,6 +104,12 @@ def atomic_json(path, payload):
 def main():
     args = parse_args()
     audit = audit_oof_disjointness(args)
+    prediction_manifest_payload = json.loads(
+        args.manifest.resolve().read_text(encoding="utf-8")
+    )
+    conditional_derivation = prediction_manifest_payload.get(
+        "conditional_oof_derivation", {}
+    )
     run_dir = args.run_dir.resolve()
     run_manifest_path = run_dir / "run_manifest.json"
     if not run_manifest_path.is_file():
@@ -188,6 +194,14 @@ def main():
         "representation_averaging_scope": "same_seed_training_trajectory_only",
         "cross_seed_representation_averaging": False,
         "test_used_for_fit": False,
+        "conditional_on_frozen_selector_and_trajectory_cache": bool(
+            conditional_derivation.get(
+                "conditional_on_frozen_selector_and_trajectory_cache", False
+            )
+        ),
+        "end_to_end_selector_oof": bool(
+            conditional_derivation.get("end_to_end_selector_oof", True)
+        ),
     }
     atomic_json(output.with_suffix(output.suffix + ".json"), provenance)
     print(json.dumps(provenance, ensure_ascii=False, indent=2, sort_keys=True))

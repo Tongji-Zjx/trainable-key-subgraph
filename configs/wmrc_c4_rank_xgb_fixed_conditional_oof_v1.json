@@ -1,0 +1,32 @@
+{
+  "artifact_type": "tge_c4_rank_xgb_pipeline_specification",
+  "schema_version": 1,
+  "baseline_id": "wmrc_c4_rank_xgb_fixed_conditional_oof_v1",
+  "seed": 42,
+  "expected_neural_baseline_id": "wmrc_c4_rank_ordinary_seed42_v1",
+  "expected_pairwise_rank_weight": 0.05,
+  "decision_threshold": 0.5,
+  "class_weight_scheme": "none",
+  "booster": {
+    "max_depth": 2,
+    "learning_rate": 0.012917209213853772,
+    "num_boost_round": 10,
+    "min_child_weight": 1.4146494736527924,
+    "subsample": 0.9920319137925393,
+    "colsample_bytree": 0.9806592088229646,
+    "reg_lambda": 1.125180866648891,
+    "reg_alpha": 1.1114391543117361,
+    "gamma": 0.8255941944406222,
+    "tree_method": "hist",
+    "nthread": 8
+  },
+  "fixed_num_boost_round": 10,
+  "fixed_residual_alpha": 0.8887211357989844,
+  "residual_alpha_grid": [0.8887211357989844],
+  "selection": {
+    "rule": "validation_ACC_guardrail_then_AUROC_then_logloss",
+    "minimum_validation_accuracy": 0.55
+  },
+  "outer_test": "evaluation_only",
+  "historical_fixed_test_guided_hyperparameters": true
+}
