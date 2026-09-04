@@ -21,6 +21,9 @@ class StaticBackgroundConfig:
     identity_lambda: float = 0.50
     alpha_max: float = 0.50
     alpha_initial: float = 0.10
+    enable_community_residual: bool = False
+    community_gate_max: float = 0.25
+    community_gate_initial: float = 0.05
 
     def __post_init__(self):
         if min(self.input_dim, self.hidden_dim, self.representation_dim, self.layers) < 1:
@@ -35,6 +38,10 @@ class StaticBackgroundConfig:
             raise ValueError("alpha_max must be positive")
         if not 0.0 < self.alpha_initial < self.alpha_max:
             raise ValueError("alpha_initial must be inside (0, alpha_max)")
+        if self.community_gate_max <= 0.0:
+            raise ValueError("community gate maximum must be positive")
+        if not 0.0 < self.community_gate_initial < self.community_gate_max:
+            raise ValueError("community gate initialization must be inside its bound")
 
 
 class SignedWeightedGCNIILayer(nn.Module):
@@ -78,6 +85,32 @@ def masked_mean_std(values: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     return torch.cat((mean, variance.clamp_min(0.0).sqrt()), dim=-1)
 
 
+def masked_community_mean_std(
+    values: torch.Tensor,
+    community_labels: torch.Tensor,
+    mask: torch.Tensor,
+) -> torch.Tensor:
+    """Pool nodes within communities, then pool communities without ID semantics."""
+
+    if values.ndim != 3 or community_labels.shape != mask.shape:
+        raise ValueError("community pooling inputs do not align")
+    pooled = []
+    for batch_index in range(values.shape[0]):
+        valid = mask[batch_index]
+        labels = community_labels[batch_index, valid]
+        states = values[batch_index, valid]
+        unique = torch.unique(labels[labels >= 0], sorted=True)
+        if unique.numel() == 0:
+            raise ValueError("a graph does not contain any valid community")
+        communities = torch.stack(
+            [states[labels == label].mean(dim=0) for label in unique], dim=0
+        )
+        mean = communities.mean(dim=0)
+        variance = ((communities - mean) ** 2).mean(dim=0)
+        pooled.append(torch.cat((mean, variance.clamp_min(0.0).sqrt()), dim=-1))
+    return torch.stack(pooled, dim=0)
+
+
 class GlobalBackgroundGCN(nn.Module):
     def __init__(self, config: StaticBackgroundConfig = StaticBackgroundConfig()):
         super().__init__()
@@ -91,6 +124,13 @@ class GlobalBackgroundGCN(nn.Module):
         pooled_dim = 2 * config.hidden_dim
         self.layer_residual = nn.Linear(pooled_dim, pooled_dim)
         self.layer_gate = nn.Parameter(torch.tensor(0.0))
+        if config.enable_community_residual:
+            self.community_norm = nn.LayerNorm(pooled_dim)
+            self.community_residual = nn.Linear(pooled_dim, pooled_dim)
+            ratio = config.community_gate_initial / config.community_gate_max
+            self.community_gate_parameter = nn.Parameter(
+                torch.tensor(math.log(ratio / (1.0 - ratio)), dtype=torch.float32)
+            )
         self.projection = nn.Sequential(
             nn.LayerNorm(pooled_dim),
             nn.Linear(pooled_dim, config.representation_dim),
@@ -98,7 +138,14 @@ class GlobalBackgroundGCN(nn.Module):
         self.classifier_norm = nn.LayerNorm(config.representation_dim)
         self.classifier = nn.Linear(config.representation_dim, 1)
 
-    def forward(self, node_features, positive, negative, node_mask):
+    def forward(
+        self,
+        node_features,
+        positive,
+        negative,
+        node_mask,
+        community_labels=None,
+    ):
         initial = self.input_projection(self.input_norm(node_features))
         initial = initial * node_mask.unsqueeze(-1).to(initial.dtype)
         state = initial
@@ -109,12 +156,27 @@ class GlobalBackgroundGCN(nn.Module):
         graph = pooled[-1]
         if len(pooled) > 1:
             graph = graph + torch.sigmoid(self.layer_gate) * self.layer_residual(pooled[0])
+        if self.config.enable_community_residual:
+            if community_labels is None:
+                raise ValueError("community labels are required by community residual pooling")
+            community = masked_community_mean_std(
+                state, community_labels, node_mask
+            )
+            community_gate = self.config.community_gate_max * torch.sigmoid(
+                self.community_gate_parameter
+            )
+            graph = graph + community_gate * self.community_residual(
+                self.community_norm(community)
+            )
+        else:
+            community_gate = graph.new_tensor(0.0)
         representation = self.projection(graph)
         logit = self.classifier(self.classifier_norm(representation)).squeeze(-1)
         return {
             "background_representation": representation,
             "background_logit": logit,
             "layer_gate": torch.sigmoid(self.layer_gate),
+            "community_gate": community_gate,
         }
 
 
@@ -149,7 +211,21 @@ class MoKSEBackgroundModel(nn.Module):
         self.background = GlobalBackgroundGCN(config)
         self.fusion = MoKSEBackgroundFusion(config.alpha_max, config.alpha_initial)
 
-    def forward(self, node_features, positive, negative, node_mask, evolution_logit):
-        output = self.background(node_features, positive, negative, node_mask)
+    def forward(
+        self,
+        node_features,
+        positive,
+        negative,
+        node_mask,
+        evolution_logit,
+        community_labels=None,
+    ):
+        output = self.background(
+            node_features,
+            positive,
+            negative,
+            node_mask,
+            community_labels=community_labels,
+        )
         output.update(self.fusion(evolution_logit, output["background_logit"]))
         return output

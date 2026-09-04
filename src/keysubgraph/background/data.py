@@ -26,6 +26,21 @@ STATIC_FEATURE_NAMES = (
     "intra_negative_density",
 )
 
+SIGNED_CONNECTIVITY_PROFILE_NAMES = (
+    "positive_q25",
+    "positive_q50",
+    "positive_q75",
+    "positive_q90",
+    "negative_q25",
+    "negative_q50",
+    "negative_q75",
+    "negative_q90",
+    "has_positive_edge",
+    "has_negative_edge",
+)
+
+DEFAULT_PROFILE_QUANTILES = (0.25, 0.50, 0.75, 0.90)
+
 
 def _safe_torch_load(path: Path):
     try:
@@ -155,6 +170,48 @@ def build_static_node_features(
     return result
 
 
+def build_signed_connectivity_profile(
+    adjacency: torch.Tensor,
+    quantiles: Sequence[float] = DEFAULT_PROFILE_QUANTILES,
+) -> torch.Tensor:
+    """Return permutation-equivariant signed edge-weight summaries per node.
+
+    Negative edges are summarized by magnitude.  Empty sign channels receive
+    zero placeholders together with an explicit validity flag.  The default
+    upper-tail statistic is q90 rather than a maximum so that the profile is
+    less sensitive to a single extreme edge and to varying node counts.
+    """
+
+    adjacency = torch.as_tensor(adjacency, dtype=torch.float32)
+    if adjacency.ndim != 2 or adjacency.shape[0] != adjacency.shape[1]:
+        raise ValueError("signed connectivity profile requires a square adjacency")
+    requested = tuple(float(value) for value in quantiles)
+    if len(requested) != 4 or any(value < 0.0 or value > 1.0 for value in requested):
+        raise ValueError("signed connectivity profile requires four quantiles in [0,1]")
+    count = int(adjacency.shape[0])
+    output = torch.zeros(count, 2 * len(requested) + 2, dtype=adjacency.dtype)
+    quantile_tensor = torch.tensor(requested, dtype=adjacency.dtype)
+    for node in range(count):
+        row = adjacency[node]
+        positive = row[row > 0.0]
+        negative = (-row[row < 0.0])
+        if positive.numel():
+            output[node, : len(requested)] = torch.quantile(
+                positive, quantile_tensor
+            )
+            output[node, -2] = 1.0
+        if negative.numel():
+            output[node, len(requested): 2 * len(requested)] = torch.quantile(
+                negative, quantile_tensor
+            )
+            output[node, -1] = 1.0
+    if output.shape != (count, len(SIGNED_CONNECTIVITY_PROFILE_NAMES)):
+        raise RuntimeError("unexpected signed connectivity profile shape")
+    if not bool(torch.isfinite(output).all()):
+        raise ValueError("signed connectivity profile contains non-finite values")
+    return output
+
+
 def signed_laplacian_encoding(
     adjacency: torch.Tensor,
     dimensions: int = 8,
@@ -213,6 +270,9 @@ class GlobalStaticGraphRecord:
     source_path: str
     source_sha256: str
     node_features: torch.Tensor
+    community_labels: torch.Tensor
+    raw_positive_adjacency: torch.Tensor
+    raw_negative_adjacency: torch.Tensor
     positive_adjacency: torch.Tensor
     negative_adjacency: torch.Tensor
     eigenvalues: torch.Tensor
@@ -227,10 +287,20 @@ def build_global_static_record(
     row: Mapping[str, object],
     spectral_dimensions: int = 8,
     cache_dir: Optional[Path] = None,
+    include_signed_profile: bool = False,
+    profile_quantiles: Sequence[float] = DEFAULT_PROFILE_QUANTILES,
 ) -> GlobalStaticGraphRecord:
     sample_key = str(row["sample_key"])
     path = resolve_global_graph_path(Path(global_root), row)
     cache_path = None
+    quantile_token = "_".join(
+        "q{:g}".format(100.0 * float(value)) for value in profile_quantiles
+    )
+    feature_version = (
+        "static12_spec{}_profile10_{}".format(spectral_dimensions, quantile_token)
+        if include_signed_profile
+        else "static12_spec{}".format(spectral_dimensions)
+    )
     if cache_dir is not None:
         token = hashlib.sha256(sample_key.encode("utf-8")).hexdigest()[:20]
         cache_path = Path(cache_dir) / (token + ".pt")
@@ -239,6 +309,8 @@ def build_global_static_record(
             if (
                 cached.get("sample_key") == sample_key
                 and int(cached.get("spectral_dimensions", -1)) == spectral_dimensions
+                and int(cached.get("cache_schema_version", -1)) == 2
+                and cached.get("feature_version") == feature_version
                 and cached.get("source_size") == path.stat().st_size
                 and cached.get("source_mtime_ns") == path.stat().st_mtime_ns
             ):
@@ -264,9 +336,17 @@ def build_global_static_record(
         raise ValueError("global coordinates do not align")
 
     static = build_static_node_features(adjacency, communities)
+    feature_blocks = [static]
     spectral, eigenvalues = signed_laplacian_encoding(
         adjacency, dimensions=spectral_dimensions
     )
+    feature_blocks.append(spectral)
+    if include_signed_profile:
+        feature_blocks.append(
+            build_signed_connectivity_profile(adjacency, profile_quantiles)
+        )
+    raw_positive = adjacency.clamp_min(0.0)
+    raw_negative = -adjacency.clamp_max(0.0)
     positive, negative = signed_normalized_channels(adjacency)
     record = GlobalStaticGraphRecord(
         sample_key=sample_key,
@@ -275,7 +355,10 @@ def build_global_static_record(
         label=int(row["label"]),
         source_path=str(path.resolve()),
         source_sha256=_sha256(path),
-        node_features=torch.cat((static, spectral), dim=-1),
+        node_features=torch.cat(tuple(feature_blocks), dim=-1),
+        community_labels=communities,
+        raw_positive_adjacency=raw_positive,
+        raw_negative_adjacency=raw_negative,
         positive_adjacency=positive,
         negative_adjacency=negative,
         eigenvalues=eigenvalues,
@@ -285,9 +368,11 @@ def build_global_static_record(
         temporary = cache_path.with_suffix(".pt.tmp")
         torch.save(
             {
-                "artifact_type": "mokse_global_static_cache_v1",
+                "artifact_type": "mokse_global_static_cache_v2",
+                "cache_schema_version": 2,
                 "sample_key": sample_key,
                 "spectral_dimensions": spectral_dimensions,
+                "feature_version": feature_version,
                 "source_size": path.stat().st_size,
                 "source_mtime_ns": path.stat().st_mtime_ns,
                 "record": record.__dict__,
