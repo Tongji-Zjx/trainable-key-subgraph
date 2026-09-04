@@ -248,6 +248,9 @@ class MoKSEBackgroundS4Test(unittest.TestCase):
             axis=1,
         )
         self.assertTrue(np.allclose(output["raw_median_logit"], expected_raw))
+        training = self.seed_payloads(role="training_fit")
+        training_fit = fit_s4_seed_ensemble(training, fit_role="training_fit")
+        self.assertEqual(training_fit["fit_prediction_role"], "training_fit")
 
     def fusion_folds(self):
         folds = []

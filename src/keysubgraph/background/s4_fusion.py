@@ -17,12 +17,14 @@ def _vector(values, dtype, name):
     return result
 
 
-def _validate_seed_payload(payload, require_oof=False):
+def _validate_seed_payload(payload, required_role=None):
     required = ("seed", "sample_keys", "logits")
     if any(name not in payload for name in required):
         raise ValueError("S4 seed prediction payload is incomplete")
-    if require_oof and payload.get("prediction_role") != "development_oof":
-        raise ValueError("S4 seed fitting requires development-OOF predictions")
+    if required_role is not None and payload.get("prediction_role") != required_role:
+        raise ValueError(
+            "S4 seed prediction role must be {}".format(required_role)
+        )
     sample_keys = _vector(payload["sample_keys"], str, "sample_keys")
     logits = _vector(payload["logits"], np.float64, "logits")
     if sample_keys.shape != logits.shape:
@@ -39,8 +41,8 @@ def _validate_seed_payload(payload, require_oof=False):
     }
 
 
-def _align_seed_payloads(payloads, expected_seeds=None, require_oof=False):
-    rows = [_validate_seed_payload(row, require_oof=require_oof) for row in payloads]
+def _align_seed_payloads(payloads, expected_seeds=None, required_role=None):
+    rows = [_validate_seed_payload(row, required_role=required_role) for row in payloads]
     if len(rows) < 2:
         raise ValueError("S4 robust ensemble requires at least two fixed seeds")
     by_seed = {row["seed"]: row for row in rows}
@@ -86,13 +88,17 @@ def fit_s4_seed_ensemble(
     development_oof_predictions: Sequence[Mapping[str, object]],
     expected_seeds: Sequence[int] = (43, 44, 45),
     epsilon: float = 1.0e-8,
+    fit_role: str = "development_oof",
 ):
-    """Fit per-seed score scales exclusively from aligned development OOF logits."""
+    """Fit per-seed scales from an explicitly declared non-test fit cohort."""
+
+    if fit_role not in ("development_oof", "training_fit"):
+        raise ValueError("S4 seed ensemble fit role is unsupported")
 
     seeds, sample_keys, matrix = _align_seed_payloads(
         development_oof_predictions,
         expected_seeds=expected_seeds,
-        require_oof=True,
+        required_role=fit_role,
     )
     means = np.mean(matrix, axis=0)
     scales = np.std(matrix, axis=0)
@@ -111,7 +117,7 @@ def fit_s4_seed_ensemble(
         "uncertainty_tau": tau,
         "epsilon": float(epsilon),
         "representation_averaging": False,
-        "fit_prediction_role": "development_oof",
+        "fit_prediction_role": fit_role,
         "test_used_for_fit": False,
     }
 
@@ -124,7 +130,7 @@ def apply_s4_seed_ensemble(
         raise ValueError("S4 seed ensemble artifact type mismatch")
     seeds = tuple(int(value) for value in fit["seeds"])
     observed, sample_keys, matrix = _align_seed_payloads(
-        seed_predictions, expected_seeds=seeds, require_oof=False
+        seed_predictions, expected_seeds=seeds, required_role=None
     )
     if observed != tuple(sorted(seeds)):
         raise ValueError("S4 seed application order mismatch")

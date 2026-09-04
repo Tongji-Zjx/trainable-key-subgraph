@@ -61,19 +61,14 @@ def parse_matrix(values):
 
 def load_s4(directory, split):
     path = Path(directory) / (split + "_features.npz")
-    sidecar = path.with_suffix(path.suffix + ".json")
-    if not path.is_file() or not sidecar.is_file():
-        raise FileNotFoundError("missing audited S4 export: {}".format(path))
-    provenance = json.loads(sidecar.read_text(encoding="utf-8"))
-    expected = "development_oof" if split == "oof" else "fixed_test"
-    if provenance.get("prediction_role") != expected:
-        raise ValueError("S4 prediction role mismatch")
-    if provenance.get("test_used_for_fit", False):
-        raise ValueError("fixed test was used to fit an S4 export")
-    if split == "oof" and not (
-        provenance.get("oof_disjointness_audit") or {}
-    ).get("all_disjoint", False):
-        raise ValueError("S4 OOF export lacks a passed disjointness audit")
+    run_manifest = Path(directory) / "run_manifest.json"
+    if not path.is_file() or not run_manifest.is_file():
+        raise FileNotFoundError("missing frozen S4 run artifact: {}".format(path))
+    provenance = json.loads(run_manifest.read_text(encoding="utf-8"))
+    if provenance.get("stage") != "s4":
+        raise ValueError("static promotion received a non-S4 run")
+    if provenance.get("test_used_for_selection", False):
+        raise ValueError("fixed test was used during S4 checkpoint selection")
     payload = np.load(str(path), allow_pickle=False)
     return {
         "sample_keys": payload["sample_keys"].astype(str),
@@ -107,21 +102,20 @@ def align(reference, observed):
     return observed["logits"][order]
 
 
-def ensemble_fit(matrix, folds, seeds):
+def ensemble_fit(matrix, fold, seeds):
     rows = []
+    reference = load_s4(matrix[(fold, seeds[0])], "train")
     for seed in seeds:
-        keys, logits = [], []
-        for fold in folds:
-            payload = load_s4(matrix[(fold, seed)], "oof")
-            keys.extend(payload["sample_keys"].tolist())
-            logits.extend(payload["logits"].tolist())
+        observed = load_s4(matrix[(fold, seed)], "train")
         rows.append({
             "seed": seed,
-            "sample_keys": keys,
-            "logits": logits,
-            "prediction_role": "development_oof",
+            "sample_keys": reference["sample_keys"],
+            "logits": align(reference, observed),
+            "prediction_role": "training_fit",
         })
-    return fit_s4_seed_ensemble(rows, expected_seeds=seeds)
+    return fit_s4_seed_ensemble(
+        rows, expected_seeds=seeds, fit_role="training_fit"
+    )
 
 
 def combined_s4_metrics(labels, sites, ensemble):
@@ -152,9 +146,11 @@ def main():
     matrix, folds, seeds = parse_matrix(args.s4_seed_fold_dir)
     if len(args.s3_fold_dir) != len(folds):
         raise ValueError("one S3 test directory is required per S4 fold")
-    fit = ensemble_fit(matrix, folds, seeds)
     s3_rows, s4_rows, per_fold = [], [], []
+    fold_fits = {}
     for fold, s3_directory in zip(folds, args.s3_fold_dir):
+        fit = ensemble_fit(matrix, fold, seeds)
+        fold_fits[str(fold)] = fit
         reference = load_s4(matrix[(fold, seeds[0])], "test")
         seed_rows = []
         for seed in seeds:
@@ -189,7 +185,8 @@ def main():
         "artifact_type": "mokse_s4_test_guided_static_promotion_run_v1",
         "folds": list(folds),
         "seeds": list(seeds),
-        "seed_ensemble_fit": fit,
+        "seed_ensemble_fit_source": "each_fold_training_predictions_only",
+        "seed_ensemble_fold_fits": fold_fits,
         "per_fold_fixed_test_metrics": per_fold,
         "promotion": selection,
         "fixed_test_used_for_architecture_promotion": True,
