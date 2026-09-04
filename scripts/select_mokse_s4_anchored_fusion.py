@@ -44,6 +44,15 @@ def parse_args():
         help="one directory per fold containing oof_predictions.csv",
     )
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument(
+        "--selection-role",
+        choices=("development_oof", "checkpoint_selection_validation"),
+        default="development_oof",
+        help=(
+            "Use strict development OOF by default. The validation option is "
+            "an explicitly biased legacy-screening mode."
+        ),
+    )
     parser.add_argument("--evaluate-test", action="store_true")
     parser.add_argument("--minimum-mean-auc-gain", type=float, default=0.003)
     parser.add_argument("--maximum-mean-accuracy-drop", type=float, default=0.005)
@@ -79,7 +88,7 @@ def parse_seed_fold_specs(values):
     return result, folds, seeds
 
 
-def load_static(directory, split):
+def load_static(directory, split, expected_role=None):
     path = Path(directory) / (split + "_features.npz")
     if not path.is_file():
         raise FileNotFoundError(path)
@@ -91,14 +100,15 @@ def load_static(directory, split):
             )
         )
     provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
-    expected_role = "development_oof" if split == "oof" else "fixed_test"
+    if expected_role is None:
+        expected_role = "development_oof" if split == "oof" else "fixed_test"
     if provenance.get("prediction_role") != expected_role:
         raise ValueError("S4 static prediction role mismatch")
     if provenance.get("test_used_for_fit", False):
         raise ValueError("S4 static predictions were fitted with fixed-test data")
     if provenance.get("cross_seed_representation_averaging", False):
         raise ValueError("S4 forbids cross-seed representation averaging")
-    if split == "oof" and not (
+    if expected_role == "development_oof" and not (
         provenance.get("oof_disjointness_audit") or {}
     ).get("all_disjoint", False):
         raise ValueError("S4 static OOF disjointness was not verified")
@@ -128,7 +138,7 @@ def align_static(reference, observed):
     return observed["logits"][order]
 
 
-def load_subgraph(directory, split, reference):
+def load_subgraph(directory, split, reference, expected_role=None):
     path = Path(directory) / (split + "_predictions.csv")
     if not path.is_file():
         raise FileNotFoundError(path)
@@ -140,10 +150,11 @@ def load_subgraph(directory, split, reference):
             )
         )
     provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
-    expected_role = "development_oof" if split == "oof" else "fixed_test"
+    if expected_role is None:
+        expected_role = "development_oof" if split == "oof" else "fixed_test"
     if provenance.get("prediction_role") != expected_role:
         raise ValueError("S4 subgraph prediction role mismatch")
-    if split == "oof" and not (
+    if expected_role == "development_oof" and not (
         provenance.get("oof_disjointness_audit") or {}
     ).get("all_disjoint", False):
         raise ValueError("S4 subgraph OOF disjointness was not verified")
@@ -210,15 +221,25 @@ def main():
     if len(args.subgraph_prediction_dir) != len(folds):
         raise ValueError("one frozen subgraph directory is required per fold")
 
+    selection_split = (
+        "oof" if args.selection_role == "development_oof" else "validation"
+    )
     validation = {}
     for fold in folds:
         # oof_features must be exported by a checkpoint selected on a separate
         # inner-validation split; ordinary validation_features are rejected.
-        reference = load_static(matrix[(fold, seeds[0])], "oof")
+        reference = load_static(
+            matrix[(fold, seeds[0])], selection_split,
+            expected_role=args.selection_role,
+        )
         seed_logits = {seeds[0]: reference["logits"]}
         for seed in seeds[1:]:
             seed_logits[seed] = align_static(
-                reference, load_static(matrix[(fold, seed)], "oof")
+                reference,
+                load_static(
+                    matrix[(fold, seed)], selection_split,
+                    expected_role=args.selection_role,
+                ),
             )
         validation[fold] = {
             "reference": reference,
@@ -246,10 +267,10 @@ def main():
                 "seed": seed,
                 "sample_keys": by_seed[seed]["sample_keys"],
                 "logits": by_seed[seed]["logits"],
-                "prediction_role": "development_oof",
+                "prediction_role": args.selection_role,
             }
             for seed in seeds
-        ], expected_seeds=seeds)
+        ], expected_seeds=seeds, fit_role=args.selection_role)
 
     # The all-OOF fit is frozen only for later fixed-test application.  Each
     # development fold below is scored with a scale/tau fit from other folds.
@@ -268,11 +289,14 @@ def main():
                 "seed": seed,
                 "sample_keys": reference["sample_keys"],
                 "logits": validation[fold]["seed_logits"][seed],
-                "prediction_role": "development_oof",
+                "prediction_role": args.selection_role,
             }
             for seed in seeds
         ])
-        subgraph_export = load_subgraph(subgraph_dir, "oof", reference)
+        subgraph_export = load_subgraph(
+            subgraph_dir, selection_split, reference,
+            expected_role=args.selection_role,
+        )
         subgraph = subgraph_export["logits"]
         fusion_folds.append({
             "sample_keys": reference["sample_keys"],
@@ -281,7 +305,7 @@ def main():
             "subgraph_logits": subgraph,
             "static_scores": ensemble["standardized_median_score"],
             "static_uncertainty": ensemble["uncertainty"],
-            "prediction_role": "development_oof",
+            "prediction_role": args.selection_role,
         })
         fold_ensembles[fold] = ensemble
         fold_ensemble_fits[fold] = cross_fit
@@ -291,7 +315,9 @@ def main():
         minimum_mean_auc_gain=args.minimum_mean_auc_gain,
         maximum_mean_accuracy_drop=args.maximum_mean_accuracy_drop,
     )
-    selection = select_s4_anchored_fusion(fusion_folds, config)
+    selection = select_s4_anchored_fusion(
+        fusion_folds, config, selection_role=args.selection_role
+    )
     report = {
         "artifact_type": "mokse_s4_oof_selection_run_v1",
         "dataset": args.dataset,
@@ -305,6 +331,10 @@ def main():
         "anchored_fusion_selection": selection,
         "fixed_test_evaluated": bool(args.evaluate_test),
         "fixed_test_used_for_selection": False,
+        "selection_role": args.selection_role,
+        "unbiased_generalization_estimate": (
+            args.selection_role == "development_oof"
+        ),
     }
 
     development_rows = []
@@ -373,13 +403,17 @@ def main():
     if args.evaluate_test:
         test_rows = []
         for fold, subgraph_dir in zip(folds, args.subgraph_prediction_dir):
-            reference = load_static(matrix[(fold, seeds[0])], "test")
+            reference = load_static(
+                matrix[(fold, seeds[0])], "test", expected_role="fixed_test"
+            )
             payloads = [{
                 "seed": seeds[0], "sample_keys": reference["sample_keys"],
                 "logits": reference["logits"], "prediction_role": "fixed_test",
             }]
             for seed in seeds[1:]:
-                observed = load_static(matrix[(fold, seed)], "test")
+                observed = load_static(
+                    matrix[(fold, seed)], "test", expected_role="fixed_test"
+                )
                 payloads.append({
                     "seed": seed,
                     "sample_keys": reference["sample_keys"],
@@ -387,7 +421,9 @@ def main():
                     "prediction_role": "fixed_test",
                 })
             ensemble = apply_s4_seed_ensemble(ensemble_fit, payloads)
-            subgraph = load_subgraph(subgraph_dir, "test", reference)["logits"]
+            subgraph = load_subgraph(
+                subgraph_dir, "test", reference, expected_role="fixed_test"
+            )["logits"]
             fused = apply_s4_anchored_fusion(
                 selection,
                 subgraph,
@@ -412,6 +448,11 @@ def main():
         report["fixed_test_interpretation"] = (
             "shared fixed-test repeated across rotation-trained models; exploratory audit only"
         )
+        if args.selection_role != "development_oof":
+            report["methodological_limitation"] = (
+                "fusion beta was screened on checkpoint-selection validation "
+                "predictions; this is not a strict OOF or unbiased estimate"
+            )
 
     output_dir = args.output_dir.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)

@@ -92,7 +92,11 @@ def fit_s4_seed_ensemble(
 ):
     """Fit per-seed scales from an explicitly declared non-test fit cohort."""
 
-    if fit_role not in ("development_oof", "training_fit"):
+    if fit_role not in (
+        "development_oof",
+        "checkpoint_selection_validation",
+        "training_fit",
+    ):
         raise ValueError("S4 seed ensemble fit role is unsupported")
 
     seeds, sample_keys, matrix = _align_seed_payloads(
@@ -304,15 +308,17 @@ def select_s4_static_promotion(
     }
 
 
-def _validate_oof_fold(payload):
+def _validate_development_fold(payload, required_role="development_oof"):
     required = (
         "sample_keys", "sites", "labels", "subgraph_logits",
         "static_scores", "static_uncertainty",
     )
     if any(name not in payload for name in required):
         raise ValueError("S4 anchored fusion fold is incomplete")
-    if payload.get("prediction_role") != "development_oof":
-        raise ValueError("S4 fusion selection requires development-OOF folds")
+    if payload.get("prediction_role") != required_role:
+        raise ValueError(
+            "S4 fusion selection requires {} folds".format(required_role)
+        )
     result = {
         "sample_keys": _vector(payload["sample_keys"], str, "sample_keys"),
         "sites": _vector(payload["sites"], str, "sites"),
@@ -343,7 +349,7 @@ def _validate_oof_fold(payload):
     return result
 
 
-def _fit_complement_calibration(folds, epsilon):
+def _fit_complement_calibration(folds, epsilon, centering_source="development_oof"):
     subgraph = np.concatenate([fold["subgraph_logits"] for fold in folds])
     static = np.concatenate([fold["static_scores"] for fold in folds])
     uncertainty = np.concatenate([fold["static_uncertainty"] for fold in folds])
@@ -377,7 +383,7 @@ def _fit_complement_calibration(folds, epsilon):
         # Train/OOF centering prevents a systematic intercept shift at ACC@0.5.
         "correction_mean": float(np.mean(correction)),
         "epsilon": float(epsilon),
-        "centering_source": "development_oof",
+        "centering_source": str(centering_source),
     }
 
 
@@ -557,10 +563,24 @@ def _candidate(beta, folds, calibrations, config):
 def select_s4_anchored_fusion(
     development_oof_folds: Sequence[Mapping[str, object]],
     config: S4AnchoredFusionConfig,
+    selection_role: str = "development_oof",
 ):
-    """Select shared beta with leave-one-fold-out calibration and exact fallback."""
+    """Select shared beta with leave-one-fold-out calibration and exact fallback.
 
-    folds = [_validate_oof_fold(fold) for fold in development_oof_folds]
+    ``development_oof`` remains the confirmatory default.  The explicit
+    ``checkpoint_selection_validation`` role is an exploratory screen for
+    legacy experiments whose validation cohort also selected checkpoints.  It
+    is never reported as an unbiased OOF estimate.
+    """
+
+    if selection_role not in (
+        "development_oof", "checkpoint_selection_validation"
+    ):
+        raise ValueError("unsupported S4 anchored fusion selection role")
+    folds = [
+        _validate_development_fold(fold, required_role=selection_role)
+        for fold in development_oof_folds
+    ]
     if len(folds) < max(2, config.minimum_non_decreasing_folds):
         raise ValueError("not enough S4 development-OOF folds")
     seen = set()
@@ -573,6 +593,7 @@ def select_s4_anchored_fusion(
         _fit_complement_calibration(
             [other for other_index, other in enumerate(folds) if other_index != index],
             config.epsilon,
+            centering_source=selection_role,
         )
         for index in range(len(folds))
     ]
@@ -596,12 +617,19 @@ def select_s4_anchored_fusion(
         selected_beta = 0.0
         source = "subgraph_exact_fallback"
         fallback_reason = "no positive beta passed all development-OOF no-harm checks"
-    final_calibration = _fit_complement_calibration(folds, config.epsilon)
+    final_calibration = _fit_complement_calibration(
+        folds, config.epsilon, centering_source=selection_role
+    )
     return {
         "artifact_type": "mokse_s4_anchored_fusion_selection_v1",
         "config": asdict(config),
         "development_oof_sample_count": len(seen),
         "development_oof_fold_count": len(folds),
+        "selection_role": selection_role,
+        "unbiased_generalization_estimate": selection_role == "development_oof",
+        "checkpoint_selection_validation_used": (
+            selection_role == "checkpoint_selection_validation"
+        ),
         "calibration_mode": "leave_one_fold_out_for_selection_then_all_oof_for_application",
         "leave_one_fold_out_calibrations": calibrations,
         "selected_source": source,

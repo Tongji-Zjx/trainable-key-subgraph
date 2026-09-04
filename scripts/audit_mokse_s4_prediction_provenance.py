@@ -9,11 +9,21 @@ import hashlib
 import json
 from pathlib import Path
 
+import numpy as np
+
 
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--predictions", type=Path, required=True)
-    parser.add_argument("--prediction-role", choices=("development_oof", "fixed_test"), required=True)
+    parser.add_argument(
+        "--prediction-role",
+        choices=(
+            "development_oof",
+            "checkpoint_selection_validation",
+            "fixed_test",
+        ),
+        required=True,
+    )
     parser.add_argument("--prediction-manifest", type=Path, required=True)
     parser.add_argument(
         "--fit-manifest", action="append", type=Path, default=[],
@@ -43,6 +53,14 @@ def manifest_keys(path):
 
 
 def prediction_keys(path):
+    if Path(path).suffix.lower() == ".npz":
+        payload = np.load(str(path), allow_pickle=False)
+        if "sample_keys" not in payload:
+            raise ValueError("NPZ predictions do not contain sample_keys")
+        keys = [str(value) for value in payload["sample_keys"].tolist()]
+        if not keys or any(not key for key in keys) or len(set(keys)) != len(keys):
+            raise ValueError("prediction sample keys are empty or duplicated")
+        return set(keys)
     with Path(path).open("r", encoding="utf-8-sig", newline="") as handle:
         rows = list(csv.DictReader(handle))
     keys = [str(row.get("sample_key", "")) for row in rows]
@@ -75,6 +93,9 @@ def main():
     fit_manifests = [path.resolve() for path in args.fit_manifest]
     fit_sets = [manifest_keys(path) for path in fit_manifests]
     all_disjoint = True
+    overlap_counts = []
+    for current in fit_sets:
+        overlap_counts.append(len(observed.intersection(current)))
     if args.prediction_role == "development_oof":
         if len(fit_sets) < 2:
             raise ValueError(
@@ -105,7 +126,11 @@ def main():
         "oof_disjointness_audit": {
             "all_disjoint": bool(all_disjoint and args.prediction_role == "development_oof"),
             "fit_manifest_count": len(fit_manifests),
+            "prediction_fit_overlap_counts": overlap_counts,
         },
+        "unbiased_generalization_estimate": (
+            args.prediction_role == "development_oof"
+        ),
         "test_used_for_fit": False,
     }
     atomic_json(output, payload)

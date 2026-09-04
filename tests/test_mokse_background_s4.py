@@ -303,6 +303,22 @@ class MoKSEBackgroundS4Test(unittest.TestCase):
                 invalid, S4AnchoredFusionConfig(dataset="wmrc")
             )
 
+    def test_checkpoint_selection_validation_is_explicitly_exploratory(self):
+        folds = [dict(row) for row in self.fusion_folds()]
+        for row in folds:
+            row["prediction_role"] = "checkpoint_selection_validation"
+        selection = select_s4_anchored_fusion(
+            folds,
+            S4AnchoredFusionConfig(dataset="wmrc"),
+            selection_role="checkpoint_selection_validation",
+        )
+        self.assertFalse(selection["unbiased_generalization_estimate"])
+        self.assertTrue(selection["checkpoint_selection_validation_used"])
+        self.assertEqual(
+            selection["final_calibration"]["centering_source"],
+            "checkpoint_selection_validation",
+        )
+
     def test_static_promotion_is_explicitly_test_guided(self):
         s3 = [
             {"roc_auc": 0.55, "accuracy": 0.60, "auprc": 0.50,
